@@ -4,13 +4,15 @@ A top-down open-world game inspired by the original GTA games, set in St. Louis,
 
 ## 🎮 Features
 
-- **St. Louis Landmarks**: Gateway Arch District, Forest Park, Downtown, The Hill, Soulard, Central West End, and more
-- **Vehicle Physics**: Realistic acceleration, braking, steering, and drag
-- **Pedestrian Mode**: Walk around the city with WASD/Arrow controls
-- **Vehicle Mode**: Enter cars with E key, drive around with physics-based controls
-- **Minimap**: Top-right corner minimap showing the full city
-- **Save/Load**: Press F5 to save, F9 to load
-- **Camera System**: Smooth camera that follows your character
+- **9 Real St. Louis Landmarks**: Gateway Arch, Downtown & Busch Stadium, Soulard & Anheuser-Busch, Forest Park, Central West End, The Hill, Delmar Loop, Tower Grove Park, and the Grand Center Arts District — each discoverable for score
+- **Steal Any Car**: ~16 wandering traffic vehicles patrol the roads; walk up and press `E` to jack one
+- **Wanted System**: reckless driving (hitting pedestrians, traffic, or walls) raises a GTA1-style wanted level; police cars spawn from the station and chase you until you shake them or get busted
+- **NPC Pedestrians**: 24 wandering pedestrians roam the city on foot
+- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag
+- **Scrolling Camera**: follows the player or car smoothly across the full 100×100-tile map (this used to be broken — tiles/sprites were drawn at raw world coordinates instead of camera-relative ones, so the world would vanish as soon as you moved; fixed)
+- **Minimap**: top-right corner minimap showing the full city, scaled correctly to its box
+- **Save/Load**: `F5` to save, `F9` to load (JSON save file)
+- **Cartoonish visual style**: bright, saturated colors and rounded-corner sprites for a GTA1-poster feel
 
 ## 🚀 How to Run (Step by Step)
 
@@ -65,7 +67,7 @@ python main.py
 GTASTL/
 ├── main.py          # All game code (single-file prototype)
 ├── requirements.txt # Python dependencies
-├── savegame.dat     # Auto-generated save file
+├── savegame.json    # Auto-generated save file
 └── README.md        # This file
 ```
 
@@ -85,22 +87,20 @@ Make sure you're running from the correct directory: `C:\Users\lrger\Desktop\GTA
 
 ## 🛠️ Development Notes
 
-- Single-file architecture for simplicity
+- Single-file architecture for simplicity, organized around a `Game` class instead of loose globals
 - Pygame for rendering and input
-- Velocity/momentum-based physics model
+- Velocity/momentum-based physics model shared by the player's car and traffic/police cars
 - Tile-based collision detection
-- State machine for player/vehicle mode transitions
+- `Camera` class centers on the active entity (on-foot player or driven car) and clamps to map bounds; all drawing goes through `camera.apply()` / `camera.apply_pos()` so world, sprites, and minimap all move consistently
+- Simple road-following wander AI for traffic; simple chase-the-player AI for police
 
 ## 📝 Future Plans
 
-- [ ] More vehicles (different types)
-- [ ] NPC pedestrians and traffic
-- [ ] Mission system
-- [ ] Wanted level / police chase
+- [ ] Mission / job system (GTA1 had phone-booth and special-car missions)
+- [ ] More vehicle types (trucks, buses, sports cars with different handling)
 - [ ] More St. Louis landmarks and neighborhoods
 - [ ] Day/night cycle
 - [ ] Sound effects and music
-- [ ] Weapon system
 - [ ] Multiplayer support
 
 ---
