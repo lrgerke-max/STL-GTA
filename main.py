@@ -193,7 +193,6 @@ def bake_car_sprites():
 
 
 PED_SPRITES = {}
-PLAYER_PALETTE = 0          # the protagonist's fixed shirt/skin combo
 
 
 def bake_ped_sprites():
@@ -201,6 +200,7 @@ def bake_ped_sprites():
     global PED_SPRITES
     if PED_SPRITES:
         return
+    dog_bake()
     atlas = peds_bake_all()
     out = {}
     for pal, sets in atlas.items():
@@ -1142,385 +1142,418 @@ def cars_make_shadow(surface):
 # ==========================================================
 # Baked art: gfx_peds
 # ==========================================================
-"""Baked pixel-art pedestrians for a top-down GTA1-style game.
+"""Baked pixel-art pedestrians for the hybrid top-down / elevation look.
 
-Bird's-eye view: you mostly see the head (hair, plus face pixels when the ped
-faces the camera), the shoulders, and the arms / legs swinging out of the
-silhouette during the walk cycle.
-
-Everything is plotted at 1px granularity into small SRCALPHA surfaces
-(peds_SPRITE_W x peds_SPRITE_H).  No scaling, no antialiasing, no alpha gradients, so it
-survives the game's 2x nearest upscale of the 640x360 buffer.
+The camera is top-down, but people are read face-first the way the St. Louis
+reference sheets draw them: small front / back / profile figures. Each
+archetype (commuter, dog walker, sax busker, Cardinals player, hi-vis worker,
+elder with a cane, ...) is a spec of clothing palette + accessories.
+peds__figure() stamps head / torso / limbs as hard 1px rects with a 4-frame
+walk swing; one surface is baked per (archetype-variant, direction, frame).
+Diagonals reuse the profile view; the west-facing dirs are the east art
+mirrored. No antialiasing, so it survives the 2x nearest upscale.
 
 Public API
     peds_DIRS, peds_WALK_FRAMES
-    peds_PALETTES, peds_COP_PALETTE_INDEX, peds_num_palettes(), peds_random_palette_index()
-    peds_bake_all()            -> {palette_index: {'walk': [dir][frame], 'idle': [dir]}}
-    peds_dir_index(dx, dy)     -> 0..7, 0 = east, increasing clockwise (+Y is down)
-    peds_dir_index_from_angle(radians)
-    peds_make_shadow(surface)  -> hard-edged black silhouette for a SE drop shadow
+    peds_bake_all()      -> {key: {'walk': [dir][frame], 'idle': [dir]}}
+    peds_random_archetype(include_cop=False) -> key str  (e.g. "commuter#2")
+    peds_gait(key) -> float          speed multiplier for that archetype
+    peds_has_dog(key) -> bool
+    peds_dir_index(dx, dy) / peds_dir_index_from_angle(radians) -> 0..7
+    peds_make_shadow(surface)
+    PEDS_PLAYER_KEY, peds_COP_KEY
 """
 
 
-
-# --------------------------------------------------------------- dimensions
+# ------------------------------------------------------------------ geometry
 
 peds_DIRS = 8
 peds_WALK_FRAMES = 4
+peds_SPRITE_W = 16
+peds_SPRITE_H = 22
 
-peds_SPRITE_W = 13
-peds_SPRITE_H = 15
-peds_ANCHOR = (6, 7)              # body centre pixel; blit at (round(x) - 6, round(y) - 7)
-peds_CX, peds_CY = peds_ANCHOR
-
-peds_OUTLINE_COLOR = (18, 16, 18)
-peds_EYE_COLOR = (26, 22, 28)
-peds_SHADOW_ALPHA = 115           # ~45%
-peds_SHADOW_OFFSET = (2, 2)       # suggested south-east drop offset
-
-# ------------------------------------------------------------ body geometry
-# All in "body space": f = forward (facing) axis, r = the ped's right.
-
-peds_TORSO_F0 = -0.2
-peds_TORSO_AF = 2.4               # half depth  (front/back)
-peds_TORSO_AR = 3.4               # half width  (shoulder to shoulder)
-
-peds_ARM_AF = 1.5
-peds_ARM_AR = 1.25
-peds_ARM_R = 3.5                  # walk stance
-peds_ARM_R_IDLE = 3.0             # idle stance is slightly narrower
-peds_ARM_F0 = -0.2
-peds_ARM_SWING = 1.8
-peds_HAND_R = 4.2                 # arm pixels further out than this are bare hand
-
-peds_LEG_AF = 1.7
-peds_LEG_AR = 1.15
-peds_LEG_R = 1.5
-peds_LEG_R_IDLE = 1.2
-peds_LEG_F0 = -1.3                # legs sit a little behind the torso centre
-peds_LEG_SWING = 1.5
-
-peds__SWING = (0.0, 1.0, 0.0, -1.0)   # frames 0/2 pass, 1/3 are the extremes
-
-# 5x5 rounded square: the head seen from above.
-peds__HEAD_MASK = tuple((ox, oy)
-                   for oy in (-2, -1, 0, 1, 2)
-                   for ox in (-2, -1, 0, 1, 2)
-                   if not (abs(ox) == 2 and abs(oy) == 2))
-
-# Unit forward vector and integer 1px step per direction.
-peds__DIR_VEC = tuple((math.cos(d * math.pi / 4.0), math.sin(d * math.pi / 4.0))
-                 for d in range(peds_DIRS))
-peds__DIR_STEP = ((1, 0), (1, 1), (0, 1), (-1, 1),
-             (-1, 0), (-1, -1), (0, -1), (1, -1))
-
-
-def peds__mx(cells):
-    """Mirror head-local cells across the vertical axis."""
-    return [(-ox, oy) for (ox, oy) in cells]
-
-
-# Face detail stamped on top of the hair, in head-local pixels (+x east,
-# +y south).  Cells outside peds__HEAD_MASK (the nose) widen the silhouette by 1px.
-peds__FACE = {}
-peds__FACE[0] = {'skin': [(2, -1), (2, 0), (2, 1), (3, 0)],          # east profile
-            'eye': [(2, -1)]}
-peds__FACE[1] = {'skin': [(2, 0), (2, 1), (1, 1), (1, 2), (2, 2)],   # south-east
-            'eye': [(2, 0), (1, 2)]}
-peds__FACE[2] = {'skin': [(-1, 1), (0, 1), (1, 1), (0, 2)],          # south
-            'eye': [(-1, 1), (1, 1)]}
-peds__FACE[6] = {'skin': [], 'eye': []}                              # north: hair
-peds__FACE[7] = {'skin': [(2, -1)], 'eye': []}                       # north-east
-peds__FACE[3] = {'skin': peds__mx(peds__FACE[1]['skin']), 'eye': peds__mx(peds__FACE[1]['eye'])}
-peds__FACE[4] = {'skin': peds__mx(peds__FACE[0]['skin']), 'eye': peds__mx(peds__FACE[0]['eye'])}
-peds__FACE[5] = {'skin': peds__mx(peds__FACE[7]['skin']), 'eye': peds__mx(peds__FACE[7]['eye'])}
-
-# ------------------------------------------------------------------ colours
-
-peds_SKIN_A = (240, 208, 182)     # very light
-peds_SKIN_B = (214, 168, 132)
-peds_SKIN_C = (176, 126, 88)
-peds_SKIN_D = (126, 84, 56)
-peds_SKIN_E = (82, 52, 38)        # very dark
-
-peds_HAIR_BLACK = (34, 30, 34)
-peds_HAIR_DBROWN = (58, 40, 30)
-peds_HAIR_BROWN = (94, 64, 42)
-peds_HAIR_BLOND = (178, 148, 92)
-peds_HAIR_GREY = (146, 144, 142)
-peds_HAIR_AUBURN = (116, 60, 40)
-
-# Muted 90s console shirt tones, each with its shadowed shade.
-peds_SH_TEAL = ((72, 110, 108), (46, 76, 76))
-peds_SH_BRICK = ((146, 74, 58), (102, 50, 40))
-peds_SH_MUSTARD = ((174, 146, 74), (124, 102, 48))
-peds_SH_PURPLE = ((110, 92, 132), (76, 62, 94))
-peds_SH_OLIVE = ((106, 116, 72), (72, 82, 48))
-peds_SH_GREYBLUE = ((98, 116, 138), (68, 84, 104))
-peds_SH_OFFWHITE = ((206, 200, 186), (152, 146, 134))
-peds_SH_MAROON = ((108, 52, 60), (74, 34, 42))
-peds_SH_SLATE = ((86, 90, 98), (58, 62, 70))
-peds_SH_ROSE = ((162, 116, 116), (114, 78, 80))
-peds_SH_NAVY = ((46, 54, 86), (28, 34, 58))
-
-peds_PA_DENIM = (60, 70, 96)
-peds_PA_KHAKI = (138, 122, 92)
-peds_PA_GREY = (60, 60, 64)
-peds_PA_BROWN = (82, 62, 46)
-peds_PA_OLIVE = (70, 74, 54)
-peds_PA_BLACK = (42, 40, 44)
-peds_PA_NAVY = (36, 42, 66)
-
-
-def peds__pal(skin, hair, shirt, pants, hat=None, hat_brim=None):
-    p = {'skin': skin, 'hair': hair,
-         'shirt': shirt[0], 'shirt_dark': shirt[1], 'pants': pants}
-    if hat is not None:
-        p['hat'] = hat
-        p['hat_brim'] = hat_brim if hat_brim is not None else (22, 24, 38)
-    return p
-
-
-peds_PALETTES = [
-    peds__pal(peds_SKIN_A, peds_HAIR_BROWN, peds_SH_TEAL, peds_PA_DENIM),
-    peds__pal(peds_SKIN_C, peds_HAIR_BLACK, peds_SH_BRICK, peds_PA_GREY),
-    peds__pal(peds_SKIN_E, peds_HAIR_BLACK, peds_SH_MUSTARD, peds_PA_DENIM),
-    peds__pal(peds_SKIN_B, peds_HAIR_BLOND, peds_SH_PURPLE, peds_PA_KHAKI),
-    peds__pal(peds_SKIN_D, peds_HAIR_DBROWN, peds_SH_OLIVE, peds_PA_BROWN),
-    peds__pal(peds_SKIN_A, peds_HAIR_AUBURN, peds_SH_GREYBLUE, peds_PA_GREY),
-    peds__pal(peds_SKIN_C, peds_HAIR_GREY, peds_SH_OFFWHITE, peds_PA_OLIVE),
-    peds__pal(peds_SKIN_E, peds_HAIR_BLACK, peds_SH_MAROON, peds_PA_BLACK),
-    peds__pal(peds_SKIN_B, peds_HAIR_BROWN, peds_SH_SLATE, peds_PA_DENIM),
-    peds__pal(peds_SKIN_D, peds_HAIR_BLACK, peds_SH_ROSE, peds_PA_KHAKI),
-    # Police officer: dark navy uniform and peaked cap.
-    peds__pal(peds_SKIN_C, peds_HAIR_BLACK, peds_SH_NAVY, peds_PA_NAVY, hat=(38, 44, 72)),
-]
-
-peds_COP_PALETTE_INDEX = len(peds_PALETTES) - 1
-
-
-def peds_num_palettes():
-    """Number of available ped palettes (cop included)."""
-    return len(peds_PALETTES)
-
-
-def peds_random_palette_index(include_cop=False):
-    """Pick a civilian palette index, or any palette when include_cop."""
-    if include_cop:
-        return random.randrange(len(peds_PALETTES))
-    return random.randrange(peds_COP_PALETTE_INDEX)
-
-
-# ---------------------------------------------------------------- materials
-
-peds_M_EMPTY = 0
-peds_M_OUTLINE = 1
-peds_M_SKIN = 2
-peds_M_HAIR = 3
-peds_M_SHIRT = 4
-peds_M_SHIRT_D = 5
-peds_M_PANTS = 6
-peds_M_EYE = 7
-peds_M_HAT = 8
-peds_M_BRIM = 9
-
-
-def peds__material_color(mat, pal):
-    if mat == peds_M_OUTLINE:
-        return peds_OUTLINE_COLOR
-    if mat == peds_M_SKIN:
-        return pal['skin']
-    if mat == peds_M_HAIR:
-        return pal['hair']
-    if mat == peds_M_SHIRT:
-        return pal['shirt']
-    if mat == peds_M_SHIRT_D:
-        return pal['shirt_dark']
-    if mat == peds_M_PANTS:
-        return pal['pants']
-    if mat == peds_M_EYE:
-        return peds_EYE_COLOR
-    if mat == peds_M_HAT:
-        return pal.get('hat', pal['hair'])
-    if mat == peds_M_BRIM:
-        return pal.get('hat_brim', peds_OUTLINE_COLOR)
-    return None
+peds_SHADOW_ALPHA = 115
+peds__OUTLINE = (18, 16, 18)
+peds__EYE = (24, 20, 26)
+peds__SWING = (0, 1, 0, -1)          # frames 0/2 pass, 1/3 the stride extremes
 
 
 # --------------------------------------------------------------- directions
-
 def peds_dir_index_from_angle(radians):
-    """0..7 from an angle. 0 = east, increasing clockwise on screen."""
+    """0..7 from an angle. 0 = east, increasing clockwise (+Y is down)."""
     return int(math.floor(radians / (math.pi / 4.0) + 0.5)) % peds_DIRS
 
 
 def peds_dir_index(dx, dy):
-    """0..7 from a movement vector. +X is east, +Y is DOWN (south)."""
+    """0..7 from a movement vector. +X east, +Y south."""
     if dx == 0 and dy == 0:
-        return 2                      # default: facing the camera
+        return 2                          # default: facing the camera
     return peds_dir_index_from_angle(math.atan2(dy, dx))
 
 
-# ------------------------------------------------------------- map building
-
-def peds__ell(f, r, f0, r0, af, ar):
-    df = (f - f0) / af
-    dr = (r - r0) / ar
-    return df * df + dr * dr <= 1.0
-
-
-def peds__put(grid, x, y, mat):
-    if 0 <= x < peds_SPRITE_W and 0 <= y < peds_SPRITE_H:
-        grid[y][x] = mat
+#: dir -> (view, mirror). 0=E 1=SE 2=S 3=SW 4=W 5=NW 6=N 7=NE
+peds__DIR_VIEW = (
+    ('side', False), ('side', False), ('front', False), ('side', True),
+    ('side', True),  ('back', True),  ('back', False),  ('back', False),
+)
 
 
-def peds__get(grid, x, y):
-    if 0 <= x < peds_SPRITE_W and 0 <= y < peds_SPRITE_H:
-        return grid[y][x]
-    return peds_M_EMPTY
+# ------------------------------------------------------------------ palette
+peds__SKIN = (
+    ((242, 210, 184), (206, 170, 144)),
+    ((224, 180, 142), (188, 144, 110)),
+    ((192, 142, 102), (154, 108, 74)),
+    ((150, 104, 72),  (116, 76, 50)),
+    ((104, 70, 48),   (76, 48, 32)),
+)
+# Kept a clear step above the (18,16,18) outline so small heads still read.
+peds__HAIR = {
+    'black': (52, 46, 54), 'dbrown': (74, 52, 40), 'brown': (110, 78, 50),
+    'blond': (190, 158, 100), 'grey': (176, 174, 170), 'auburn': (132, 72, 48),
+}
+peds__HAIR_POOL = ('black', 'dbrown', 'brown', 'blond', 'auburn', 'black', 'dbrown')
+
+# shirt (base, shade)
+_TEAL = ((70, 112, 108), (44, 78, 76))
+_GREYBLUE = ((96, 118, 140), (62, 84, 104))
+_OLIVE = ((104, 116, 70), (68, 82, 46))
+_MAROON = ((122, 52, 58), (84, 34, 42))
+_PURPLE = ((114, 92, 138), (78, 62, 98))
+_BRICKY = ((162, 84, 62), (114, 56, 42))
+_ROSE = ((180, 122, 124), (128, 82, 86))
+_MUSTARD = ((198, 162, 74), (140, 112, 46))
+_OFFWHT = ((216, 210, 196), (168, 162, 150))
+_SLATE = ((92, 98, 108), (60, 64, 74))
+_NAVY = ((48, 58, 92), (30, 38, 64))
+_CHARC = ((66, 64, 70), (44, 42, 48))
+_CARDS = ((228, 226, 218), (196, 194, 186))         # Cardinals home whites
+
+_PA_DENIM = (58, 70, 98)
+_PA_KHAKI = (152, 134, 100)
+_PA_GREY = (76, 76, 82)
+_PA_BROWN = (86, 64, 46)
+_PA_BLACK = (44, 42, 48)
+_PA_NAVY = (40, 46, 74)
+_PA_CHARC = (56, 54, 60)
+_PA_CARDS = (222, 220, 212)
+
+_SHOE = (42, 40, 44)
+_SAX = (224, 184, 74)
+_SAX_D = (150, 118, 42)
+_HIVIS = (234, 122, 42)
+_HIVIS_LT = (236, 232, 216)
+_HARDHAT = (236, 200, 68)
+_BAT = (200, 158, 106)
+_FEDORA = (52, 44, 46)
 
 
-def peds__build_map(d, kind, frame, cap):
-    """Return a peds_SPRITE_H x peds_SPRITE_W grid of material ids."""
-    fx, fy = peds__DIR_VEC[d]
-    rx, ry = -fy, fx
+def peds__dk(c, t=0.64):
+    return (int(c[0] * t), int(c[1] * t), int(c[2] * t))
 
-    if kind == 'idle':
-        swing, arm_r, leg_r = 0.0, peds_ARM_R_IDLE, peds_LEG_R_IDLE
+
+#: archetype -> spawn spec. w = spawn weight, gait = speed x, acc = accessory
+#: set, sh / pa = clothing colour choices indexed by the ped's variant number.
+peds_ARCHETYPES = {
+    'commuter':   dict(w=3, gait=1.00, acc=('shoulder_bag',),
+                       sh=(_TEAL, _GREYBLUE, _OLIVE),   pa=(_PA_KHAKI, _PA_GREY, _PA_DENIM)),
+    'suit':       dict(w=2, gait=1.05, acc=('briefcase',),
+                       sh=(_SLATE, _NAVY, _CHARC),      pa=(_PA_CHARC, _PA_NAVY, _PA_GREY)),
+    'streetwear': dict(w=3, gait=1.12, acc=('hood',),
+                       sh=(_MAROON, _PURPLE, _BRICKY),  pa=(_PA_DENIM, _PA_BLACK, _PA_GREY)),
+    'shopper':    dict(w=2, gait=0.85, acc=('totes',),
+                       sh=(_ROSE, _MUSTARD, _OFFWHT),   pa=(_PA_DENIM, _PA_KHAKI, _PA_GREY)),
+    'dog_walker': dict(w=2, gait=0.95, acc=(), dog=True,
+                       sh=(_OLIVE, _TEAL, _BRICKY),     pa=(_PA_DENIM, _PA_KHAKI, _PA_GREY)),
+    'elder':      dict(w=2, gait=0.55, acc=('cane',), hair='grey',
+                       sh=(_OFFWHT, _GREYBLUE, _SLATE), pa=(_PA_GREY, _PA_KHAKI, _PA_BROWN)),
+    'hi_vis':     dict(w=1, gait=0.90, acc=('hardhat', 'hivis'),
+                       sh=(_MUSTARD, _MUSTARD, _MUSTARD), pa=(_PA_DENIM, _PA_BROWN, _PA_GREY)),
+    'jogger':     dict(w=1, gait=1.80, acc=('cap',),
+                       sh=(_TEAL, _ROSE, _OFFWHT),      pa=(_PA_BLACK, _PA_NAVY, _PA_GREY)),
+    'tourist':    dict(w=2, gait=0.80, acc=('cap', 'shoulder_bag'),
+                       sh=(_MUSTARD, _TEAL, _OFFWHT),   pa=(_PA_KHAKI, _PA_DENIM, _PA_GREY)),
+    'busker_sax': dict(w=1, gait=0.24, acc=('fedora', 'sax'),
+                       sh=(_MAROON, _SLATE, _BRICKY),   pa=(_PA_CHARC, _PA_BROWN, _PA_BLACK)),
+    'cardinals':  dict(w=1, gait=1.00, acc=('cap', 'bat'), cap=(176, 42, 44),
+                       sh=(_CARDS, _CARDS, _CARDS),     pa=(_PA_CARDS, _PA_CARDS, _PA_CARDS)),
+}
+
+peds_COP_KEY = 'cop#0'
+PEDS_PLAYER_KEY = 'player#0'
+peds__SPECIAL = {
+    'cop':    dict(gait=1.0, acc=('cap',), cap=(40, 48, 78),
+                   sh=(_NAVY,), pa=(_PA_NAVY,)),
+    'player': dict(gait=1.0, acc=('jacket',),
+                   sh=(((96, 48, 46), (64, 32, 30)),), pa=(_PA_DENIM,)),
+}
+peds__VARIANTS = 3
+
+
+def peds__arch_spec(arch):
+    return peds_ARCHETYPES.get(arch) or peds__SPECIAL[arch]
+
+
+peds__SPEC_CACHE = {}
+
+
+def peds__resolve(key):
+    """Concrete per-ped colour + accessory spec for a "<archetype>#<variant>" key."""
+    hit = peds__SPEC_CACHE.get(key)
+    if hit is not None:
+        return hit
+    arch, _, vs = key.partition('#')
+    v = int(vs or 0)
+    base = peds__arch_spec(arch)
+    acc = set(base.get('acc', ()))
+    salt = sum(ord(ch) for ch in arch)
+    sh = base['sh'][v % len(base['sh'])]
+    pa = base['pa'][v % len(base['pa'])]
+    skin, skin_d = peds__SKIN[_hash2(salt, v, 5) % len(peds__SKIN)]
+    hair_name = base.get('hair') or peds__HAIR_POOL[_hash2(salt, v, 9) % len(peds__HAIR_POOL)]
+    if 'hivis' in acc:
+        accent, accent_d = _HIVIS, peds__dk(_HIVIS)
+    elif arch == 'shopper':
+        accent = ((182, 92, 72), (74, 132, 150), (204, 172, 82))[v % 3]
+        accent_d = peds__dk(accent)
+    elif 'bat' in acc:
+        accent, accent_d = _BAT, peds__dk(_BAT)
+    elif 'jacket' in acc:
+        accent, accent_d = (96, 48, 46), (58, 30, 28)
     else:
-        swing, arm_r, leg_r = peds__SWING[frame % peds_WALK_FRAMES], peds_ARM_R, peds_LEG_R
+        accent, accent_d = (150, 120, 86), (96, 74, 52)
+    if 'hardhat' in acc:
+        hat, hat_d = _HARDHAT, peds__dk(_HARDHAT)
+    elif 'fedora' in acc:
+        hat, hat_d = _FEDORA, peds__dk(_FEDORA, 0.6)
+    else:
+        hat = base.get('cap', (60, 62, 72))
+        hat_d = peds__dk(hat, 0.6)
+    spec = dict(acc=acc, skin=skin, skin_d=skin_d, hair=peds__HAIR[hair_name],
+                shirt=sh[0], shirt_d=sh[1], pants=pa, pants_d=peds__dk(pa, 0.72),
+                shoe=_SHOE, accent=accent, accent_d=accent_d, hat=hat, hat_d=hat_d)
+    peds__SPEC_CACHE[key] = spec
+    return spec
 
-    arm_lf = peds_ARM_F0 + swing * peds_ARM_SWING      # ped's left arm
-    arm_rf = peds_ARM_F0 - swing * peds_ARM_SWING      # ped's right arm
-    leg_lf = peds_LEG_F0 - swing * peds_LEG_SWING      # legs counter-swing the arms
-    leg_rf = peds_LEG_F0 + swing * peds_LEG_SWING
 
-    grid = [[peds_M_EMPTY] * peds_SPRITE_W for _ in range(peds_SPRITE_H)]
+# ---------------------------------------------------------------- materials
+(M_E, M_OUT, M_SKIN, M_SKIN_D, M_HAIR, M_HAIR_LT, M_SH, M_SH_D, M_PA, M_PA_D,
+ M_SHOE, M_EYE, M_HAT, M_HAT_D, M_ACC, M_ACC_D, M_MET, M_MET_D, M_LT) = range(19)
 
+
+def _lt(c, t=1.34):
+    return (min(255, int(c[0] * t)), min(255, int(c[1] * t)), min(255, int(c[2] * t)))
+
+
+def peds__colmap(spec):
+    return {
+        M_OUT: peds__OUTLINE, M_SKIN: spec['skin'], M_SKIN_D: spec['skin_d'],
+        M_HAIR: spec['hair'], M_HAIR_LT: _lt(spec['hair'], 1.28),
+        M_SH: spec['shirt'], M_SH_D: spec['shirt_d'],
+        M_PA: spec['pants'], M_PA_D: spec['pants_d'], M_SHOE: spec['shoe'],
+        M_EYE: peds__EYE, M_HAT: spec['hat'], M_HAT_D: spec['hat_d'],
+        M_ACC: spec['accent'], M_ACC_D: spec['accent_d'],
+        M_MET: _SAX, M_MET_D: _SAX_D, M_LT: _HIVIS_LT,
+    }
+
+
+# ------------------------------------------------------------- figure stamp
+def peds__mk():
+    return [[M_E] * peds_SPRITE_W for _ in range(peds_SPRITE_H)]
+
+
+def peds__gx(g, x, y):
+    if 0 <= x < peds_SPRITE_W and 0 <= y < peds_SPRITE_H:
+        return g[y][x]
+    return M_E
+
+
+def peds__p(g, x, y, m):
+    if 0 <= x < peds_SPRITE_W and 0 <= y < peds_SPRITE_H:
+        g[y][x] = m
+
+
+def peds__r(g, x0, y0, x1, y1, m):
+    if x1 < x0:
+        x0, x1 = x1, x0
+    if y1 < y0:
+        y0, y1 = y1, y0
+    for y in range(max(0, y0), min(peds_SPRITE_H, y1 + 1)):
+        row = g[y]
+        for x in range(max(0, x0), min(peds_SPRITE_W, x1 + 1)):
+            row[x] = m
+
+
+def peds__fig_front(g, spec, s):
+    o = -1 if s else 0                     # 1px bounce at the stride extreme
+    acc = spec['acc']
+    if 'hood' in acc:
+        peds__r(g, 3, 2 + o, 12, 8 + o, M_SH)
+    peds__r(g, 5, 2 + o, 10, 7 + o, M_HAIR)
+    peds__r(g, 5, 2 + o, 10, 2 + o, M_HAIR_LT)     # top-of-head sheen
+    peds__r(g, 6, 4 + o, 9, 7 + o, M_SKIN)
+    peds__p(g, 5, 5 + o, M_SKIN)
+    peds__p(g, 10, 5 + o, M_SKIN)
+    peds__p(g, 6, 5 + o, M_EYE)
+    peds__p(g, 9, 5 + o, M_EYE)
+    peds__r(g, 7, 8 + o, 8, 8 + o, M_SKIN)
+    peds__r(g, 4, 9 + o, 11, 9 + o, M_SH)
+    peds__r(g, 5, 9 + o, 10, 15 + o, M_SH)
+    lh = 1 if s > 0 else 0
+    rh = 1 if s < 0 else 0
+    peds__r(g, 3, 10 + o, 4, 13 + o + lh, M_SH)
+    peds__r(g, 3, 14 + o + lh, 4, 15 + o + lh, M_SKIN)
+    peds__r(g, 11, 10 + o, 12, 13 + o + rh, M_SH)
+    peds__r(g, 11, 14 + o + rh, 12, 15 + o + rh, M_SKIN)
+    ll = 1 if s < 0 else 0
+    rl = 1 if s > 0 else 0
+    peds__r(g, 5, 16 + o, 7, 19 + o + ll, M_PA)
+    peds__r(g, 8, 16 + o, 10, 19 + o + rl, M_PA)
+    peds__r(g, 5, 20 + o + ll, 7, 20 + o + ll, M_SHOE)
+    peds__r(g, 8, 20 + o + rl, 10, 20 + o + rl, M_SHOE)
+
+
+def peds__fig_back(g, spec, s):
+    o = -1 if s else 0
+    acc = spec['acc']
+    if 'hood' in acc:
+        peds__r(g, 3, 2 + o, 12, 8 + o, M_SH)
+    peds__r(g, 4, 2 + o, 11, 9 + o, M_HAIR)          # bigger head on the back view
+    peds__r(g, 4, 2 + o, 11, 2 + o, M_HAIR_LT)
+    peds__r(g, 4, 10 + o, 11, 10 + o, M_SH)          # shoulders
+    peds__r(g, 5, 10 + o, 10, 15 + o, M_SH)
+    if 'jacket' in acc:
+        peds__r(g, 5, 10 + o, 10, 14 + o, M_ACC)
+    lh = 1 if s > 0 else 0
+    rh = 1 if s < 0 else 0
+    peds__r(g, 3, 10 + o, 4, 15 + o + lh, M_SH)
+    peds__r(g, 11, 10 + o, 12, 15 + o + rh, M_SH)
+    ll = 1 if s < 0 else 0
+    rl = 1 if s > 0 else 0
+    peds__r(g, 5, 16 + o, 7, 19 + o + ll, M_PA)
+    peds__r(g, 8, 16 + o, 10, 19 + o + rl, M_PA)
+    peds__r(g, 5, 20 + o + ll, 7, 20 + o + ll, M_SHOE)
+    peds__r(g, 8, 20 + o + rl, 10, 20 + o + rl, M_SHOE)
+
+
+def peds__fig_side(g, spec, s):
+    o = -1 if s else 0
+    acc = spec['acc']
+    if 'hood' in acc:
+        peds__r(g, 4, 2 + o, 11, 8 + o, M_SH)
+    peds__r(g, 5, 2 + o, 10, 7 + o, M_HAIR)
+    peds__r(g, 5, 2 + o, 10, 2 + o, M_HAIR_LT)
+    peds__r(g, 8, 4 + o, 10, 7 + o, M_SKIN)
+    peds__p(g, 11, 5 + o, M_SKIN)
+    peds__p(g, 9, 5 + o, M_EYE)
+    peds__r(g, 7, 8 + o, 8, 8 + o, M_SKIN)
+    peds__r(g, 6, 9 + o, 10, 15 + o, M_SH)
+    peds__r(g, 6, 10 + o, 6, 14 + o, M_SH_D)
+    ax = 8 + s
+    peds__r(g, ax, 10 + o, ax + 1, 13 + o, M_SH)
+    peds__r(g, ax, 14 + o, ax + 1, 15 + o, M_SKIN)
+    nx = 8 + max(0, s)
+    fx = 6 - max(0, -s)
+    peds__r(g, fx, 16 + o, fx + 2, 19 + o, M_PA_D)
+    peds__r(g, fx, 20 + o, fx + 2, 20 + o, M_SHOE)
+    peds__r(g, nx, 16 + o, nx + 2, 19 + o, M_PA)
+    peds__r(g, nx, 20 + o, nx + 2, 20 + o, M_SHOE)
+
+
+def peds__acc(g, view, spec, s):
+    acc = spec['acc']
+    o = -1 if s else 0
+    if 'fedora' in acc:
+        peds__r(g, 3, 3 + o, 12, 3 + o, M_HAT_D)
+        peds__r(g, 5, 1 + o, 10, 3 + o, M_HAT)
+    if 'cap' in acc:
+        peds__r(g, 5, 2 + o, 10, 3 + o, M_HAT)
+        if view == 'front':
+            peds__r(g, 6, 4 + o, 9, 4 + o, M_HAT_D)
+        elif view == 'side':
+            peds__r(g, 10, 3 + o, 12, 3 + o, M_HAT_D)
+    if 'hardhat' in acc:
+        peds__r(g, 5, 1 + o, 10, 3 + o, M_HAT)
+        peds__r(g, 4, 3 + o, 11, 3 + o, M_HAT_D)
+    if 'hivis' in acc:
+        if view == 'side':
+            peds__r(g, 6, 9 + o, 10, 15 + o, M_ACC)
+            peds__r(g, 6, 12 + o, 10, 12 + o, M_LT)
+        else:
+            peds__r(g, 5, 9 + o, 10, 15 + o, M_ACC)
+            peds__r(g, 5, 11 + o, 10, 11 + o, M_LT)
+            peds__r(g, 5, 14 + o, 10, 14 + o, M_LT)
+    if 'shoulder_bag' in acc and view != 'back':
+        for k in range(6):
+            peds__p(g, 4 + k, 9 + o + k, M_ACC_D)
+        peds__r(g, 10, 13 + o, 12, 16 + o, M_ACC)
+    if 'briefcase' in acc and view != 'back':
+        peds__r(g, 12, 13 + o, 14, 16 + o, M_ACC)
+        peds__p(g, 13, 12 + o, M_OUT)
+    if 'totes' in acc and view != 'back':
+        peds__r(g, 2, 14 + o, 4, 17 + o, M_ACC)
+        peds__r(g, 12, 14 + o, 14, 17 + o, M_ACC_D)
+    if 'cane' in acc and view != 'back':
+        for k in range(8):
+            peds__p(g, 13, 13 + o + k, M_MET_D)
+        peds__p(g, 12, 13 + o, M_MET_D)
+    if 'sax' in acc and view != 'back':
+        peds__r(g, 10, 9 + o, 11, 13 + o, M_MET)
+        peds__p(g, 12, 13 + o, M_MET)
+        peds__p(g, 12, 14 + o, M_MET)
+        peds__p(g, 11, 15 + o, M_MET)
+        peds__p(g, 11, 8 + o, M_MET_D)
+    if 'bat' in acc:
+        for k in range(7):
+            peds__p(g, 10 + k // 2, 9 + o - k, M_ACC)
+    if 'jacket' in acc and view == 'front':
+        peds__r(g, 5, 9 + o, 10, 14 + o, M_ACC)
+        peds__r(g, 7, 9 + o, 8, 14 + o, M_ACC_D)
+
+
+def peds__shade(g):
+    hits = []
     for y in range(peds_SPRITE_H):
-        py = y - peds_CY
-        row = grid[y]
         for x in range(peds_SPRITE_W):
-            px = x - peds_CX
-            f = px * fx + py * fy
-            r = px * rx + py * ry
-            if peds__ell(f, r, peds_TORSO_F0, 0.0, peds_TORSO_AF, peds_TORSO_AR):
-                mat = peds_M_SHIRT
-            elif peds__ell(f, r, arm_lf, -arm_r, peds_ARM_AF, peds_ARM_AR):
-                mat = peds_M_SKIN if -r >= peds_HAND_R else peds_M_SHIRT
-            elif peds__ell(f, r, arm_rf, arm_r, peds_ARM_AF, peds_ARM_AR):
-                mat = peds_M_SKIN if r >= peds_HAND_R else peds_M_SHIRT
-            elif peds__ell(f, r, leg_lf, -leg_r, peds_LEG_AF, peds_LEG_AR):
-                mat = peds_M_PANTS
-            elif peds__ell(f, r, leg_rf, leg_r, peds_LEG_AF, peds_LEG_AR):
-                mat = peds_M_PANTS
-            else:
-                mat = peds_M_EMPTY
-            row[x] = mat
-
-    peds__stamp_head(grid, d, cap)
-    peds__shade_shirt(grid)
-    peds__add_outline(grid)
-    return grid
+            m = g[y][x]
+            if m == M_SH and (peds__gx(g, x + 1, y) == M_E or peds__gx(g, x, y + 1) == M_E):
+                hits.append((x, y, M_SH_D))
+            elif m == M_PA and (peds__gx(g, x + 1, y) == M_E or peds__gx(g, x, y + 1) == M_E):
+                hits.append((x, y, M_PA_D))
+    for x, y, m in hits:
+        g[y][x] = m
 
 
-def peds__stamp_head(grid, d, cap):
-    """Hair blob shifted 1px toward the facing, then face detail, then the cap."""
-    sx, sy = peds__DIR_STEP[d]
-    hx, hy = peds_CX + sx, peds_CY + sy
-
-    for ox, oy in peds__HEAD_MASK:
-        peds__put(grid, hx + ox, hy + oy, peds_M_HAIR)
-
-    face = peds__FACE[d]
-    for ox, oy in face['skin']:
-        peds__put(grid, hx + ox, hy + oy, peds_M_SKIN)
-    for ox, oy in face['eye']:
-        peds__put(grid, hx + ox, hy + oy, peds_M_EYE)
-
-    if not cap:
-        return
-
-    # Peaked cap: every remaining hair pixel becomes cap...
-    hat = []
-    for ox, oy in peds__HEAD_MASK:
-        x, y = hx + ox, hy + oy
-        if peds__get(grid, x, y) == peds_M_HAIR:
-            peds__put(grid, x, y, peds_M_HAT)
-            hat.append((x, y))
-    # ...and the cap pixels along the leading edge become the brim.
-    for x, y in hat:
-        if peds__get(grid, x + sx, y + sy) != peds_M_HAT:
-            peds__put(grid, x, y, peds_M_BRIM)
-
-
-def peds__shade_shirt(grid):
-    """1px darker rim on the south-east side of the shirt (light from NW)."""
-    dark = []
-    for y in range(peds_SPRITE_H):
-        for x in range(peds_SPRITE_W):
-            if grid[y][x] != peds_M_SHIRT:
-                continue
-            if peds__get(grid, x + 1, y) == peds_M_EMPTY or peds__get(grid, x, y + 1) == peds_M_EMPTY:
-                dark.append((x, y))
-    for x, y in dark:
-        grid[y][x] = peds_M_SHIRT_D
-
-
-def peds__add_outline(grid):
-    """1px near-black outline around the whole silhouette (8-connected)."""
+def peds__outline(g):
     edge = []
     for y in range(peds_SPRITE_H):
         for x in range(peds_SPRITE_W):
-            if grid[y][x] != peds_M_EMPTY:
+            if g[y][x] != M_E:
                 continue
-            hit = False
+            found = False
             for oy in (-1, 0, 1):
                 for ox in (-1, 0, 1):
-                    if ox == 0 and oy == 0:
-                        continue
-                    if peds__get(grid, x + ox, y + oy) != peds_M_EMPTY:
-                        hit = True
+                    if (ox or oy) and peds__gx(g, x + ox, y + oy) not in (M_E, M_OUT):
+                        found = True
                         break
-                if hit:
+                if found:
                     break
-            if hit:
+            if found:
                 edge.append((x, y))
     for x, y in edge:
-        grid[y][x] = peds_M_OUTLINE
+        g[y][x] = M_OUT
 
 
-# ------------------------------------------------------------------- baking
-
-peds__MAPS = None      # {(cap, dir, kind, frame): grid}
-peds__BAKED = None     # {palette_index: {'walk': [dir][frame], 'idle': [dir]}}
-
-
-def peds__all_maps():
-    global peds__MAPS
-    if peds__MAPS is not None:
-        return peds__MAPS
-    maps = {}
-    for cap in (False, True):
-        for d in range(peds_DIRS):
-            for frame in range(peds_WALK_FRAMES):
-                maps[(cap, d, 'walk', frame)] = peds__build_map(d, 'walk', frame, cap)
-            maps[(cap, d, 'idle', 0)] = peds__build_map(d, 'idle', 0, cap)
-    peds__MAPS = maps
-    return maps
-
-
-def peds__surface_from_map(grid, pal):
+def peds__surface(g, spec):
+    cm = peds__colmap(spec)
     surf = pygame.Surface((peds_SPRITE_W, peds_SPRITE_H), pygame.SRCALPHA)
     for y in range(peds_SPRITE_H):
-        row = grid[y]
         for x in range(peds_SPRITE_W):
-            mat = row[x]
-            if mat == peds_M_EMPTY:
+            m = g[y][x]
+            if m == M_E:
                 continue
-            col = peds__material_color(mat, pal)
-            if col is not None:
-                surf.set_at((x, y), (col[0], col[1], col[2], 255))
+            c = cm.get(m)
+            if c is not None:
+                surf.set_at((x, y), (c[0], c[1], c[2], 255))
     if pygame.display.get_init() and pygame.display.get_surface() is not None:
         try:
             surf = surf.convert_alpha()
@@ -1529,32 +1562,83 @@ def peds__surface_from_map(grid, pal):
     return surf
 
 
+def peds__build(view, s, key):
+    spec = peds__resolve(key)
+    g = peds__mk()
+    if view == 'front':
+        peds__fig_front(g, spec, s)
+    elif view == 'back':
+        peds__fig_back(g, spec, s)
+    else:
+        peds__fig_side(g, spec, s)
+    peds__acc(g, view, spec, s)
+    peds__shade(g)
+    peds__outline(g)
+    return peds__surface(g, spec)
+
+
+# ------------------------------------------------------------------- baking
+peds__BAKED = None
+
+
+def peds__all_keys():
+    keys = [f"{a}#{v}" for a in peds_ARCHETYPES for v in range(peds__VARIANTS)]
+    keys += [peds_COP_KEY, PEDS_PLAYER_KEY]
+    return keys
+
+
 def peds_bake_all():
-    """Bake once, return {palette_index: {'walk': [dir][frame], 'idle': [dir]}}."""
+    """Bake once -> {key: {'walk': [dir][frame], 'idle': [dir]}}."""
     global peds__BAKED
     if peds__BAKED is not None:
         return peds__BAKED
-
-    maps = peds__all_maps()
-    baked = {}
-    for pi, pal in enumerate(peds_PALETTES):
-        cap = 'hat' in pal
-        walk = []
-        idle = []
+    out = {}
+    for key in peds__all_keys():
+        walk, idle = [], []
         for d in range(peds_DIRS):
-            walk.append([peds__surface_from_map(maps[(cap, d, 'walk', fr)], pal)
-                         for fr in range(peds_WALK_FRAMES)])
-            idle.append(peds__surface_from_map(maps[(cap, d, 'idle', 0)], pal))
-        baked[pi] = {'walk': walk, 'idle': idle}
-    peds__BAKED = baked
-    return baked
+            view, mir = peds__DIR_VIEW[d]
+            frames = []
+            for fr in range(peds_WALK_FRAMES):
+                surf = peds__build(view, peds__SWING[fr], key)
+                if mir:
+                    surf = pygame.transform.flip(surf, True, False)
+                frames.append(surf)
+            walk.append(frames)
+            isurf = peds__build(view, 0, key)
+            if mir:
+                isurf = pygame.transform.flip(isurf, True, False)
+            idle.append(isurf)
+        out[key] = {'walk': walk, 'idle': idle}
+    peds__BAKED = out
+    return out
 
 
 def peds_clear_cache():
     """Drop the baked sheets (e.g. after a display mode change)."""
-    global peds__BAKED, peds__MAPS
+    global peds__BAKED
     peds__BAKED = None
-    peds__MAPS = None
+    peds__SPEC_CACHE.clear()
+
+
+peds__WEIGHTED = []
+for _a, _s in peds_ARCHETYPES.items():
+    peds__WEIGHTED += [_a] * _s['w']
+
+
+def peds_random_archetype(include_cop=False):
+    """A weighted-random "<archetype>#<variant>" key for a fresh pedestrian."""
+    if include_cop and random.random() < 0.08:
+        return peds_COP_KEY
+    a = random.choice(peds__WEIGHTED)
+    return f"{a}#{random.randrange(peds__VARIANTS)}"
+
+
+def peds_gait(key):
+    return peds__arch_spec(key.split('#')[0])['gait']
+
+
+def peds_has_dog(key):
+    return bool(peds__arch_spec(key.split('#')[0]).get('dog'))
 
 
 def peds_make_shadow(surface):
@@ -1566,6 +1650,113 @@ def peds_make_shadow(surface):
             if surface.get_at((x, y))[3] >= 128:
                 out.set_at((x, y), (0, 0, 0, peds_SHADOW_ALPHA))
     return out
+
+
+# ==========================================================
+# Baked art: gfx_followers
+# ==========================================================
+"""A trailing dog for the dog_walker ped: a 13x9 side-view sprite in 4 compass
+facings (east authored, west mirrored, north/south rotated) with a 2-frame
+trot. Baked once alongside the peds."""
+
+dog_DIRS = 4                    # 0=E 1=S 2=W 3=N
+dog_FRAMES = 2
+dog__W, dog__H = 13, 9
+dog__OUT = (18, 16, 18)
+dog__COLORS = (
+    ((120, 84, 52), (88, 60, 38)),        # brown
+    ((60, 54, 52), (40, 36, 36)),         # black
+    ((182, 156, 116), (140, 116, 82)),    # tan
+    ((206, 202, 192), (166, 162, 152)),   # white
+)
+dog__BAKED = None
+
+
+def dog__grid(frame, base, dark):
+    g = [[None] * dog__W for _ in range(dog__H)]
+
+    def r(x0, y0, x1, y1, c):
+        for y in range(y0, y1 + 1):
+            for x in range(x0, x1 + 1):
+                if 0 <= x < dog__W and 0 <= y < dog__H:
+                    g[y][x] = c
+
+    r(3, 3, 8, 6, base)             # body
+    r(8, 2, 10, 5, base)            # head (facing east)
+    g[4][11] = base                 # snout
+    g[2][8] = dark                  # ear
+    g[3][2] = dark
+    g[2][2] = dark                  # tail, up
+    g[3][10] = dog__OUT             # eye
+    lo = frame                      # legs alternate between the two frames
+    r(4, 7, 4, 8 - lo, dark)
+    r(7, 7, 7, 7 + lo, dark)
+    r(5, 7, 5, 7 + (1 - lo), dark)
+    r(8, 7, 8, 8 - (1 - lo), dark)
+    edge = []
+    for y in range(dog__H):
+        for x in range(dog__W):
+            if g[y][x] is not None:
+                continue
+            if any(0 <= x + ox < dog__W and 0 <= y + oy < dog__H
+                   and g[y + oy][x + ox] not in (None, dog__OUT)
+                   for ox in (-1, 0, 1) for oy in (-1, 0, 1) if ox or oy):
+                edge.append((x, y))
+    for x, y in edge:
+        g[y][x] = dog__OUT
+    return g
+
+
+def dog__surface(g):
+    surf = pygame.Surface((dog__W, dog__H), pygame.SRCALPHA)
+    for y in range(dog__H):
+        for x in range(dog__W):
+            c = g[y][x]
+            if c is not None:
+                surf.set_at((x, y), (c[0], c[1], c[2], 255))
+    if pygame.display.get_init() and pygame.display.get_surface() is not None:
+        try:
+            surf = surf.convert_alpha()
+        except pygame.error:
+            pass
+    return surf
+
+
+def dog_bake():
+    """Bake once -> {colour_index: [dir][frame] -> (sprite, shadow)}."""
+    global dog__BAKED
+    if dog__BAKED is not None:
+        return dog__BAKED
+    out = {}
+    for ci, (base, dark) in enumerate(dog__COLORS):
+        dirs = []
+        for d in range(dog_DIRS):
+            frames = []
+            for fr in range(dog_FRAMES):
+                s = dog__surface(dog__grid(fr, base, dark))
+                if d == 2:
+                    s = pygame.transform.flip(s, True, False)
+                elif d == 1:
+                    s = pygame.transform.rotate(s, -90)
+                elif d == 3:
+                    s = pygame.transform.rotate(s, 90)
+                frames.append((s, peds_make_shadow(s)))
+            dirs.append(frames)
+        out[ci] = dirs
+    dog__BAKED = out
+    return out
+
+
+def dog_dir_index(dx, dy):
+    if abs(dx) >= abs(dy):
+        return 0 if dx >= 0 else 2
+    return 1 if dy >= 0 else 3
+
+
+def dog_sprite(ci, facing, anim):
+    dirs = (dog__BAKED or dog_bake())[ci % len(dog__COLORS)]
+    return dirs[facing % dog_DIRS][int(anim) % dog_FRAMES]
+
 
 
 # ==========================================================
@@ -5829,18 +6020,52 @@ class Car:
         screen.blit(sprite, rect)
 
 
+class Follower:
+    """A pet/child that trails a pedestrian a fixed distance behind. Currently
+    just the dog_walker's dog. Chases a lagging target point, never collides."""
+
+    def __init__(self, kind='dog'):
+        self.kind = kind
+        self.ci = random.randrange(len(dog__COLORS))
+        self.x = self.y = 0.0
+        self.facing = 0
+        self.anim = 0.0
+        self.placed = False
+
+    def update(self, tx, ty):
+        if not self.placed:
+            self.x, self.y, self.placed = tx, ty, True
+        dx, dy = tx - self.x, ty - self.y
+        dist = math.hypot(dx, dy)
+        if dist > 6:
+            step = min(2.6, dist * 0.2)
+            self.x += dx / dist * step
+            self.y += dy / dist * step
+            self.facing = dog_dir_index(dx, dy)
+            self.anim += 0.25
+
+    def draw(self, screen, camera):
+        pos = camera.apply_pos((self.x, self.y))
+        if not (-16 < pos[0] < SCREEN_WIDTH + 16 and -16 < pos[1] < SCREEN_HEIGHT + 16):
+            return
+        sprite, shadow = dog_sprite(self.ci, self.facing, self.anim)
+        rect = sprite.get_rect(center=(int(pos[0]), int(pos[1])))
+        screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
+        screen.blit(sprite, rect)
+
+
 class Pedestrian:
-    def __init__(self, x, y):
+    def __init__(self, x, y, kind=None):
         self.rect = pygame.Rect(0, 0, 14, 14)
         self.rect.center = (x, y)
-        self.color = random.choice([(250, 220, 130), (140, 200, 240), (240, 150, 200), (180, 230, 150)])
+        self.kind = kind or peds_random_archetype()
         self.dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
-        self.speed = 0.8
+        self.speed = 0.8 * peds_gait(self.kind)
         self.retarget_timer = 0
         self.bump_cooldown = 0
-        self.palette = peds_random_palette_index()
         self.facing = 2
         self.anim = 0.0
+        self.follower = Follower('dog') if peds_has_dog(self.kind) else None
 
     def update(self):
         self.retarget_timer -= 1
@@ -5858,16 +6083,22 @@ class Pedestrian:
             self.dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
         else:
             self.rect.topleft = temp.topleft
+        if self.follower:
+            # dog trails ~15px behind the walker's heading
+            hx = self.dir[0] if (self.dir[0] or self.dir[1]) else 0
+            hy = self.dir[1] if (self.dir[0] or self.dir[1]) else 1
+            self.follower.update(self.rect.centerx - hx * 15 - 6,
+                                 self.rect.centery - hy * 15)
 
     def draw(self, screen, camera):
         pos = camera.apply_pos(self.rect.center)
-        if not (-20 < pos[0] < SCREEN_WIDTH + 20 and -20 < pos[1] < SCREEN_HEIGHT + 20):
+        if not (-24 < pos[0] < SCREEN_WIDTH + 24 and -24 < pos[1] < SCREEN_HEIGHT + 24):
             return
+        if self.follower:
+            self.follower.draw(screen, camera)
         px, py = int(pos[0]), int(pos[1])
-        sprite, shadow = ped_sprite(self.palette, self.facing,
+        sprite, shadow = ped_sprite(self.kind, self.facing,
                                     self.dir[0] or self.dir[1], self.anim)
-        # Anchor on the body centre, not the sprite centre: the old art put the
-        # head above the rect centre, so a naive centre blit sinks every ped.
         rect = sprite.get_rect(center=(px, py))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
@@ -5936,9 +6167,9 @@ class Game:
                 car.angle = traffic_aligned_spawn_angle(car)
 
         self.pedestrians = []
-        for _ in range(24):
+        for _ in range(40):
             px2, py2 = random_open_spawn()
-            self.pedestrians.append(Pedestrian(px2, py2))
+            self.pedestrians.append(Pedestrian(px2, py2, self._ped_kind_for(px2, py2)))
 
         station_x = POLICE_STATION_TILE[0] * TILE_SIZE
         station_y = POLICE_STATION_TILE[1] * TILE_SIZE
@@ -5993,6 +6224,19 @@ class Game:
 
     def active_rect(self):
         return self.driving.rect if self.driving else self.player_rect
+
+    @staticmethod
+    def _ped_kind_for(x, y):
+        """Bias a few pedestrians to their turf: ballplayers by the stadium,
+        street musicians in the arts districts. Everyone else is random."""
+        col, row = x // TILE_SIZE, y // TILE_SIZE
+        for (lx, ly, lw, lh, _kind, name, _c) in LANDMARKS:
+            if lx - 3 <= col <= lx + lw + 3 and ly - 3 <= row <= ly + lh + 3:
+                if name == "Downtown & Busch Stadium" and random.random() < 0.5:
+                    return f"cardinals#{random.randrange(peds__VARIANTS)}"
+                if name in ("Grand Center Arts District", "Delmar Loop") and random.random() < 0.4:
+                    return f"busker_sax#{random.randrange(peds__VARIANTS)}"
+        return None
 
     # ---------------- input ----------------
     def handle_events(self):
@@ -6395,7 +6639,7 @@ class Game:
             if moving:
                 self.player_facing = peds_dir_index(self.player_dir[0], self.player_dir[1])
                 self.player_anim += 0.16
-            sprite, shadow = ped_sprite(PLAYER_PALETTE, self.player_facing,
+            sprite, shadow = ped_sprite(PEDS_PLAYER_KEY, self.player_facing,
                                         moving, self.player_anim)
             rect = sprite.get_rect(center=(sx, sy))
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
