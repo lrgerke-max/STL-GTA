@@ -1,447 +1,500 @@
 import pygame
 import sys
 import os
-import pickle # For game state serialization
+import pickle
+import math
 
 # --- Game Constants & Dimensions ---
 SCREEN_WIDTH = 1280
 SCREEN_HEIGHT = 720
 FPS = 60
 
-# Player dimensions (Placeholder)
+# Player dimensions
 PLAYER_SIZE = 50
 PLAYER_SPEED = 5
 
-# Tile Types (Integers used for internal logic)
+# Tile Types
 TILE_TYPE_ROAD = 1
 TILE_TYPE_WATER = 2
 TILE_TYPE_BUILDING = 3
 TILE_TYPE_DEFAULT = 0
 
-# Colors corresponding to tile types
-COLOR_ROAD = (150, 150, 80)      # Light Green/Grey for roads
-COLOR_WATER = (30, 100, 200)     # Deep Blue for water
-COLOR_BUILDING = (100, 100, 150)  # Dark Slate Grey for buildings
-COLOR_DEFAULT = (80, 150, 80)    # General open area
+# Colors
+COLOR_ROAD = (150, 150, 80)
+COLOR_WATER = (30, 100, 200)
+COLOR_BUILDING = (100, 100, 150)
+COLOR_DEFAULT = (80, 150, 80)
+COLOR_GRASS = (60, 120, 60)
 
+# Map dimensions (in tiles)
+MAP_TILES_WIDTH = 100
+MAP_TILES_HEIGHT = 100
+TILE_SIZE = 64
+MAP_WIDTH = MAP_TILES_WIDTH * TILE_SIZE
+MAP_HEIGHT = MAP_TILES_HEIGHT * TILE_SIZE
 
+# --- St. Louis Landmark Definitions ---
+# Each landmark is (x_tile, y_tile, width_tiles, height_tiles, tile_type, label)
+LANDMARKS = [
+    # Gateway Arch area (downtown)
+    (12, 8, 4, 6, TILE_TYPE_BUILDING, "Gateway Arch District"),
+    # Forest Park area
+    (30, 15, 15, 10, TILE_TYPE_BUILDING, "Forest Park"),
+    # Downtown core
+    (10, 6, 8, 4, TILE_TYPE_BUILDING, "Downtown St. Louis"),
+    # The Hill (Italian district)
+    (20, 12, 5, 3, TILE_TYPE_BUILDING, "The Hill"),
+    # Central West End
+    (25, 8, 6, 4, TILE_TYPE_BUILDING, "Central West End"),
+    # Soulard district
+    (15, 18, 7, 4, TILE_TYPE_BUILDING, "Soulard"),
+    # University area
+    (40, 20, 8, 6, TILE_TYPE_BUILDING, "University Area"),
+    # Midtown
+    (35, 12, 6, 5, TILE_TYPE_BUILDING, "Midtown"),
+]
 
-# Map placeholder dimensions (We will define the actual map size later)
-WORLD_TILES_WIDTH = 100
-WORLD_TILES_HEIGHT = 100
-MAP_WIDTH = 20 * 64 # Using TILE_SIZE=64 for calculation consistency
-MAP_HEIGHT = 15 * 64 # Placeholder size
-
-# Initialize the map structure (THE CHANGE IS HERE)
-TILE_SIZE = 64 
+# --- Initialize the map structure ---
 game_map = []
-for y in range(MAP_HEIGHT // TILE_SIZE):
+for y in range(MAP_TILES_HEIGHT):
     row = []
-    for x in range(MAP_WIDTH // TILE_SIZE):
+    for x in range(MAP_TILES_WIDTH):
         tile_type = TILE_TYPE_DEFAULT
         collidable = False
         
-        # --- St. Louis Landmark/Structure Simulation ---
-        x_tile = x
-        y_tile = y
+        # Check if this tile is part of a landmark
+        is_landmark = False
+        for (lx, ly, lw, lh, ltype, label) in LANDMARKS:
+            if lx <= x < lx + lw and ly <= y < ly + lh:
+                tile_type = ltype
+                collidable = True
+                is_landmark = True
+                break
         
-        # Simulate a major central area (e.g., Downtown/Arch vicinity) as Buildings
-        if 8 <= x_tile <= 15 and 6 <= y_tile <= 12: # Expanded core area for landmarks
-             tile_type = TILE_TYPE_BUILDING
-             collidable = True
-        # Simulate major roads running through the center (e.g., I-70/Riverfront)
-        elif (x_tile >= 30 and x_tile <= 60 and y_tile == 8) or \
-             (y_tile >= 15 and y_tile <= 20 and x_tile < 30): # A main diagonal road placeholder
-            tile_type = TILE_TYPE_ROAD
-        # Simulate river/major body of water near the edges (e.g., Mississippi River)
-        elif x_tile == 1 or y_tile == MAP_HEIGHT // TILE_SIZE - 1: # Left edge and bottom edge as water
-            tile_type = TILE_TYPE_WATER
-            collidable = True
-            
-        row.append({'type': tile_type, 'collidable': collidable})
+        # Simulate major roads (horizontal and vertical)
+        if not is_landmark:
+            # Main horizontal roads
+            if y in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]:
+                tile_type = TILE_TYPE_ROAD
+            # Main vertical roads
+            elif x in [5, 10, 15, 20, 25, 30, 35, 40, 45, 50]:
+                tile_type = TILE_TYPE_ROAD
+            # Mississippi River (east side)
+            elif x >= MAP_TILES_WIDTH - 3:
+                tile_type = TILE_TYPE_WATER
+                collidable = True
+            # Missouri River (north)
+            elif y <= 2:
+                tile_type = TILE_TYPE_WATER
+                collidable = True
+            # Parks/grass areas
+            elif (x >= 28 and x <= 48 and y >= 13 and y <= 28):
+                tile_type = TILE_TYPE_DEFAULT  # Forest Park grass
+            else:
+                tile_type = TILE_TYPE_DEFAULT
+    
+        row.append({'type': tile_type, 'collidable': collidable, 'label': ''})
     game_map.append(row)
 
-# --- Vehicle Representation Object ---
+# --- Vehicle Representation ---
 class Vehicle:
-    def __init__(self, x, y, size):
-        # Start vehicle centered in the screen area for testing
-        self.rect = pygame.Rect(x, y, size, size) 
-        self.max_speed = 12.0 # Max speed (units/sec)
-        self.mass = 500.0 # Mass in arbitrary units
-        self.drag_coefficient = 0.97 # Multiplier applied to velocity each frame (friction/air resistance)
-        self.current_velocity = [0.0, 0.0] # Use velocity vector [vx, vy]
-        self.current_speed = 0.0
-        self.direction = [0.0, 0.0] # [dx, dy] for movement vector (using floats for smooth physics)
-
-# --- Player Representation Object ---
-class Player:
-    def __init__(self, x, y, size):
-        # Start player centered in the screen area for testing
-        self.rect = pygame.Rect(x, y, size, size) 
-        self.speed = PLAYER_SPEED
-        self.direction = [0, 0] # [dx, dy] for movement vector (using integers/floats as needed)
-
-# Global game entities/state holders
-# We start with one player and one default vehicle (parked/inactive).
-player = Player(SCREEN_WIDTH // 2 - PLAYER_SIZE//2, SCREEN_HEIGHT // 2 - PLAYER_SIZE//2, PLAYER_SIZE)
-
-# Vehicle object setup. Use a different size for cars than players.
-CAR_SIZE = 70 # Approximate car footprint on the grid
-vehicle = Vehicle(SCREEN_WIDTH // 2 + CAR_SIZE//2, SCREEN_HEIGHT // 2 - CAR_SIZE//2, CAR_SIZE)
-
-# State variable to track what is currently active/controlled
-GAME_STATE_MODE = 'PLAYER' # Options: 'PLAYER', 'VEHICLE'
-
-running = True
-
-
-# --- Persistence System Globals ---
-SAVE_FILE = "savegame.dat"
-LOAD_FILE = "loadgame.dat"
-
-def save_game(filepath):
-    """Serializes and saves the current game state."""
-    print("\n--- SAVE GAME TRIGGERED ---")
-    state = {
-        'player': {'x': player.rect.left, 'y': player.rect.top},
-        # Future additions: 'vehicles': [vehicle.state], 'npcs': [...]
-    }
-    try:
-        with open(filepath, 'wb') as f:
-            pickle.dump(state, f)
-        print(f"✅ Game successfully saved to {os.path.abspath(filepath)}")
-    except Exception as e:
-        print(f"❌ Error saving game state: {e}")
-
-def load_game(filepath):
-    """Loads the game state from a file and restores objects."""
-    print("\n--- LOAD GAME TRIGGERED ---")
-    if not os.path.exists(filepath):
-        print(f"❌ Save file not found at {os.path.abspath(filepath)}. Cannot load.")
+    def __init__(self, x, y, width, height):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.max_speed = 12.0
+        self.acceleration = 0.3
+        self.brake_force = 0.5
+        self.drag_coefficient = 0.97
+        self.steer_angle = 0.0
+        self.max_steer = 0.04  # radians per frame
+        self.current_velocity = 0.0
+        self.angle = 0.0  # facing direction in radians
+        self.input = {'throttle': 0.0, 'steer': 0.0}
+    
+    def update(self, dt):
+        # Apply throttle/brake
+        if self.input['throttle'] > 0:
+            self.current_velocity += self.acceleration * self.input['throttle']
+        elif self.input['throttle'] < 0:
+            self.current_velocity += self.brake_force * self.input['throttle']
+        
+        # Clamp speed
+        self.current_velocity = max(-self.max_speed / 2, min(self.max_speed, self.current_velocity))
+        
+        # Apply drag when no input
+        if self.input['throttle'] == 0:
+            self.current_velocity *= self.drag_coefficient
+            if abs(self.current_velocity) < 0.01:
+                self.current_velocity = 0.0
+        
+        # Apply steering (only when moving)
+        if abs(self.current_velocity) > 0.1:
+            reverse = -1 if self.current_velocity < 0 else 1
+            self.steer_angle += self.input['steer'] * self.max_steer * reverse
+            self.steer_angle = max(-self.max_steer * 2, min(self.max_steer * 2, self.steer_angle))
+            self.angle += self.steer_angle * (self.current_velocity / self.max_speed)
+        
+        # Reset steer when no input
+        if self.input['steer'] == 0:
+            self.steer_angle *= 0.8
+            if abs(self.steer_angle) < 0.001:
+                self.steer_angle = 0.0
+        
+        # Calculate movement vector from angle
+        dx = math.cos(self.angle) * self.current_velocity
+        dy = math.sin(self.angle) * self.current_velocity
+        
+        # Check collision
+        temp_rect = self.rect.move(int(dx), int(dy))
+        if self._check_collision(temp_rect):
+            self.current_velocity *= -0.5  # Bounce back
+        else:
+            self.rect.topleft = (int(temp_rect.left), int(temp_rect.top))
+    
+    def _check_collision(self, rect):
+        x1, y1 = int(rect.left), int(rect.top)
+        x2, y2 = int(rect.right), int(rect.bottom)
+        
+        start_col = max(0, x1 // TILE_SIZE - 1)
+        end_col = min(MAP_TILES_WIDTH - 1, x2 // TILE_SIZE + 1)
+        start_row = max(0, y1 // TILE_SIZE - 1)
+        end_row = min(MAP_TILES_HEIGHT - 1, y2 // TILE_SIZE + 1)
+        
+        for r in range(start_row, end_row + 1):
+            if r >= len(game_map):
+                continue
+            row = game_map[r]
+            for c in range(start_col, end_col + 1):
+                if c >= len(row):
+                    continue
+                tile = row[c]
+                if tile.get('collidable', False):
+                    tile_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                    if rect.colliderect(tile_rect):
+                        return True
         return False
     
-    try:
-        with open(filepath, 'rb') as f:
-            state = pickle.load(f)
+    def draw(self, screen):
+        # Draw car rotated
+        center = self.rect.center
+        rect = pygame.Rect(0, 0, self.rect.width, self.rect.height)
+        rect.center = center
+        rotated_surface = pygame.transform.rotate(
+            pygame.Surface((self.rect.width, self.rect.height), pygame.SRCALPHA),
+            math.degrees(-self.angle)
+        )
+        rotated_surface.fill((0, 100, 200, 200))
+        rotated_surface.blit(
+            pygame.Surface((self.rect.width, 10), pygame.SRCALPHA),
+            (0, self.rect.height // 2 - 5),
+            special_flags=pygame.BLEND_RGBA_ADD
+        )
+        screen.blit(rotated_surface, rotated_surface.get_rect(center=center))
         
-        # Restore Player state
-        if 'player' in state:
-            p_state = state['player']
-            # Update the player object's position based on saved data
-            player.rect.topleft = (int(p_state['x']), int(p_state['y']))
-            print("✅ Player state loaded successfully.")
+        # Draw headlights
+        headlight_offset = math.cos(self.angle) * self.rect.width // 2
+        headlight_dy = math.sin(self.angle) * self.rect.width // 2
+        hl1 = (center[0] + headlight_offset - 10, center[1] + headlight_dy)
+        hl2 = (center[0] + headlight_offset + 10, center[1] + headlight_dy)
+        pygame.draw.circle(screen, (255, 255, 200), (int(hl1[0]), int(hl1[1])), 3)
+        pygame.draw.circle(screen, (255, 255, 200), (int(hl2[0]), int(hl2[1])), 3)
 
-        return True
 
-    except Exception as e:
-        print(f"❌ Error loading game state: {e}")
-        # In case of corruption, reset to a safe default (optional)
-        player.rect.topleft = (SCREEN_WIDTH // 2 - PLAYER_SIZE//2, SCREEN_HEIGHT // 2 - PLAYER_SIZE//2)
+# --- Player Representation ---
+class Player:
+    def __init__(self, x, y, size):
+        self.rect = pygame.Rect(x, y, size, size)
+        self.speed = PLAYER_SPEED
+        self.direction = [0, 0]
+        self.health = 100
+        self.wanted_level = 0
+    
+    def update(self):
+        dx = self.direction[0] * self.speed
+        dy = self.direction[1] * self.speed
+        
+        temp_rect = self.rect.move(int(dx), int(dy))
+        if self._check_collision(temp_rect):
+            return
+        self.rect.topleft = (int(temp_rect.left), int(temp_rect.top))
+    
+    def _check_collision(self, rect):
+        x1, y1 = int(rect.left), int(rect.top)
+        x2, y2 = int(rect.right), int(rect.bottom)
+        
+        start_col = max(0, x1 // TILE_SIZE - 1)
+        end_col = min(MAP_TILES_WIDTH - 1, x2 // TILE_SIZE + 1)
+        start_row = max(0, y1 // TILE_SIZE - 1)
+        end_row = min(MAP_TILES_HEIGHT - 1, y2 // TILE_SIZE + 1)
+        
+        for r in range(start_row, end_row + 1):
+            if r >= len(game_map):
+                continue
+            row = game_map[r]
+            for c in range(start_col, end_col + 1):
+                if c >= len(row):
+                    continue
+                tile = row[c]
+                if tile.get('collidable', False):
+                    tile_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
+                    if rect.colliderect(tile_rect):
+                        return True
         return False
 
-def draw_background():
-    """Fills the screen with a basic color for now."""
-    screen.fill((50, 50, 100)) # Dark blue/grey placeholder background
 
-# --- NEW FUNCTION: Draws a single tile based on its type and collision status ---
-def draw_tile(c, r):
-    """Draws a tile at grid coordinate (c, r)."""
+# --- Global game state ---
+player = Player(SCREEN_WIDTH // 2 - PLAYER_SIZE // 2, SCREEN_HEIGHT // 2 - PLAYER_SIZE // 2, PLAYER_SIZE)
+vehicle = Vehicle(SCREEN_WIDTH // 2 + 100, SCREEN_HEIGHT // 2, 70, 40)
+GAME_STATE_MODE = 'PLAYER'  # 'PLAYER' or 'VEHICLE'
+running = True
+
+# Camera
+camera = {'x': 0, 'y': 0}
+
+# --- Persistence ---
+SAVE_FILE = "savegame.dat"
+
+def save_game():
+    state = {
+        'player': {'x': player.rect.left, 'y': player.rect.top},
+        'vehicle': {'x': vehicle.rect.left, 'y': vehicle.rect.top, 'angle': vehicle.angle},
+        'mode': GAME_STATE_MODE,
+    }
+    try:
+        with open(SAVE_FILE, 'wb') as f:
+            pickle.dump(state, f)
+        print(f"Game saved to {os.path.abspath(SAVE_FILE)}")
+    except Exception as e:
+        print(f"Error saving: {e}")
+
+def load_game():
+    if not os.path.exists(SAVE_FILE):
+        print("No save file found!")
+        return
+    try:
+        with open(SAVE_FILE, 'rb') as f:
+            state = pickle.load(f)
+        player.rect.topleft = (int(state['player']['x']), int(state['player']['y']))
+        vehicle.rect.topleft = (int(state['vehicle']['x']), int(state['vehicle']['y']))
+        vehicle.angle = state['vehicle']['angle']
+        GAME_STATE_MODE = state.get('mode', 'PLAYER')
+        print("Game loaded!")
+    except Exception as e:
+        print(f"Error loading: {e}")
+
+
+# --- Drawing Functions ---
+def draw_tile(screen, c, r):
+    """Draw a single tile at grid position (c, r)."""
     tile = game_map[r][c]
     x = c * TILE_SIZE
     y = r * TILE_SIZE
-
-    tile = game_map[r][c]
-    x = c * TILE_SIZE
-    y = r * TILE_SIZE
-
-    # Determine color based on tile type, falling back to default for unknown types
+    
     if tile['type'] == TILE_TYPE_WATER:
         color = COLOR_WATER
     elif tile['type'] == TILE_TYPE_BUILDING:
         color = COLOR_BUILDING
     elif tile['type'] == TILE_TYPE_ROAD:
         color = COLOR_ROAD
-    else: # Includes TILE_TYPE_DEFAULT (0) or any future type not handled above
-        color = COLOR_DEFAULT
-
-    # Draw the tile regardless of collision status, as the 'collidable' flag determines movement constraints.
+    else:
+        color = COLOR_GRASS
+    
     pygame.draw.rect(screen, color, (x, y, TILE_SIZE, TILE_SIZE))
-
-    if tile['collidable'] and tile['type'] != TILE_TYPE_WATER:
-        # Optionally draw a darker outline or overlay for hard collision zones
-        s = pygame.Surface((TILE_SIZE, TILE_SIZE), pygame.SRCALPHA)
-        s.fill((0, 0, 0, 50)) # Semi-transparent black
-        screen.blit(s, (x, y))
-
-def handle_events():
-    """Handles all user input events (keyboard, mouse). Checks for save/load triggers and updates player direction."""
-    global running
-    # Reset movement vector at the start of event handling cycle
-    player.direction = [0, 0] 
     
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            print("Game closed by user.")
-            running = False
-def handle_events():
-    """Handles all user input events and updates entity directional vectors."""
-    global running
+    # Grid lines for visual clarity
+    pygame.draw.rect(screen, (0, 0, 0, 30), (x, y, TILE_SIZE, TILE_SIZE), 1)
 
-    keys = pygame.key.get_pressed()
+
+def draw_background(screen):
+    """Fill screen with base color."""
+    screen.fill((50, 50, 100))
+
+
+def draw_game(screen):
+    """Draw all game elements."""
+    draw_background(screen)
     
-    # --- Player Input Handling (Always available for WASD) ---
-    player.direction[0] = 0
-    player.direction[1] = 0
-    if keys[pygame.K_w]:
-        player.direction[1] -= 1
-    if keys[pygame.K_s]:
-        player.direction[1] += 1
-    if keys[pygame.K_a]:
-        player.direction[0] -= 1
-    if keys[pygame.K_d]:
-        player.direction[0] += 1
-
-    # --- State Transition Key Handling (Run on KEYDOWN only) ---
-    for event in pygame.event.get():
-        if event.type == pygame.QUIT:
-            print("Game closed by user.")
-            global running
-            running = False
-        elif event.type == pygame.KEYDOWN:
-            pass # Placeholder for future key handling
-
-    # --- Vehicle Input Handling (Only active in VEHICLE mode) ---
-    if GAME_STATE_MODE == 'VEHICLE':
-        vehicle.direction[0] = 0.0
-        vehicle.direction[1] = 0.0 # Reset input direction for physics calculation
-        
-        # Simulate acceleration/braking (W/S keys)
-        accel_input = 0.0
-        if keys[pygame.K_w]:
-            accel_input += 1.0
-        elif keys[pygame.K_s]:
-            accel_input -= 1.0
-
-        # Simple steering input (A/D keys) - affects angular change, not just movement vector
-        steer_input = 0.0
-        if keys[pygame.K_a]:
-            steer_input += 1.0
-        elif keys[pygame.K_d]:
-            steer_input -= 1.0
-
-        # Store raw input for update_game() to consume (acceleration magnitude, steering angle)
-        vehicle.input = {'throttle': accel_input, 'steer': steer_input}
-
-
-def check_collision(rect):
-    """Checks if a given rect collides with any tile marked as collidable."""
-    x1, y1 = int(rect.left), int(rect.top)
-    x2, y2 = int(rect.right), int(rect.bottom)
-
-    # Determine the range of tiles to check (checking 1 tile outside the bounds for safety)
-    start_col = max(0, x1 // TILE_SIZE - 1)
-    end_col = min((MAP_WIDTH // TILE_SIZE), y2 // TILE_SIZE + 2)
-    start_row = max(0, y1 // TILE_SIZE - 1)
-    end_row = min((MAP_HEIGHT // TILE_SIZE), x2 // TILE_SIZE + 2)
-
+    # Calculate visible tile range based on camera
+    start_col = max(0, camera['x'] // TILE_SIZE - 1)
+    end_col = min(MAP_TILES_WIDTH, (camera['x'] + SCREEN_WIDTH) // TILE_SIZE + 2)
+    start_row = max(0, camera['y'] // TILE_SIZE - 1)
+    end_row = min(MAP_TILES_HEIGHT, (camera['y'] + SCREEN_HEIGHT) // TILE_SIZE + 2)
+    
+    # Draw visible tiles
     for r in range(start_row, end_row):
-        if r >= len(game_map): continue # Safety check for row boundaries
-        row = game_map[r]
         for c in range(start_col, end_col):
-            if c >= len(row): continue # Safety check for column boundaries
-
-            tile = row[c]
-            # Collision logic relies on the tile dictionary containing 'collidable' key
-            if tile.get('collidable', False): 
-                # Simple bounding box overlap check against this specific tile area
-                tile_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
-                if rect.colliderect(tile_rect):
-                    return True # Collision detected!
-
-    return False
-
-
-def update_game():
-    """Updates all game logic using the current state machine model."""
-    global running
-    dt = 1.0 / FPS # Delta time (time elapsed since last frame)
-
-    # --- PLAYER UPDATE LOGIC ---
-    if GAME_STATE_MODE == 'PLAYER':
-        # Player uses simple, direct vector movement for now (retaining previous functionality)
-        player.direction[0] *= dt * 60 # Scale direction input to approximate desired speed per update cycle
-        player.direction[1] *= dt * 60
-        
-        dx = player.direction[0] * PLAYER_SPEED
-        dy = player.direction[1] * PLAYER_SPEED
-
-        temp_rect = player.rect.move(int(dx), int(dy))
-        collision_detected = check_collision(temp_rect)
-        in_bounds_x = temp_rect.left >= 0 and temp_rect.right <= SCREEN_WIDTH
-        in_bounds_y = temp_rect.top >= 0 and temp_rect.bottom <= SCREEN_HEIGHT
-
-        if not collision_detected and in_bounds_x and in_bounds_y:
-            player.rect.topleft = (int(temp_rect.left), int(temp_rect.top))
-        else:
-            # Simple clamping resolution for player
-            new_x, new_y = temp_rect.centerx, temp_rect.centery
-            if not in_bounds_x or collision_detected:
-                new_x = max(player.rect.width/2, min(SCREEN_WIDTH - player.rect.width/2, new_x))
-            if not in_bounds_y or collision_detected:
-                new_y = max(player.rect.height/2, min(SCREEN_HEIGHT - player.rect.height/2, new_y))
-            player.rect.center = (int(new_x), int(new_y))
-
-    # --- VEHICLE PHYSICS UPDATE LOGIC (MOMENTUM & DRAG) ---
-    elif GAME_STATE_MODE == 'VEHICLE':
-        input_data = vehicle.input
-        throttle = input_data['throttle']
-        steer = input_data['steer']
-
-        # 1. Apply Acceleration/Deceleration (Thrust from throttle)
-        acceleration = throttle * (vehicle.max_speed / 3.0) # Scale factor for feeling
-        
-        # Calculate new velocity based on current velocity and acceleration, damped by time step
-        new_vx = vehicle.current_velocity[0] + acceleration * dt
-        new_vy = vehicle.current_velocity[1] + acceleration * dt
-
-        # 2. Apply Drag/Friction Decay (Always active)
-        decayed_vx = new_vx * vehicle.drag_coefficient
-        decayed_vy = new_vy * vehicle.drag_coefficient
-        
-        vehicle.current_velocity[0] = decayed_vx
-        vehicle.current_velocity[1] = decayed_vy
-
-        # 3. Apply Steering (Changes direction vector, not directly velocity)
-        if abs(steer) > 0.1:
-            # Calculate target angle based on steering input and current speed magnitude
-            target_angle_diff = steer * 5.0 * dt # Angular change rate
-            vehicle.angle += target_angle_diff
-
-        # 4. Update Position using the calculated velocity (Integration)
-        dx = vehicle.current_velocity[0] * dt * FPS # Scale back up to match grid movement scale if needed
-        dy = vehicle.current_velocity[1] * dt * FPS
-        
-        temp_rect = vehicle.rect.move(int(dx), int(dy))
-
-        # 5. Collision Resolution (Simplified: Check proposed move)
-        collision_detected = check_collision(temp_rect)
-        in_bounds_x = temp_rect.left >= 0 and temp_rect.right <= SCREEN_WIDTH
-        in_bounds_y = temp_rect.top >= 0 and temp_rect.bottom <= SCREEN_HEIGHT
-
-        if not collision_detected and in_bounds_x and in_bounds_y:
-            vehicle.rect.topleft = (int(temp_rect.left), int(temp_rect.top))
-        else:
-            # Simple resolution for vehicle (stops movement upon hitting obstacle)
-            vehicle.current_velocity = [0.0, 0.0] # Zero out momentum on collision
-            vehicle.rect.center = temp_rect.center
-
-
-def draw_game():
-    """Draws all game elements to the screen."""
-    draw_background() 
+            draw_tile(screen, c, r)
     
-    # --- NEW DRAWING STAGE: Draw Map Background First ---
-    for r in range(MAP_HEIGHT // TILE_SIZE):
-        for c in range(MAP_WIDTH // TILE_SIZE):
-            draw_tile(c, r)
-            
-    # Draw Player placeholder circle/rectangle on top of the map
-    pygame.draw.rect(screen, (255, 0, 0), player.rect) # Red box for player visibility
+    # Draw landmark labels
+    pygame.font.init()
+    font = pygame.font.SysFont('arial', 14, bold=True)
+    for (lx, ly, lw, lh, ltype, label) in LANDMARKS:
+        center_x = (lx + lw / 2) * TILE_SIZE - camera['x']
+        center_y = (ly + lh / 2) * TILE_SIZE - camera['y']
+        if 0 < center_x < SCREEN_WIDTH and 0 < center_y < SCREEN_HEIGHT:
+            text = font.render(label, True, (255, 255, 255))
+            text_rect = text.get_rect(center=(center_x, center_y))
+            screen.blit(text, text_rect)
+    
+    # Draw player or vehicle
+    if GAME_STATE_MODE == 'PLAYER':
+        pygame.draw.rect(screen, (255, 50, 50), player.rect)
+        # Direction indicator
+        if player.direction[0] != 0 or player.direction[1] != 0:
+            dx = player.direction[0] * 20
+            dy = player.direction[1] * 20
+            pygame.draw.line(screen, (255, 255, 0), player.rect.center, 
+                           (player.rect.center[0] + dx, player.rect.center[1] + dy), 3)
+    else:
+        vehicle.draw(screen)
+    
+    # HUD
+    pygame.font.init()
+    hud_font = pygame.font.SysFont('arial', 18, bold=True)
+    
+    mode_text = hud_font.render(f"Mode: {GAME_STATE_MODE}", True, (255, 255, 255))
+    screen.blit(mode_text, (10, 10))
+    
+    pos_text = hud_font.render(f"Pos: ({player.rect.centerx}, {player.rect.centery})", True, (200, 200, 200))
+    screen.blit(pos_text, (10, 35))
+    
+    # Minimap
+    minimap_size = 150
+    minimap_x = SCREEN_WIDTH - minimap_size - 10
+    minimap_y = 10
+    pygame.draw.rect(screen, (0, 0, 0, 150), (minimap_x, minimap_y, minimap_size, minimap_size))
+    
+    scale_x = minimap_size / MAP_WIDTH
+    scale_y = minimap_size / MAP_HEIGHT
+    
+    # Draw minimap tiles (simplified)
+    step = max(1, MAP_TILES_WIDTH // 30)
+    for r in range(0, MAP_TILES_HEIGHT, step):
+        for c in range(0, MAP_TILES_WIDTH, step):
+            tile = game_map[r][c]
+            if tile['type'] == TILE_TYPE_BUILDING:
+                color = (100, 100, 150)
+            elif tile['type'] == TILE_TYPE_ROAD:
+                color = (150, 150, 80)
+            elif tile['type'] == TILE_TYPE_WATER:
+                color = (30, 100, 200)
+            else:
+                color = (60, 120, 60)
+            mx = minimap_x + c * MAP_TILES_WIDTH * scale_x
+            my = minimap_y + r * MAP_TILES_HEIGHT * scale_y
+            pygame.draw.rect(screen, color, (mx, my, max(1, step * MAP_TILES_WIDTH * scale_x), max(1, step * MAP_TILES_HEIGHT * scale_y)))
+    
+    # Player dot on minimap
+    px = minimap_x + player.rect.centerx * scale_x
+    py = minimap_y + player.rect.centery * scale_y
+    pygame.draw.circle(screen, (255, 0, 0), (int(px), int(py)), 3)
+    
     pygame.display.flip()
 
+
+# --- Input Handling ---
+def handle_events():
+    global running, GAME_STATE_MODE
+    
+    keys = pygame.key.get_pressed()
+    
+    # Reset direction
+    player.direction = [0, 0]
+    
+    # Player movement
+    if keys[pygame.K_w] or keys[pygame.K_UP]:
+        player.direction[1] -= 1
+    if keys[pygame.K_s] or keys[pygame.K_DOWN]:
+        player.direction[1] += 1
+    if keys[pygame.K_a] or keys[pygame.K_LEFT]:
+        player.direction[0] -= 1
+    if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
+        player.direction[0] += 1
+    
+    # Normalize diagonal movement
+    if player.direction[0] != 0 and player.direction[1] != 0:
+        player.direction[0] *= 0.707
+        player.direction[1] *= 0.707
+    
+    # Vehicle input
+    vehicle.input = {'throttle': 0.0, 'steer': 0.0}
+    if keys[pygame.K_w]:
+        vehicle.input['throttle'] += 1.0
+    if keys[pygame.K_s]:
+        vehicle.input['throttle'] -= 1.0
+    if keys[pygame.K_a]:
+        vehicle.input['steer'] -= 1.0
+    if keys[pygame.K_d]:
+        vehicle.input['steer'] += 1.0
+    
+    # State transition
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_e:
+                if GAME_STATE_MODE == 'PLAYER':
+                    GAME_STATE_MODE = 'VEHICLE'
+                    print("Entered vehicle!")
+                else:
+                    GAME_STATE_MODE = 'PLAYER'
+                    print("Exited vehicle!")
+            elif event.key == pygame.K_F5:
+                save_game()
+            elif event.key == pygame.K_F9:
+                load_game()
+
+
+# --- Game Update ---
+def update_game():
+    if GAME_STATE_MODE == 'PLAYER':
+        player.update()
+    else:
+        vehicle.update(1.0 / FPS)
+    
+    # Update camera to follow active entity
+    if GAME_STATE_MODE == 'PLAYER':
+        camera['x'] = player.rect.centerx - SCREEN_WIDTH // 2
+        camera['y'] = player.rect.centery - SCREEN_HEIGHT // 2
+    else:
+        camera['x'] = vehicle.rect.centerx - SCREEN_WIDTH // 2
+        camera['y'] = vehicle.rect.centery - SCREEN_HEIGHT // 2
+    
+    # Clamp camera to map bounds
+    camera['x'] = max(0, min(MAP_WIDTH - SCREEN_WIDTH, camera['x']))
+    camera['y'] = max(0, min(MAP_HEIGHT - SCREEN_HEIGHT, camera['y']))
+
+
+# --- Main Game Loop ---
 def main():
-    """The main game loop."""
-    global running
-    # Initialize Pygame (Crucial for video and audio systems)
+    global running, screen
+    
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
     pygame.display.set_caption("St. Louis GTA Clone")
+    clock = pygame.time.Clock()
     
-    print("=============================================")
-    print("St. Louis GTA Clone Initialized!")
-    print("--- Controls ---")
-    print("Movement: WASD or Arrow Keys")
-    print("[S] Key: Save Game State")
-    print("[L] Key: Load Game State")
-    print("=============================================\n")
+    print("=" * 60)
+    print("  STL-GTA: St. Louis Open-World Sandbox")
+    print("=" * 60)
+    print("  WASD/Arrows - Move")
+    print("  E - Enter/Exit Vehicle")
+    print("  F5 - Save Game")
+    print("  F9 - Load Game")
+    print("  ESC/Q - Quit")
+    print("=" * 60)
+    print()
     
     while running:
-        # 1. Event Handling (Input) - Captures key presses/releases
         handle_events()
-        
-        if not running: break
-
-        # 2. Game Logic Update - Applies movement based on input state and collision checks
+        if not running:
+            break
         update_game()
-        
-        # 3. Drawing (Rendering)
-        draw_game()
-        
-        # Cap the frame rate
-        pygame.time.Clock().tick(FPS)
-
-    print("Game loop finished.")
+        draw_game(screen)
+        clock.tick(FPS)
+    
     pygame.quit()
     sys.exit()
 
-def test_physics():
-    """Runs a simplified simulation loop to demonstrate physics and state transitions without Pygame display."""
-    global running
-    print("=============================================")
-    print("--- Running Physics & State Transition Simulation ---")
-    print("Simulation will run 10 ticks, printing key state changes.")
-    print("=============================================\n")
-
-    # Mocking the pygame module functions needed for math operations
-    class MockPygame:
-        @staticmethod
-        def Vector2(x, y): return object()
-        @staticmethod
-        def rect(*args): return object() # Mock Rect
-        @staticmethod
-        def Point(x, y): return (x, y)
-
-    pygame.math.Vector2 = lambda x, y: MockPygame.Vector2(x, y)
-    
-    # Mocking Pygame's collision check for simulation purposes (assume no obstacles initially)
-    global check_collision 
-    check_collision = lambda rect: False # Assume clear path for initial testing
-
-    # Simulate a few ticks to demonstrate functionality
-    for tick in range(1, 11):
-        print(f"\n=== TICK {tick} ===")
-        
-        # Clear input state before simulating the next frame's inputs
-        vehicle.input = {'throttle': 0.0, 'steer': 0.0}
-
-        if tick < 5:
-            # Ticks 1-4: Player moves toward vehicle (Proximity Trigger)
-            player.direction[0] += 2 # Move right towards car
-            print("Simulating: Player moving directly towards the parked vehicle.")
-        elif tick >= 5 and tick <= 8:
-            # Ticks 5-8: Auto-transition to Vehicle mode happens, then we throttle it forward.
-            vehicle.input['throttle'] = 1.0 # Accelerate car
-            vehicle.input['steer'] = 0.0  # Straight driving
-            print("Simulating: Proximity triggered Vehicle Mode; applying throttle.")
-        else:
-            # Ticks 9-10: Drive past the proximity threshold (Exit Trigger)
-            vehicle.input['throttle'] = -0.5 # Apply brake/reverse slightly
-            print("Simulating: Driving far away to test exit transition back to Player Mode.")
-
-
-        update_game()
-        
-        # Print current state after update
-        if GAME_STATE_MODE == 'PLAYER':
-             print(f"Mode: PLAYER | Player Pos: ({player.rect.centerx:.0f}, {player.rect.centery:.0f})")
-        elif GAME_STATE_MODE == 'VEHICLE':
-            # Print velocity and position to show physics effects
-            speed = ((vehicle.current_velocity[0]**2 + vehicle.current_velocity[1]**2)**0.5)
-            print(f"Mode: VEHICLE | Speed: {speed:.2f} | Pos: ({vehicle.rect.centerx:.0f}, {vehicle.rect.centery:.0f})")
-
-    print("\n=============================================")
-    print("Simulation Complete: Physics and State Logic Confirmed.")
-    print("The core physics model and proximity state transitions are successfully implemented in main.py.")
 
 if __name__ == "__main__":
     main()
