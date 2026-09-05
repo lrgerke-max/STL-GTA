@@ -1,4 +1,5 @@
 import pygame
+import argparse
 import sys
 import os
 import json
@@ -50,10 +51,62 @@ MOVING_CAR_COUNT = 8        # ambient traffic actually in motion
 # and lane discipline now live in the traffic_ai section, which owns the
 # tuning constants; wander_ai below is kept only as a fallback.
 PLAYER_CAR_MAX_SPEED = 9.5
-ROAD_LINES = set(range(4, MAP_TILES_W, 8))
+# The street grid. Every 8th tile index, starting at 4, is a road line. These
+# two numbers are the single source of truth - the props, parking and traffic
+# sections all derive from them rather than re-hardcoding 4 and 8.
+ROAD_ORIGIN = 4
+ROAD_STEP = 8
+ROAD_LINES = set(range(ROAD_ORIGIN, MAP_TILES_W, ROAD_STEP))
 
 RADAR_SIZE = 78             # smaller than the old 110px minimap, GTA1 proportions
 STAR_BLOCK_W = 76           # width of the 6-slot wanted star row
+
+# --- Simulation timing ---------------------------------------------------
+# Every tuning constant in this file (PLAYER_SPEED, accelerations, drag,
+# steer rates) is authored per *simulation step*, not per second. The main
+# loop therefore runs a fixed-step accumulator: real elapsed time is banked
+# and spent in exact 1/60s slices, so the sim is identical at 30fps, 60fps
+# or 240fps instead of running in slow motion whenever a frame is late.
+SIM_DT = 1.0 / FPS
+MAX_SIM_STEPS = 5           # steps per rendered frame before we drop time
+MAX_FRAME_TIME = 0.25       # a stall longer than this is discarded, not caught up
+
+# --- Game states ---
+STATE_PLAYING = 0
+STATE_PAUSED = 1
+
+# --- Wanted level / police ------------------------------------------------
+WANTED_MAX = 5
+# Cops on the street per star. Index == wanted level.
+COP_COUNT_BY_STAR = (0, 1, 2, 3, 5, 6)
+# Per-offence re-arm delay in sim steps, so one long scrape is one offence.
+INFRACTION_COOLDOWN = {
+    'pedestrian': FPS * 1,
+    'traffic': FPS * 3,
+    'cop': FPS * 2,
+}
+COP_SPAWN_MIN = 420         # px: cops arrive from off-screen, not from downtown
+COP_SPAWN_MAX = 900
+COP_MAX_SPEED = 9.9         # a shade faster than the player so a chase has teeth
+COP_SIGHT = 340             # px: inside this, a cop is "on you" and heat holds
+BUST_CONTACT_STEPS = 42     # ~0.7s of sustained contact before you get busted
+BUST_RELIEF = 2             # bust meter bleed-off per step once you break away
+HEAT_GRACE = FPS * 5        # steps clean before the wanted level starts to fall
+WANTED_DECAY_STEPS = FPS * 8   # steps per star shed after that
+BAIL_COST = 250             # cash the desk sergeant takes off you
+
+# --- Jobs -----------------------------------------------------------------
+# The delivery loop: cash comes from finishing runs, score comes from chaos.
+# Keeping them separate is the whole point - one rewards care, one doesn't.
+JOB_MARKER_RADIUS = 46      # px: how close counts as arriving
+JOB_BASE_PAY = 90
+JOB_PAY_PER_TILE = 4.0
+JOB_SECONDS_PER_TILE = 0.60
+JOB_MIN_SECONDS = 25.0
+JOB_MIN_TILE_SPAN = 12      # never pair two landmarks that are basically adjacent
+JOB_STREAK_BONUS = 0.15     # +15% per consecutive on-time drop, capped below
+JOB_STREAK_CAP = 6
+JOB_HEAT_LIMIT = 3          # no dispatcher will hand you a run at 3+ stars
 
 # --- Tile types ---
 TILE_GRASS = 0
@@ -163,6 +216,11 @@ CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
 CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 3
                      + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
                      + ['bus'] * 1 + ['garbage_truck'] * 1)
+
+# Default car collider. The kerbside parking layout is sized against this, so
+# it is a named constant both places can assert on rather than a loose 34/18.
+VEHICLE_DEFAULT_W = 34
+VEHICLE_DEFAULT_H = 18
 
 # Per-variant handling + collider size. Anything absent uses the car defaults
 # (34x18, max_steer 0.045, speed_factor 1.0). speed_factor scales traffic pace.
@@ -444,6 +502,62 @@ def random_open_spawn(road_only=False):
             continue
         return c * TILE_SIZE + TILE_SIZE // 2, r * TILE_SIZE + TILE_SIZE // 2
     return MAP_WIDTH // 2, MAP_HEIGHT // 2
+
+
+def free_point_near(x, y, w, h, max_rings=6):
+    """Nearest position to (x, y) where a w x h rect does not overlap anything.
+
+    Used anywhere the game has to *place* something rather than move it:
+    getting out of a car, dropping a job marker on a landmark, respawning.
+    Returns None when there is genuinely no room within max_rings tiles, so
+    callers can refuse the action instead of stuffing the player into a wall.
+    """
+    probe = pygame.Rect(0, 0, w, h)
+    step = TILE_SIZE // 2
+    for ring in range(max_rings + 1):
+        # ring 0 is the requested spot itself; later rings spiral outward in
+        # half-tile steps, nearest candidates first.
+        if ring == 0:
+            candidates = ((0, 0),)
+        else:
+            d = ring * step
+            candidates = ((0, -d), (0, d), (-d, 0), (d, 0),
+                          (-d, -d), (d, -d), (-d, d), (d, d))
+        for ox, oy in candidates:
+            probe.center = (int(x + ox), int(y + oy))
+            if probe.left < 0 or probe.top < 0 or probe.right > MAP_WIDTH or probe.bottom > MAP_HEIGHT:
+                continue
+            if not is_blocked(probe):
+                return probe.centerx, probe.centery
+    return None
+
+
+def landmark_rect(entry):
+    """Pixel-space footprint of a LANDMARKS tuple."""
+    lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
+    return pygame.Rect(lx * TILE_SIZE, ly * TILE_SIZE, lw * TILE_SIZE, lh * TILE_SIZE)
+
+
+def landmark_dropoff_point(entry):
+    """A standable point inside (or just outside) a landmark's footprint.
+
+    Job markers have to sit somewhere the player can physically reach, and
+    several landmark footprints are solid building mass in the middle, so this
+    walks the footprint for open ground before falling back to the perimeter.
+    """
+    rect = landmark_rect(entry)
+    spot = free_point_near(rect.centerx, rect.centery, 24, 24, max_rings=4)
+    if spot is not None:
+        return spot
+    # Middle is solid: try the four edge midpoints, then give up to the centre.
+    for px, py in ((rect.centerx, rect.top - TILE_SIZE // 2),
+                   (rect.centerx, rect.bottom + TILE_SIZE // 2),
+                   (rect.left - TILE_SIZE // 2, rect.centery),
+                   (rect.right + TILE_SIZE // 2, rect.centery)):
+        spot = free_point_near(px, py, 24, 24, max_rings=3)
+        if spot is not None:
+            return spot
+    return rect.center
 
 
 
@@ -2422,18 +2536,23 @@ sprite's top-left, so subtracting it gives the blit position.
 """
 
 
-# --- Tile constants (mirrored from main.py; do not import main) ---
-props_TILE_SIZE = 64
-props_TILE_GRASS = 0
-props_TILE_ROAD = 1
-props_TILE_WATER = 2
-props_TILE_BUILDING = 3
-props_TILE_PARK = 4
+# --- Tile constants ---
+# These used to be hand-copied literals with a "mirrored from main.py, do not
+# import main" note from when this was a separate module. It is not a separate
+# module any more, and the copies were a live trap: bumping TILE_SIZE or
+# MAP_TILES_W at the top of the file left props/parking/traffic silently
+# addressing a different grid than everything else. They are now aliases.
+props_TILE_SIZE = TILE_SIZE
+props_TILE_GRASS = TILE_GRASS
+props_TILE_ROAD = TILE_ROAD
+props_TILE_WATER = TILE_WATER
+props_TILE_BUILDING = TILE_BUILDING
+props_TILE_PARK = TILE_PARK
 
-# Road grid: main.py uses road_lines = set(range(4, MAP_TILES_W, 8)),
-# so index i carries a road when (i - 4) % 8 == 0.
-props_ROAD_ORIGIN = 4
-props_ROAD_STEP = 8
+# Road grid: ROAD_LINES = set(range(4, MAP_TILES_W, 8)), so index i carries a
+# road when (i - ROAD_ORIGIN) % ROAD_STEP == 0.
+props_ROAD_ORIGIN = ROAD_ORIGIN
+props_ROAD_STEP = ROAD_STEP
 
 # --- Muted 90s console palette ---
 props_C_OUT = (18, 16, 18)            # near-black outline, matches COLOR_OUTLINE
@@ -3374,16 +3493,15 @@ Public API
 """
 
 
-# --- Map constants (mirrored from main.py; this module never imports main) ---
-parking_TILE_SIZE = 64
-parking_MAP_TILES_W = 100
-parking_MAP_TILES_H = 100
-parking_MAP_WIDTH = parking_MAP_TILES_W * parking_TILE_SIZE
-parking_MAP_HEIGHT = parking_MAP_TILES_H * parking_TILE_SIZE
+# --- Map constants (aliases of the canonical values at the top of the file) ---
+parking_TILE_SIZE = TILE_SIZE
+parking_MAP_TILES_W = MAP_TILES_W
+parking_MAP_TILES_H = MAP_TILES_H
+parking_MAP_WIDTH = MAP_WIDTH
+parking_MAP_HEIGHT = MAP_HEIGHT
 
-# main.py: road_lines = set(range(4, parking_MAP_TILES_W, 8))
-parking_ROAD_ORIGIN = 4
-parking_ROAD_STEP = 8
+parking_ROAD_ORIGIN = ROAD_ORIGIN
+parking_ROAD_STEP = ROAD_STEP
 parking_ROAD_LINES = tuple(range(parking_ROAD_ORIGIN, parking_MAP_TILES_W, parking_ROAD_STEP))
 parking__ROAD_SET = frozenset(parking_ROAD_LINES)
 
@@ -3391,6 +3509,8 @@ parking_WATER_COL_START = parking_MAP_TILES_W - 3       # cols 97-99 are river, 
 
 parking_CAR_W = 34                              # Car collision rect, nose to tail
 parking_CAR_H = 18
+assert (parking_CAR_W, parking_CAR_H) == (VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H), \
+    "kerb slots are sized for the default car collider"
 
 # --- Parking layout ---
 parking_KERB_OFFSET_MIN = 14        # px from the tile centre line to the car centre
@@ -3766,7 +3886,7 @@ traffic_PROBE_AHEAD = 26             # px in front of the nose checked for a wal
 
 traffic_SEGMENT_SCAN = 9             # tiles scanned ahead when validating an exit
 
-traffic_TILE_ROAD = 1
+traffic_TILE_ROAD = TILE_ROAD
 
 # 0 = east, 1 = south, 2 = west, 3 = north.  Matches angle = index * pi/2
 # because +Y is down, so index == round(angle / (pi/2)) % 4.
@@ -6051,6 +6171,89 @@ def lm_draw_landmark(surface, name, rect, camera_clip):
 # ============================================================
 # Camera
 # ============================================================
+class Job:
+    """One courier run: collect at a St. Louis landmark, drop at another one
+    before the clock runs out.
+
+    This is the loop the city exists to serve. The timer deliberately does not
+    start until the cargo is aboard, so exploring toward a pickup is never
+    punished - the pressure only switches on once you have accepted it.
+    """
+
+    CARGO = ("TOASTED RAVIOLI", "GOOEY BUTTER CAKE", "CRATE OF PROVEL",
+             "BALLPARK NACHOS", "BREWERY KEG", "FROZEN CUSTARD",
+             "SLINGER SPECIAL", "PORK STEAKS", "BOX OF FIREWORKS")
+
+    def __init__(self, pickup, dropoff):
+        self.pickup = pickup
+        self.dropoff = dropoff
+        self.cargo = random.choice(self.CARGO)
+        self.pickup_pos = landmark_dropoff_point(pickup)
+        self.drop_pos = landmark_dropoff_point(dropoff)
+        self.collected = False
+
+        span = math.hypot(self.drop_pos[0] - self.pickup_pos[0],
+                          self.drop_pos[1] - self.pickup_pos[1]) / TILE_SIZE
+        self.span_tiles = span
+        self.time_limit = max(JOB_MIN_SECONDS, span * JOB_SECONDS_PER_TILE)
+        self.steps_left = int(self.time_limit * FPS)
+        self.base_reward = int(JOB_BASE_PAY + span * JOB_PAY_PER_TILE)
+
+    # -- state ------------------------------------------------------------
+    @property
+    def target_pos(self):
+        return self.drop_pos if self.collected else self.pickup_pos
+
+    @property
+    def target_name(self):
+        return (self.dropoff if self.collected else self.pickup)[5]
+
+    @property
+    def seconds_left(self):
+        return max(0.0, self.steps_left / float(FPS))
+
+    def collect(self):
+        self.collected = True
+        self.steps_left = int(self.time_limit * FPS)
+
+    def tick(self):
+        """Advance one sim step. True once the clock has run out."""
+        if not self.collected:
+            return False
+        if self.steps_left > 0:
+            self.steps_left -= 1
+        return self.steps_left <= 0
+
+    def payout(self, streak):
+        """On-time reward, boosted by the current delivery streak, plus a
+        bonus for the time you actually had left on the clock."""
+        mult = 1.0 + JOB_STREAK_BONUS * min(streak, JOB_STREAK_CAP)
+        spare = self.steps_left / float(max(1, int(self.time_limit * FPS)))
+        return int(self.base_reward * mult * (1.0 + 0.35 * spare))
+
+    @staticmethod
+    def generate(exclude=None):
+        """Pair two landmarks that are far enough apart to be worth driving.
+
+        Falls back to any distinct pair if the span filter finds nothing, so
+        this can never return None and stall the loop.
+        """
+        pool = [lm for lm in LANDMARKS if lm[5] != exclude]
+        if len(pool) < 2:
+            pool = list(LANDMARKS)
+        far = []
+        for i, a in enumerate(pool):
+            for b in pool[i + 1:]:
+                span = math.hypot(a[0] - b[0], a[1] - b[1])
+                if span >= JOB_MIN_TILE_SPAN:
+                    far.append((a, b))
+        pair = random.choice(far) if far else random.sample(list(LANDMARKS), 2)
+        a, b = pair
+        if random.random() < 0.5:
+            a, b = b, a
+        return Job(a, b)
+
+
 class Camera:
     def __init__(self):
         self.x = 0
@@ -6086,7 +6289,8 @@ class Car:
         self.color = color or random.choice(CAR_COLORS)
         self.variant = variant or random.choice(CIVILIAN_WEIGHTED)
         tune = VEHICLE_TUNING.get(self.variant, {})
-        self.width, self.height = tune.get('w', 34), tune.get('h', 18)
+        self.width = tune.get('w', VEHICLE_DEFAULT_W)
+        self.height = tune.get('h', VEHICLE_DEFAULT_H)
         self.rect = pygame.Rect(0, 0, self.width, self.height)
         self.rect.center = (x, y)
         self.angle = random.uniform(0, math.tau)
@@ -6105,6 +6309,10 @@ class Car:
         self.driver = None  # 'player', 'police', or None (parked/wandering)
         self.parked = False  # parked cars sit at the kerb until someone gets in
         self.wander_dir = random.choice([0, 1, 2, 3])
+        # Pursuit bookkeeping, used only by chase_ai().
+        self.pinned = 0          # consecutive steps making no headway
+        self.reverse_timer = 0   # steps left of a back-out manoeuvre
+        self.reverse_side = 1
 
     def move_forward_check(self, dx, dy):
         temp = self.rect.move(int(dx), int(dy))
@@ -6176,15 +6384,67 @@ class Car:
         self.input_steer = max(-1, min(1, diff * 2))
         self.physics_step()
 
+    def probe_clear(self, angle, dist):
+        """True when the car's own footprint can sit `dist` px along `angle`."""
+        probe = self.rect.copy()
+        probe.center = (int(self.rect.centerx + math.cos(angle) * dist),
+                        int(self.rect.centery + math.sin(angle) * dist))
+        if (probe.left < 0 or probe.top < 0
+                or probe.right > MAP_WIDTH or probe.bottom > MAP_HEIGHT):
+            return False
+        return not is_blocked(probe)
+
     def chase_ai(self, target_pos):
+        """Pursue target_pos using three forward whiskers.
+
+        The previous version aimed the nose straight at the player and held the
+        throttle down, so the first building between cop and player ended the
+        chase - the cop just ground along the wall until the wanted level
+        decayed. Now a blocked centre whisker steers toward whichever side is
+        open, throttle eases off so the car can actually rotate, and anything
+        pinned for half a second reverses out and tries a different line.
+        """
         tx, ty = target_pos
         dx, dy = tx - self.rect.centerx, ty - self.rect.centery
-        target_angle = math.atan2(dy, dx)
-        diff = (target_angle - self.angle + math.pi) % math.tau - math.pi
-        self.input_steer = max(-1, min(1, diff * 2.2))
         dist = math.hypot(dx, dy)
-        self.input_throttle = 1.0 if dist > 40 else 0.0
-        self.max_speed = 8.0
+        diff = (math.atan2(dy, dx) - self.angle + math.pi) % math.tau - math.pi
+        self.max_speed = COP_MAX_SPEED
+
+        # --- back out of a pin -------------------------------------------
+        if self.reverse_timer > 0:
+            self.reverse_timer -= 1
+            self.input_throttle = -1.0
+            self.input_steer = float(self.reverse_side)
+            self.physics_step()
+            return
+
+        if abs(self.velocity) < 0.4 and dist > 60:
+            self.pinned += 1
+            if self.pinned > 30:                 # ~0.5s of going nowhere
+                self.pinned = 0
+                self.reverse_timer = 26
+                self.reverse_side = random.choice((-1, 1))
+        else:
+            self.pinned = 0
+
+        # --- whiskers: straight ahead, then +/- 40 degrees ---------------
+        ahead = self.probe_clear(self.angle, 46)
+        steer = diff * 2.2
+        if not ahead:
+            left = self.probe_clear(self.angle - 0.70, 42)
+            right = self.probe_clear(self.angle + 0.70, 42)
+            if right and not left:
+                steer = 1.6
+            elif left and not right:
+                steer = -1.6
+            else:
+                steer = 1.6 if diff >= 0 else -1.6
+
+        self.input_steer = max(-1.0, min(1.0, steer))
+        if dist <= 34:
+            self.input_throttle = 0.0
+        else:
+            self.input_throttle = 1.0 if ahead else 0.5
         self.physics_step()
 
     def draw(self, screen, camera, flash_phase=0):
@@ -6414,29 +6674,63 @@ class Game:
             px2, py2 = random_open_spawn()
             self.pedestrians.append(Pedestrian(px2, py2, self._ped_kind_for(px2, py2)))
 
-        station_x = POLICE_STATION_TILE[0] * TILE_SIZE
-        station_y = POLICE_STATION_TILE[1] * TILE_SIZE
-        self.police_station = (station_x, station_y)
+        # POLICE_STATION_TILE names a building tile, so its raw centre is solid
+        # ground. Resolve it once to the nearest standable spot: anything that
+        # spawns there (a cop, or you after a bust) would otherwise be sealed
+        # inside the wall with move_forward_check failing forever.
+        station_x = POLICE_STATION_TILE[0] * TILE_SIZE + TILE_SIZE // 2
+        station_y = POLICE_STATION_TILE[1] * TILE_SIZE + TILE_SIZE // 2
+        self.police_station = free_point_near(
+            station_x, station_y, VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H,
+            max_rings=10) or (station_x, station_y)
         self.police = []
 
+        # --- progression -------------------------------------------------
+        # score and cash used to be incremented in lockstep everywhere, which
+        # made one of them redundant. They now mean different things: cash is
+        # earned by finishing delivery runs, score is the chaos counter.
         self.wanted_level = 0
         self.score = 0
-        self.cash = 0
+        self.cash = 200          # seed float so the first bail is survivable
         self.discovered = set()
         self.toasts = []
-        self.infraction_cooldown = 0
-        self.wanted_decay_timer = 0
         self.busted_flash = 0
         self.running = True
+
+        # --- jobs ---------------------------------------------------------
+        self.job = Job.generate()
+        self.jobs_done = 0
+        self.jobs_failed = 0
+        self.streak = 0
+        self.best_streak = 0
+        self.job_cooldown = 0
+
+        # --- heat ---------------------------------------------------------
+        self.infraction_at = {}   # offence key -> sim step it may re-arm at
+        self.heat_timer = 0       # steps since the last crime / last cop sighting
+        self.wanted_decay_timer = 0
+        self.bust_meter = 0       # sustained cop contact; you get a chance to run
+
+        # --- loop / debug --------------------------------------------------
+        self.state = STATE_PLAYING
+        self.accumulator = 0.0
+        self.show_debug = False
+        self.fps_now = 0.0
+        self.sim_steps = 1
+        self.hud_left_y = 8
 
     # ---------------- persistence ----------------
     def save_game(self):
         state = {
+            'version': 2,
             'player': {'x': self.player_rect.centerx, 'y': self.player_rect.centery},
             'score': self.score,
             'cash': self.cash,
             'wanted_level': self.wanted_level,
             'discovered': list(self.discovered),
+            'jobs_done': self.jobs_done,
+            'jobs_failed': self.jobs_failed,
+            'best_streak': self.best_streak,
         }
         try:
             with open("savegame.json", 'w') as f:
@@ -6452,11 +6746,23 @@ class Game:
         try:
             with open("savegame.json", 'r') as f:
                 state = json.load(f)
+            if self.driving:                      # step out before teleporting
+                self.driving.driver = None
+                self.driving.parked = True
+                traffic_hand_back(self.driving)
+                self.driving = None
             self.player_rect.center = (state['player']['x'], state['player']['y'])
             self.score = state.get('score', 0)
             self.cash = state.get('cash', 0)
-            self.wanted_level = state.get('wanted_level', 0)
+            self.wanted_level = min(WANTED_MAX, max(0, int(state.get('wanted_level', 0))))
             self.discovered = set(state.get('discovered', []))
+            self.jobs_done = state.get('jobs_done', 0)
+            self.jobs_failed = state.get('jobs_failed', 0)
+            self.best_streak = state.get('best_streak', 0)
+            self.streak = 0
+            self.police = []
+            self.bust_meter = 0
+            self.job = Job.generate()             # runs are not resumable, redeal
             self.add_toast("Game loaded")
         except (OSError, json.JSONDecodeError, KeyError) as e:
             self.add_toast(f"Load failed: {e}")
@@ -6483,6 +6789,27 @@ class Game:
 
     # ---------------- input ----------------
     def handle_events(self):
+        """Pump the OS queue first, then sample held keys.
+
+        Order matters: pygame.key.get_pressed() is only refreshed by pumping
+        the event queue, so the old code (get_pressed *before* event.get)
+        steered the car with last frame's input on every single frame.
+        """
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                self.running = False
+            elif event.type == pygame.KEYDOWN:
+                self.handle_keydown(event.key)
+
+        if self.state != STATE_PLAYING:
+            # Paused: hold everything still rather than letting the last
+            # throttle value keep the car rolling behind the menu.
+            if self.driving:
+                self.driving.input_throttle = 0.0
+                self.driving.input_steer = 0.0
+            self.player_dir = [0, 0]
+            return
+
         keys = pygame.key.get_pressed()
 
         if self.driving:
@@ -6513,48 +6840,100 @@ class Game:
                 dy *= 0.707
             self.player_dir = [dx, dy]
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
+    def handle_keydown(self, key):
+        """One-shot keys. ESC pauses; nothing quits outright from play.
+
+        The old bindings had ESC *and* Q hard-quitting mid-drive with no
+        confirmation and no autosave, and Q sits right next to WASD. Quitting
+        now only happens from the pause menu.
+        """
+        if key in (pygame.K_ESCAPE, pygame.K_p, pygame.K_F1):
+            self.toggle_pause()
+            return
+
+        if self.state == STATE_PAUSED:
+            if key == pygame.K_q:
                 self.running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_ESCAPE, pygame.K_q):
-                    self.running = False
-                elif event.key == pygame.K_e:
-                    self.toggle_enter_exit()
-                elif event.key == pygame.K_F5:
-                    self.save_game()
-                elif event.key == pygame.K_F2:
-                    self.postfx.toggle()
-                elif event.key == pygame.K_F9:
-                    self.load_game()
+            elif key == pygame.K_F5:
+                self.save_game()
+            elif key == pygame.K_F9:
+                self.load_game()
+            return
+
+        if key == pygame.K_e:
+            self.toggle_enter_exit()
+        elif key == pygame.K_F5:
+            self.save_game()
+        elif key == pygame.K_F9:
+            self.load_game()
+        elif key == pygame.K_F2:
+            self.postfx.toggle()
+        elif key == pygame.K_F3:
+            self.show_debug = not self.show_debug
+
+    def toggle_pause(self):
+        self.state = STATE_PLAYING if self.state == STATE_PAUSED else STATE_PAUSED
+
+    def exit_vehicle(self):
+        """Step out onto real ground, or refuse.
+
+        The old code dropped the player at car.centerx - 40 with no collision
+        test at all, so getting out anywhere with a wall to your left put you
+        inside a building - or in the Mississippi - with no way back out.
+        """
+        car = self.driving
+        heading = car.angle
+        # Prefer the kerb side, then the other side, then behind, then ahead.
+        for offset in (heading + math.pi / 2, heading - math.pi / 2,
+                       heading + math.pi, heading):
+            tx = car.rect.centerx + math.cos(offset) * 34
+            ty = car.rect.centery + math.sin(offset) * 34
+            spot = free_point_near(tx, ty, PLAYER_SIZE, PLAYER_SIZE, max_rings=2)
+            if spot is not None:
+                self.player_rect.center = spot
+                car.driver = None
+                car.parked = True
+                car.input_throttle = 0.0
+                car.input_steer = 0.0
+                traffic_hand_back(car)
+                self.driving = None
+                return True
+        self.add_toast("No room to get out!")
+        return False
 
     def toggle_enter_exit(self):
         if self.driving:
-            self.driving.driver = None
-            self.driving.parked = True
-            traffic_hand_back(self.driving)
-            exit_pos = (self.driving.rect.centerx - 40, self.driving.rect.centery)
-            self.player_rect.center = exit_pos
-            self.driving = None
+            self.exit_vehicle()
             return
+        # Nearest jackable car wins, so standing between two does not pick
+        # whichever happens to be earlier in the list.
+        best, best_d = None, None
         for car in self.cars:
-            if car.driver is None and car.rect.inflate(24, 24).colliderect(self.player_rect):
-                car.driver = 'player'
-                car.parked = False
-                car.max_speed = PLAYER_CAR_MAX_SPEED
-                self.driving = car
-                self.add_toast("Jacked a ride!")
-                self.score += 20
-                self.cash += 20
-                return
+            if car.driver is not None:
+                continue
+            if not car.rect.inflate(24, 24).colliderect(self.player_rect):
+                continue
+            d = math.hypot(car.rect.centerx - self.player_rect.centerx,
+                           car.rect.centery - self.player_rect.centery)
+            if best_d is None or d < best_d:
+                best, best_d = car, d
+        if best is None:
+            return
+        best.driver = 'player'
+        best.parked = False
+        best.max_speed = PLAYER_CAR_MAX_SPEED
+        self.driving = best
+        self.add_toast("Jacked a ride!")
+        self.score += 20
 
     # ---------------- update ----------------
     def update(self):
+        """One fixed 1/60s simulation step."""
         self.frame += 1
         if self.driving:
-            collided = self.driving.physics_step()
-            if collided:
-                self.wanted_bump(0.15, cooldown_key='wall')
+            # Scraping a wall used to raise your wanted level. Bouncing off a
+            # kerb is not a crime; only the offences in handle_collisions are.
+            self.driving.physics_step()
         else:
             dx = self.player_dir[0] * PLAYER_SPEED
             dy = self.player_dir[1] * PLAYER_SPEED
@@ -6577,21 +6956,88 @@ class Game:
         self.handle_collisions()
         self.update_police()
         self.update_wanted_decay()
+        self.update_job()
         self.check_landmark_discovery()
         self.toasts = [t for t in self.toasts if pygame.time.get_ticks() < t.expires]
         if self.busted_flash > 0:
             self.busted_flash -= 1
 
-    def wanted_bump(self, amount, cooldown_key):
-        if self.infraction_cooldown <= 0:
-            self.wanted_level = min(5, self.wanted_level + amount)
-            self.infraction_cooldown = 45
+    # ---------------- jobs ----------------
+    def update_job(self):
+        """Advance the courier run: pickup, clock, drop-off, payout."""
+        if self.job_cooldown > 0:
+            self.job_cooldown -= 1
+            if self.job_cooldown == 0 and self.job is None:
+                self.job = Job.generate()
+                self.add_toast(f"New run: {self.job.pickup[5]}")
+            return
+        if self.job is None:
+            self.job = Job.generate()
+            return
+
+        active = self.active_rect()
+        tx, ty = self.job.target_pos
+        near = math.hypot(active.centerx - tx, active.centery - ty) <= JOB_MARKER_RADIUS
+
+        if not self.job.collected:
+            if not near:
+                return
+            if self.wanted_level >= JOB_HEAT_LIMIT:
+                # One toast, not one per frame.
+                if self.frame % (FPS * 2) == 0:
+                    self.add_toast("Too hot - lose the cops first")
+                return
+            self.job.collect()
+            self.add_toast(f"Picked up: {self.job.cargo}")
+            return
+
+        if self.job.tick():
+            self.fail_job("Too slow - run lost")
+            return
+        if near:
+            paid = self.job.payout(self.streak)
+            self.cash += paid
+            self.score += 50
+            self.jobs_done += 1
+            self.streak += 1
+            self.best_streak = max(self.best_streak, self.streak)
+            tail = f" (x{self.streak} streak)" if self.streak > 1 else ""
+            self.add_toast(f"Delivered! ${paid}{tail}")
+            self.job = None
+            self.job_cooldown = FPS * 2
+
+    def fail_job(self, reason):
+        if self.job is None:
+            return
+        self.jobs_failed += 1
+        self.streak = 0
+        self.job = None
+        self.job_cooldown = FPS * 2
+        self.add_toast(reason)
+
+    # ---------------- heat ----------------
+    def wanted_bump(self, stars, key):
+        """Commit an offence worth `stars`, rate-limited per offence type.
+
+        Wanted levels are whole stars now. The old code added fractions
+        (0.15 for a wall scrape, 0.5 for a fender bender) and then spawned
+        int(wanted_level) cops, so the star display and the actual police
+        response disagreed with each other for most of a chase.
+        """
+        if self.frame < self.infraction_at.get(key, 0):
+            return
+        self.infraction_at[key] = self.frame + INFRACTION_COOLDOWN.get(key, FPS)
+        was = self.wanted_level
+        self.wanted_level = min(WANTED_MAX, self.wanted_level + stars)
+        self.heat_timer = 0
+        self.wanted_decay_timer = 0
+        if self.wanted_level > was and self.wanted_level == 1:
+            self.add_toast("Wanted! Lose them or get busted")
 
     def handle_collisions(self):
-        if self.infraction_cooldown > 0:
-            self.infraction_cooldown -= 1
         if not self.driving:
             return
+        speed = abs(self.driving.velocity)
         for ped in self.pedestrians:
             if ped.bump_cooldown <= 0 and self.driving.rect.colliderect(ped.rect.inflate(6, 6)):
                 ped.bump_cooldown = 90
@@ -6599,66 +7045,148 @@ class Game:
                                        ped.rect.centery - self.driving.rect.centery)
                 if push.length() > 0:
                     push = push.normalize() * 24
-                    ped.rect.move_ip(int(push.x), int(push.y))
+                    moved = ped.rect.move(int(push.x), int(push.y))
+                    if not is_blocked(moved):
+                        ped.rect.topleft = moved.topleft
+                # Chaos pays in score, never in cash - the delivery loop is the
+                # only thing that puts money in your pocket.
                 self.score += 5
-                self.cash += 5
                 self.wanted_bump(1, 'pedestrian')
                 self.add_toast("Yikes! +5")
         for car in self.cars:
             if car is self.driving or car.driver == 'player':
                 continue
             if self.driving.rect.colliderect(car.rect):
-                self.wanted_bump(0.5, 'traffic')
+                # A nudge in traffic is not a crime; a real shunt is.
+                if speed > 4.5:
+                    self.score += 2
+                    self.wanted_bump(1, 'traffic')
+        for cop in self.police:
+            if self.driving.rect.colliderect(cop.rect) and speed > 4.5:
+                self.wanted_bump(1, 'cop')
+
+    # ---------------- police ----------------
+    def cop_spawn_point(self):
+        """A road tile off-screen but within reach, so cops actually arrive.
+
+        Every cop used to spawn at the downtown station regardless of where the
+        player was, which on a 6400px map meant they spent the whole (6 second)
+        wanted timer driving toward a chase that had already ended.
+        """
+        active = self.active_rect()
+        for _ in range(60):
+            ang = random.uniform(0, math.tau)
+            dist = random.uniform(COP_SPAWN_MIN, COP_SPAWN_MAX)
+            x = active.centerx + math.cos(ang) * dist
+            y = active.centery + math.sin(ang) * dist
+            col, row = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+            if not (2 <= col < MAP_TILES_W - 2 and 2 <= row < MAP_TILES_H - 2):
+                continue
+            if tile_type_at(col, row) != TILE_ROAD:
+                continue
+            spot = free_point_near(col * TILE_SIZE + TILE_SIZE // 2,
+                                   row * TILE_SIZE + TILE_SIZE // 2,
+                                   VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H, max_rings=1)
+            if spot is not None:
+                return spot
+        return self.police_station
 
     def update_police(self):
-        target_count = max(0, int(self.wanted_level))
+        target_count = COP_COUNT_BY_STAR[min(self.wanted_level, WANTED_MAX)]
+        active_c = self.active_rect().center
         while len(self.police) < target_count:
-            px, py = self.police_station
-            cop = Car(px + random.randint(-40, 40), py + random.randint(-40, 40), color=POLICE_COLOR)
+            sx, sy = self.cop_spawn_point()
+            cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
             cop.driver = 'police'
-            cop.max_speed = 8.0
+            cop.max_speed = COP_MAX_SPEED
+            # Cops used to spawn with Car.__init__'s random heading *and* a
+            # random civilian body, so a patrol car could arrive as a blue
+            # school bus pointed the wrong way. Now: a cruiser, facing you.
+            cop.angle = math.atan2(active_c[1] - sy, active_c[0] - sx)
             self.police.append(cop)
         while len(self.police) > target_count:
             self.police.pop()
 
         active = self.active_rect()
+        touching = False
+        cop_near = False
         for cop in self.police:
             cop.chase_ai(active.center)
-            if cop.rect.colliderect(active) and self.busted_flash <= 0:
+            d = math.hypot(cop.rect.centerx - active.centerx,
+                           cop.rect.centery - active.centery)
+            if d < COP_SIGHT:
+                cop_near = True
+            if cop.rect.colliderect(active.inflate(4, 4)):
+                touching = True
+
+        # A single frame of contact used to bust you instantly. Now the cops
+        # have to hold you for ~0.7s, so shaking one off in a scrape is a real
+        # skill rather than a coin flip.
+        if touching and self.busted_flash <= 0:
+            self.bust_meter += 1
+            if self.bust_meter >= BUST_CONTACT_STEPS:
                 self.busted()
+        else:
+            self.bust_meter = max(0, self.bust_meter - BUST_RELIEF)
+
+        if cop_near:
+            self.heat_timer = 0
 
     def busted(self):
-        self.add_toast("BUSTED!")
+        """Booked and released at the station, minus bail.
+
+        The old version teleported you to a random tile anywhere on a 100x100
+        map, which meant every bust also destroyed your sense of where you
+        were. You now come out of the station you were taken to.
+        """
+        bail = min(self.cash, BAIL_COST)
+        self.cash -= bail
+        self.add_toast(f"BUSTED! Bail ${bail}")
         self.busted_flash = FPS * 2
         self.wanted_level = 0
         self.police = []
+        self.bust_meter = 0
+        self.heat_timer = 0
         if self.driving:
             self.driving.driver = None
             self.driving.parked = True
+            traffic_hand_back(self.driving)
             self.driving = None
-        px, py = random_open_spawn()
-        self.player_rect.center = (px, py)
-        self.score = max(0, self.score - 50)
-        self.cash = max(0, self.cash - 50)
+        spot = free_point_near(self.police_station[0], self.police_station[1],
+                               PLAYER_SIZE, PLAYER_SIZE, max_rings=8)
+        self.player_rect.center = spot if spot is not None else random_open_spawn()
+        if self.job is not None and self.job.collected:
+            self.fail_job("Cargo impounded")
 
     def update_wanted_decay(self):
+        """Stars only fall once you are genuinely clear.
+
+        Previously the level dropped one star every 6 seconds no matter what,
+        so the correct play against the police was to stop the car and wait.
+        The timer now resets whenever a cop is near you (see update_police) or
+        you commit a fresh offence, so you have to actually break line of
+        sight and put distance between you and them.
+        """
         if self.wanted_level <= 0:
+            self.heat_timer = 0
+            self.wanted_decay_timer = 0
+            return
+        self.heat_timer += 1
+        if self.heat_timer < HEAT_GRACE:
             return
         self.wanted_decay_timer += 1
-        if self.wanted_decay_timer > FPS * 6:
+        if self.wanted_decay_timer >= WANTED_DECAY_STEPS:
             self.wanted_decay_timer = 0
             self.wanted_level = max(0, self.wanted_level - 1)
             if self.wanted_level == 0:
-                self.add_toast("Cops gave up chasing you")
+                self.add_toast("Lost them")
                 self.score += 100
-                self.cash += 100
 
     def check_landmark_discovery(self):
         name = landmark_at(self.active_rect())
         if name and name not in self.discovered:
             self.discovered.add(name)
             self.score += 150
-            self.cash += 150
             self.add_toast(f"Discovered: {name}!")
 
     # ---------------- drawing ----------------
@@ -6995,6 +7523,7 @@ class Game:
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
             self.screen.blit(sprite, rect)
 
+        self.draw_job_marker()
         self.draw_hud()
         if self.busted_flash > FPS:
             flash_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
@@ -7004,8 +7533,109 @@ class Game:
             hud_text(self.screen, "BUSTED!", (SCREEN_WIDTH - bw) // 2,
                      SCREEN_HEIGHT // 2 - 10, hud_HUD_RED, True, 3)
 
+        if self.show_debug:
+            self.draw_debug()
+        if self.state == STATE_PAUSED:
+            self.draw_pause()
+
         self.postfx.present(self.screen, self.window)
         pygame.display.flip()
+
+    # ---------------- objective rendering ----------------
+    JOB_MARKER_COLORS = ((250, 214, 78), (196, 150, 34))
+    JOB_DROP_COLORS = ((110, 226, 118), (44, 146, 62))
+
+    def draw_job_marker(self):
+        """Ground marker for the current objective, plus an edge-of-screen
+        chevron when it is off camera.
+
+        Without this the player is told to go to 'The Hill' and handed a
+        100x100 tile city with no indication of which way that is.
+        """
+        if self.job is None:
+            return
+        bright, dark = (self.JOB_DROP_COLORS if self.job.collected
+                        else self.JOB_MARKER_COLORS)
+        tx, ty = self.job.target_pos
+        sx, sy = self.camera.apply_pos((tx, ty))
+        pulse = (self.frame // 6) % 4                # 4-step chunky pulse
+
+        margin = 18
+        if -margin < sx < SCREEN_WIDTH + margin and -margin < sy < SCREEN_HEIGHT + margin:
+            sx, sy = int(sx), int(sy)
+            for i, radius in enumerate((16 + pulse, 11 + pulse)):
+                pygame.draw.circle(self.screen, dark if i else bright,
+                                   (sx, sy), radius, 2)
+            pygame.draw.rect(self.screen, bright, (sx - 2, sy - 2, 5, 5))
+            return
+
+        # Off-screen: clamp a chevron to the viewport edge, pointing at it.
+        cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+        ang = math.atan2(sy - cy, sx - cx)
+        ex = max(margin, min(SCREEN_WIDTH - margin, cx + math.cos(ang) * SCREEN_WIDTH))
+        ey = max(margin, min(SCREEN_HEIGHT - margin, cy + math.sin(ang) * SCREEN_HEIGHT))
+        ex, ey = int(ex), int(ey)
+        nose = (ex + int(math.cos(ang) * 9), ey + int(math.sin(ang) * 9))
+        left = (ex + int(math.cos(ang + 2.4) * 9), ey + int(math.sin(ang + 2.4) * 9))
+        right = (ex + int(math.cos(ang - 2.4) * 9), ey + int(math.sin(ang - 2.4) * 9))
+        pygame.draw.polygon(self.screen, dark, (nose, left, right))
+        pygame.draw.polygon(self.screen, bright, (nose, left, right), 1)
+
+    # ---------------- overlays ----------------
+    PAUSE_LINES = (
+        ("WASD / ARROWS", "MOVE OR DRIVE"),
+        ("E", "ENTER / EXIT VEHICLE"),
+        ("ESC / P", "PAUSE"),
+        ("F5 / F9", "SAVE / LOAD"),
+        ("F2", "CRT FILTER"),
+        ("F3", "DEBUG OVERLAY"),
+        ("Q", "QUIT - FROM HERE ONLY"),
+    )
+
+    def draw_pause(self):
+        """Pause screen doubling as the controls reference.
+
+        The controls used to be printed to stdout at launch - a terminal the
+        player cannot see while the window has focus. They live in the game now.
+        """
+        dim = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        dim.fill((6, 6, 10, 170))
+        self.screen.blit(dim, (0, 0))
+
+        pw, ph = 300, 34 + len(self.PAUSE_LINES) * 12 + 26
+        px = (SCREEN_WIDTH - pw) // 2
+        py = (SCREEN_HEIGHT - ph) // 2
+        hud_draw_panel(self.screen, pygame.Rect(px, py, pw, ph), alpha=232)
+
+        title = "PAUSED"
+        hud_text(self.screen, title, px + (pw - hud_text_width(title, 2)) // 2,
+                 py + 10, hud_HUD_GOLD, True, 2)
+        y = py + 32
+        for key, what in self.PAUSE_LINES:
+            hud_text(self.screen, key, px + 14, y, hud_HUD_GOLD, True, 1)
+            hud_text(self.screen, what, px + 128, y, hud_HUD_WHITE, True, 1)
+            y += 12
+
+        stat = f"RUNS {self.jobs_done}  LOST {self.jobs_failed}  BEST X{self.best_streak}"
+        hud_text(self.screen, stat, px + (pw - hud_text_width(stat, 1)) // 2,
+                 py + ph - 16, hud_HUD_GREY_DIM, True, 1)
+
+    def draw_debug(self):
+        """F3 readout. Frame budget, sim steps and world state in one place -
+        previously there was no way to tell a 60fps run from a 20fps one."""
+        active = self.active_rect()
+        lines = (
+            f"FPS {self.fps_now:0.0f}  STEPS {self.sim_steps}",
+            f"TILE {active.centerx // TILE_SIZE},{active.centery // TILE_SIZE}",
+            f"CARS {len(self.cars)}  COPS {len(self.police)}  PEDS {len(self.pedestrians)}",
+            f"WANTED {self.wanted_level}  HEAT {self.heat_timer}  BUST {self.bust_meter}",
+            f"STATE {'DRIVE' if self.driving else 'FOOT'}  FRAME {self.frame}",
+        )
+        w = max(hud_text_width(s, 1) for s in lines) + 12
+        top = self.hud_left_y + 4
+        hud_draw_panel(self.screen, pygame.Rect(8, top, w, len(lines) * 10 + 8), alpha=190)
+        for i, s in enumerate(lines):
+            hud_text(self.screen, s, 14, top + 4 + i * 10, hud_HUD_GREEN, True, 1)
 
     def build_radar_base(self):
         """Pre-render the static map once.
@@ -7051,7 +7681,15 @@ class Game:
             pygame.draw.circle(self.screen, hud_HUD_RED,
                                (int(rx + cop.rect.centerx * scale),
                                 int(ry + cop.rect.centery * scale)), 1)
+        if self.job is not None:
+            jc = hud_HUD_GREEN if self.job.collected else hud_HUD_GOLD
+            jx, jy = self.job.target_pos
+            pygame.draw.circle(self.screen, jc,
+                               (int(rx + jx * scale), int(ry + jy * scale)), 2)
         hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
+
+        self.hud_left_y = self.draw_objective()
+        self.draw_bust_meter()
 
         # mode readout, bottom left
         mode = "DRIVING" if self.driving else "ON FOOT"
@@ -7062,32 +7700,206 @@ class Game:
             hud_text(self.screen, toast.text, 12, SCREEN_HEIGHT - 32 - i * 12,
                      hud_HUD_WHITE, True, 1)
 
+    def draw_objective(self):
+        """Top-left objective block: what to do, where, and how long you have.
+
+        Returns the y the next left-column overlay may start at.
+        """
+        if self.job is None:
+            return 8
+        job = self.job
+        verb = "DELIVER TO" if job.collected else "PICK UP AT"
+        col = hud_HUD_GREEN if job.collected else hud_HUD_GOLD
+        head = f"{verb} {job.target_name}"
+        sub = job.cargo if job.collected else f"PAYS ${job.base_reward}"
+
+        # The countdown is drawn right-aligned on the headline row, so the
+        # panel has to reserve a gutter for it or a long landmark name runs
+        # straight under the digits.
+        clock_gutter = hud_text_width("000", 1) + 8 if job.collected else 0
+        pw = max(hud_text_width(head, 1) + clock_gutter, hud_text_width(sub, 1)) + 16
+        ph = 40 if job.collected else 34
+        hud_draw_panel(self.screen, pygame.Rect(8, 8, pw, ph), alpha=205)
+        hud_text(self.screen, head, 15, 13, col, True, 1)
+        hud_text(self.screen, sub, 15, 24, hud_HUD_GREY_DIM, True, 1)
+
+        if job.collected:
+            # Timer bar; turns red inside the last quarter so the pressure reads
+            # at a glance without having to parse a number.
+            frac = job.steps_left / float(max(1, int(job.time_limit * FPS)))
+            bw = pw - 16
+            fill = int(bw * max(0.0, min(1.0, frac)))
+            bar = pygame.Rect(15, 34, bw, 4)
+            pygame.draw.rect(self.screen, (30, 30, 38), bar)
+            if fill > 0:
+                shade = hud_HUD_RED if frac < 0.25 else hud_HUD_GREEN
+                pygame.draw.rect(self.screen, shade, (bar.x, bar.y, fill, bar.h))
+            secs = f"{job.seconds_left:0.0f}"
+            hud_text(self.screen, secs, 8 + pw - hud_text_width(secs, 1) - 7, 13,
+                     hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
+
+        y = 8 + ph
+        if self.streak > 1:
+            s = f"STREAK X{self.streak}"
+            hud_text(self.screen, s, 15, y + 3, hud_HUD_GOLD, True, 1)
+            y += 14
+        return y
+
+    def draw_bust_meter(self):
+        """Sustained-contact bar. Shows you are being taken, and that letting
+        go of the throttle is not the same as being caught."""
+        if self.bust_meter <= 0:
+            return
+        frac = min(1.0, self.bust_meter / float(BUST_CONTACT_STEPS))
+        bw = 96
+        x = (SCREEN_WIDTH - bw) // 2
+        y = SCREEN_HEIGHT - 34
+        label = "BUSTING"
+        hud_text(self.screen, label, x + (bw - hud_text_width(label, 1)) // 2,
+                 y - 11, hud_HUD_RED, True, 1)
+        pygame.draw.rect(self.screen, (30, 30, 38), (x, y, bw, 5))
+        pygame.draw.rect(self.screen, hud_HUD_RED, (x, y, int(bw * frac), 5))
+
     # ---------------- main loop ----------------
+    def step_sim(self, elapsed):
+        """Spend `elapsed` real seconds as whole 1/60s simulation steps.
+
+        Everything in this file - PLAYER_SPEED, car acceleration, drag, steer
+        rates, traffic pacing, timers - is authored per step, and the old loop
+        just called update() once per rendered frame. That silently tied the
+        speed of the whole game to the frame rate: a machine holding 30fps
+        played the entire city in half speed, and one running unlocked played
+        it at double. Banking real time and spending it in fixed slices keeps
+        the sim identical everywhere, and the MAX_SIM_STEPS clamp stops a long
+        stall (dragging the window, waking from sleep) from spiralling into a
+        hundred catch-up steps at once.
+        """
+        self.accumulator += min(elapsed, MAX_FRAME_TIME)
+        steps = 0
+        while self.accumulator >= SIM_DT and steps < MAX_SIM_STEPS:
+            self.update()
+            self.accumulator -= SIM_DT
+            steps += 1
+        if self.accumulator > SIM_DT * MAX_SIM_STEPS:
+            self.accumulator = 0.0          # too far behind; drop the debt
+        self.sim_steps = steps
+        return steps
+
     def run(self):
         print("=" * 60)
         print("  STL-GTA: St. Louis Open-World Sandbox")
         print("=" * 60)
-        print("  WASD / Arrows - Move or Drive")
-        print("  E             - Enter / Exit Vehicle")
-        print("  F5 / F9       - Save / Load")
-        print("  ESC / Q       - Quit")
-        print(f"  Explore {len(LANDMARKS)} St. Louis landmarks. Reckless driving raises your wanted level!")
+        print("  Deliver cargo between landmarks for cash. Cops want a word.")
+        print("  ESC / P - Pause (full controls listed there)")
         print("=" * 60)
+        self.add_toast("Press ESC for controls")
 
+        self.accumulator = 0.0
         while self.running:
+            elapsed = self.clock.tick(FPS) / 1000.0
+            self.fps_now = self.clock.get_fps()
             self.handle_events()
             if not self.running:
                 break
-            self.update()
+            if self.state == STATE_PLAYING:
+                self.step_sim(elapsed)
+            else:
+                self.accumulator = 0.0      # do not bank time while paused
+                self.sim_steps = 0
             self.draw()
-            self.clock.tick(FPS)
 
         pygame.quit()
 
+    # ---------------- headless ----------------
+    def run_headless(self, frames, shot_path=None, seed=None):
+        """Boot, simulate `frames` steps with scripted input, check invariants.
 
-def main():
-    Game().run()
+        This is what makes the game testable in CI: no window, no player, no
+        wall clock. Returns 0 on success and 1 on the first invariant breach,
+        with the failure printed.
+        """
+        rng = random.Random(seed if seed is not None else 1234)
+        script = [(pygame.K_w, 0.55), (pygame.K_a, 0.15), (pygame.K_d, 0.15)]
+        self.add_toast("Headless run")
+        for i in range(frames):
+            if i % 90 == 0:
+                self.toggle_enter_exit()
+            if self.driving:
+                self.driving.input_throttle = 1.0
+                self.driving.input_steer = rng.choice((-1.0, 0.0, 0.0, 1.0))
+            else:
+                self.player_dir = [rng.choice((-1, 0, 1)), rng.choice((-1, 0, 1))]
+            self.step_sim(SIM_DT)
+            self.draw()
+            problem = self.check_invariants()
+            if problem:
+                print(f"FAIL at step {i}: {problem}")
+                return 1
+        if shot_path:
+            pygame.image.save(self.window, shot_path)
+            print(f"wrote {shot_path}")
+        print(f"OK: {frames} steps, {len(self.cars)} cars, {len(self.pedestrians)} peds, "
+              f"score={self.score} cash={self.cash} runs={self.jobs_done}")
+        return 0
+
+    def check_invariants(self):
+        """Things that must hold every single step. Returns a reason or None."""
+        def finite(*vals):
+            return all(v == v and abs(v) != float('inf') for v in vals)
+
+        p = self.active_rect()
+        if not (0 <= p.centerx <= MAP_WIDTH and 0 <= p.centery <= MAP_HEIGHT):
+            return f"player left the map at {p.center}"
+        if not 0 <= self.wanted_level <= WANTED_MAX:
+            return f"wanted level out of range: {self.wanted_level}"
+        if len(self.police) != COP_COUNT_BY_STAR[self.wanted_level]:
+            return (f"police count {len(self.police)} != "
+                    f"{COP_COUNT_BY_STAR[self.wanted_level]} for {self.wanted_level} stars")
+        if self.cash < 0:
+            return f"negative cash: {self.cash}"
+        if self.score < 0:
+            return f"negative score: {self.score}"
+        for car in self.cars + self.police:
+            if not finite(car.angle, car.velocity):
+                return f"car physics went non-finite: {car.variant}"
+            if not (-TILE_SIZE <= car.rect.centerx <= MAP_WIDTH + TILE_SIZE
+                    and -TILE_SIZE <= car.rect.centery <= MAP_HEIGHT + TILE_SIZE):
+                return f"car left the map at {car.rect.center}"
+        if self.job is not None and self.job.collected and self.job.steps_left < 0:
+            return "job timer went negative"
+        if self.driving is not None and self.driving.driver != 'player':
+            return "driving a car that does not know it has a driver"
+        return None
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    parser = argparse.ArgumentParser(
+        prog="stl-gta", description="STL-GTA: a top-down St. Louis driving sandbox.")
+    parser.add_argument("--headless", action="store_true",
+                        help="run without a window and exit (smoke test / CI)")
+    parser.add_argument("--frames", type=int, default=600,
+                        help="simulation steps to run in headless mode")
+    parser.add_argument("--shot", metavar="PATH",
+                        help="save a PNG of the final headless frame")
+    parser.add_argument("--seed", type=int, help="seed the RNG for a repeatable run")
+    args = parser.parse_args(argv)
+
+    if args.headless:
+        # Must be set before pygame opens a display.
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
+    if args.seed is not None:
+        random.seed(args.seed)
+
+    game = Game()
+    if args.headless:
+        code = game.run_headless(args.frames, args.shot, args.seed)
+        pygame.quit()
+        return code
+    game.run()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
