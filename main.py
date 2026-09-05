@@ -146,6 +146,22 @@ LANDMARKS = [
 
 CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
 
+# What ambient traffic / parked cars roll from. The St. Louis service vehicles
+# (a City refuse truck, a box truck, a school bus, a Hill delivery scooter) are
+# in the mix but rare, so the streets still read as mostly ordinary cars.
+CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 3
+                     + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
+                     + ['bus'] * 1 + ['garbage_truck'] * 1)
+
+# Per-variant handling + collider size. Anything absent uses the car defaults
+# (34x18, max_steer 0.045, speed_factor 1.0). speed_factor scales traffic pace.
+VEHICLE_TUNING = {
+    'garbage_truck': dict(w=42, h=18, acceleration=0.15, max_steer=0.034, speed_factor=0.66),
+    'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.72),
+    'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.85),
+    'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.08),
+}
+
 # (variant, colour) -> ([sprite] * 24, [shadow] * 24), filled by bake_car_sprites().
 CAR_SPRITES = {}
 
@@ -188,6 +204,13 @@ def bake_car_sprites():
         frames = _scale_frames(cars_bake_variant(variant), SPRITE_SCALE_CAR)
         entry = (frames, [cars_make_shadow(f) for f in frames])
         for c in CAR_COLORS + [POLICE_COLOR]:
+            sets[(variant, c)] = entry
+    # St. Louis service vehicles: fixed liveries, so one bake covers every
+    # colour slot the spawner might ask for (same trick as the taxi).
+    for variant in ('garbage_truck', 'bus', 'box_truck', 'vespa'):
+        frames = _scale_frames(cars_bake_variant(variant), SPRITE_SCALE_CAR)
+        entry = (frames, [cars_make_shadow(f) for f in frames])
+        for c in CAR_COLORS:
             sets[(variant, c)] = entry
     CAR_SPRITES = sets
 
@@ -1002,6 +1025,153 @@ def cars__build_grid(spec, body):
     return grid
 
 
+# --------------------------------------------------------------------------
+# Hand-built big vehicles + the scooter. These are not car-shaped, so they
+# skip cars__SPECS / cars__span and lay pixels straight into an east-facing
+# grid[y][x], then reuse the shared rotate + shadow pipeline.
+# --------------------------------------------------------------------------
+cars_BIG_SPECS = {
+    'garbage_truck': (48, 22),
+    'bus':           (54, 20),
+    'box_truck':     (44, 20),
+}
+
+
+def cars__put_r(grid, x0, y0, x1, y1, c):
+    H, L = len(grid), len(grid[0])
+    for y in range(max(0, y0), min(H, y1 + 1)):
+        for x in range(max(0, x0), min(L, x1 + 1)):
+            grid[y][x] = c
+
+
+def cars__outline_shade(grid):
+    """1px near-black outline round any filled shape, then NW-light / SE-dark
+    form shading -- the cheap version of cars__build_grid's passes for grids
+    that were not built from a spec silhouette."""
+    H, L = len(grid), len(grid[0])
+    edge = []
+    for y in range(H):
+        for x in range(L):
+            if grid[y][x] is not None:
+                continue
+            if any(0 <= x + dx < L and 0 <= y + dy < H
+                   and grid[y + dy][x + dx] not in (None, cars_OUTLINE)
+                   for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                edge.append((x, y))
+    for x, y in edge:
+        grid[y][x] = cars_OUTLINE
+    snap = [row[:] for row in grid]
+
+    def bare(x, y):
+        return (not (0 <= x < L and 0 <= y < H)
+                or snap[y][x] is None or snap[y][x] == cars_OUTLINE)
+
+    for y in range(H):
+        for x in range(L):
+            c = snap[y][x]
+            if c is None or c == cars_OUTLINE:
+                continue
+            if bare(x, y + 1) or bare(x + 1, y):
+                grid[y][x] = cars__darker(c, 0.24)
+            elif bare(x, y - 1) or bare(x - 1, y):
+                grid[y][x] = cars__lighter(c)
+
+
+def cars_big_grid(kind):
+    L, H = cars_BIG_SPECS[kind]
+    grid = [[None] * L for _ in range(H)]
+    top, bot = 1, H - 2                        # body sits between the wheel nubs
+
+    if kind == 'garbage_truck':
+        cab = (74, 108, 150)                   # St. Louis City blue cab
+        box = (58, 120, 78)                    # green refuse body
+        cars__put_r(grid, 2, top, 33, bot, box)
+        for x in range(5, 33, 4):
+            cars__put_r(grid, x, top + 1, x, bot - 1, cars__darker(box, 0.25))
+        cars__put_r(grid, 1, top + 3, 3, bot - 3, cars__darker(box, 0.45))   # loader
+        cars__put_r(grid, 34, top, 46, bot, cab)
+        cars__put_r(grid, 44, top + 2, 45, bot - 2, cars_GLASS_FRONT)
+        cars__put_r(grid, 36, top + 3, 39, bot - 3, (216, 216, 208))         # door
+    elif kind == 'bus':
+        body = (232, 182, 40)                  # school-bus yellow
+        trim = (26, 26, 28)
+        glass = (120, 150, 170)
+        cars__put_r(grid, 2, top, L - 2, bot, body)
+        cars__put_r(grid, 3, top, L - 7, top, trim)
+        cars__put_r(grid, 3, bot, L - 7, bot, trim)
+        for x in range(6, L - 10, 6):
+            cars__put_r(grid, x, top + 1, x + 3, top + 2, glass)
+            cars__put_r(grid, x, bot - 2, x + 3, bot - 1, glass)
+        cars__put_r(grid, L - 6, top + 2, L - 3, bot - 2, cars_GLASS_FRONT)
+        cars__put_r(grid, 1, top + 2, 2, bot - 2, trim)
+    else:  # box_truck
+        box = (210, 206, 198)
+        cab = (108, 114, 124)
+        cars__put_r(grid, 2, top, 32, bot, box)
+        for x in range(6, 32, 6):
+            cars__put_r(grid, x, top + 1, x, bot - 1, cars__darker(box, 0.12))
+        cars__put_r(grid, 33, top + 1, 43, bot - 1, cab)
+        cars__put_r(grid, 41, top + 2, 42, bot - 2, cars_GLASS_FRONT)
+
+    for ax in (5, L - 10):                     # wheel nubs on both flanks
+        for x in range(ax, ax + 5):
+            grid[0][x] = cars_TIRE
+            grid[H - 1][x] = cars_TIRE
+    cars__put_r(grid, L - 3, top + 1, L - 2, top + 2, cars_HEADLIGHT)
+    cars__put_r(grid, L - 3, bot - 2, L - 2, bot - 1, cars_HEADLIGHT)
+    cars__put_r(grid, 2, top + 1, 3, top + 2, cars_TAILLIGHT)
+    cars__put_r(grid, 2, bot - 2, 3, bot - 1, cars_TAILLIGHT)
+    cars__outline_shade(grid)
+    return grid
+
+
+def cars_rail_sprite(kind):
+    """One long east-facing light-rail / trolley surface. Rail vehicles only
+    ever travel along their line, so there is no 24-angle bake -- just this and
+    a horizontal flip for the westbound run."""
+    if kind == 'metrolink':
+        L, H, seg = 116, 16, 56
+        body, band, glass = (56, 96, 150), (228, 198, 70), (150, 180, 200)
+    else:  # trolley
+        L, H, seg = 60, 15, 60
+        body, band, glass = (150, 54, 48), (214, 200, 172), (150, 170, 190)
+    grid = [[None] * L for _ in range(H)]
+    top, bot = 1, H - 2
+    cars__put_r(grid, 1, top, L - 2, bot, body)
+    cars__put_r(grid, 1, H // 2, L - 2, H // 2, band)
+    for x in range(4, L - 5, 8):
+        cars__put_r(grid, x, top + 2, x + 4, top + 3, glass)
+        cars__put_r(grid, x, bot - 3, x + 4, bot - 2, glass)
+    for sx in range(seg, L - 4, seg):
+        cars__put_r(grid, sx, top, sx, bot, cars_OUTLINE)
+    cars__put_r(grid, L - 3, top + 2, L - 2, bot - 2, cars_HEADLIGHT)
+    if kind == 'trolley':
+        cars__put_r(grid, L // 2, 0, L // 2, top, (40, 40, 44))   # trolley pole
+    cars__outline_shade(grid)
+    return _scale_frames([cars__grid_to_surface(grid)], SPRITE_SCALE_CAR)[0]
+
+
+def cars_scooter_grid():
+    L, H = 18, 10
+    grid = [[None] * L for _ in range(H)]
+    body = (74, 132, 84)                       # Vespa green
+    seat = (52, 48, 52)
+    box = (156, 120, 80)                       # cardboard delivery box
+    m0, m1 = 3, H - 4
+    cars__put_r(grid, 4, m0, 13, m1, body)
+    cars__put_r(grid, 12, m0 - 1, 15, m1 + 1, body)          # front cowl
+    cars__put_r(grid, 5, m0 + 1, 8, m1 - 1, seat)
+    cars__put_r(grid, 1, m0, 4, m1, box)                     # rear box
+    cars__put_r(grid, 1, m0, 1, m1, cars__darker(box, 0.3))
+    cars__put_r(grid, 15, H // 2 - 1, 15, H // 2, (60, 60, 68))   # rider / bars
+    for ax in (3, 13):
+        grid[m0 - 1][ax] = cars_TIRE
+        grid[m1 + 1][ax] = cars_TIRE
+    grid[H // 2][16] = cars_HEADLIGHT
+    cars__outline_shade(grid)
+    return grid
+
+
 def cars__draw_lightbar(grid, g, phase):
     """Roof light bar.  phase None = unlit, 0 = left red / right blue, 1 = swap.
 
@@ -1076,6 +1246,10 @@ def cars_angle_index(radians):
 
 def cars_bake_variant(name, body_color=None):
     """Bake one variant into a list of cars_ANGLE_STEPS surfaces."""
+    if name in cars_BIG_SPECS:
+        return cars__bake_angles(cars__grid_to_surface(cars_big_grid(name)))
+    if name == 'vespa':
+        return cars__bake_angles(cars__grid_to_surface(cars_scooter_grid()))
     key = 'police' if name in cars_POLICE_FLASH_SETS else name
     spec = cars__SPECS[key]
     body = body_color or cars__DEFAULT_COLOR[key]
@@ -4100,7 +4274,7 @@ def traffic_drive(car, neighbours=()):
         ms = min(want, ms + traffic_EASE_UP)
     elif want < ms:
         ms = max(want, ms - traffic_EASE_DOWN)
-    car.max_speed = min(ms, traffic_TRAFFIC_MAX_SPEED)
+    car.max_speed = min(ms, traffic_TRAFFIC_MAX_SPEED * getattr(car, 'speed_factor', 1.0))
 
     # --- throttle -----------------------------------------------------------
     v = car.velocity
@@ -5895,19 +6069,23 @@ class Car:
     """A drivable vehicle: physics-driven, steerable, cartoon-rendered."""
 
     def __init__(self, x, y, color=None, variant=None):
-        self.width, self.height = 34, 18
+        self.color = color or random.choice(CAR_COLORS)
+        self.variant = variant or random.choice(CIVILIAN_WEIGHTED)
+        tune = VEHICLE_TUNING.get(self.variant, {})
+        self.width, self.height = tune.get('w', 34), tune.get('h', 18)
         self.rect = pygame.Rect(0, 0, self.width, self.height)
         self.rect.center = (x, y)
-        self.color = color or random.choice(CAR_COLORS)
-        self.variant = variant or random.choice(CIVILIAN_VARIANTS)
         self.angle = random.uniform(0, math.tau)
         self.velocity = 0.0
         self.steer_angle = 0.0
         self.max_speed = 9.5
-        self.acceleration = 0.28
+        self.acceleration = tune.get('acceleration', 0.28)
         self.brake_force = 0.5
         self.drag = 0.965
-        self.max_steer = 0.045
+        self.max_steer = tune.get('max_steer', 0.045)
+        # Big rigs top out slower and turn wider; the scooter is nippy. Applied
+        # against traffic pace in traffic_drive() / wander_ai().
+        self.speed_factor = tune.get('speed_factor', 1.0)
         self.input_throttle = 0.0
         self.input_steer = 0.0
         self.driver = None  # 'player', 'police', or None (parked/wandering)
@@ -5966,7 +6144,7 @@ class Car:
 
     def wander_ai(self):
         """Ambient traffic: cruise slowly, turn only at intersections."""
-        self.max_speed = traffic_TRAFFIC_MAX_SPEED
+        self.max_speed = traffic_TRAFFIC_MAX_SPEED * self.speed_factor
         self.input_throttle = traffic_TRAFFIC_THROTTLE
         self.input_steer = 0.0
         directions = [(1, 0), (-1, 0), (0, 1), (0, -1)]
@@ -6018,6 +6196,54 @@ class Car:
         rect = sprite.get_rect(center=(int(screen_pos[0]), int(screen_pos[1])))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
+
+
+class RailVehicle:
+    """Ambient MetroLink light rail / Loop trolley: runs one fixed row, wraps
+    around, never collides. Pure set dressing so the city reads as alive."""
+
+    def __init__(self, sprite, y, speed, x=0.0):
+        self.sprite = sprite
+        self.flip = pygame.transform.flip(sprite, True, False)
+        self.shadow = cars_make_shadow(sprite)
+        self.shadow_flip = pygame.transform.flip(self.shadow, True, False)
+        self.h = sprite.get_height()
+        self.w = sprite.get_width()
+        self.y = y
+        self.speed = speed
+        self.x = x
+
+    def update(self):
+        self.x += self.speed
+        if self.speed > 0 and self.x > MAP_WIDTH + 48:
+            self.x = -self.w - 48
+        elif self.speed < 0 and self.x < -self.w - 48:
+            self.x = MAP_WIDTH + 48
+
+    def draw(self, screen, camera):
+        sx = self.x - camera.x
+        sy = self.y - camera.y - self.h // 2
+        if sx > SCREEN_WIDTH or sx + self.w < 0 or sy > SCREEN_HEIGHT or sy + self.h < 0:
+            return
+        east = self.speed >= 0
+        img = self.sprite if east else self.flip
+        screen.blit(self.shadow if east else self.shadow_flip,
+                    (int(sx + SHADOW_DX), int(sy + SHADOW_DY)))
+        screen.blit(img, (int(sx), int(sy)))
+
+
+def build_rail_vehicles():
+    """A couple of MetroLink trains on a downtown-latitude line, plus a Loop
+    trolley up on the Delmar row."""
+    ml = cars_rail_sprite('metrolink')
+    tr = cars_rail_sprite('trolley')
+    row_dt = 44 * TILE_SIZE + TILE_SIZE // 2       # E-W road line through downtown
+    row_loop = 12 * TILE_SIZE + TILE_SIZE // 2     # E-W road line at the Delmar Loop
+    return [
+        RailVehicle(ml, row_dt, 3.1, x=-500),
+        RailVehicle(ml, row_dt, -3.1, x=MAP_WIDTH + 1400),
+        RailVehicle(tr, row_loop, 1.9, x=0.0),
+    ]
 
 
 class Follower:
@@ -6148,7 +6374,8 @@ class Game:
         self.cars = []
         for (sx, sy, sangle, _side) in parking_parking_spots(
                 max_count=PARKED_CAR_COUNT, near=(px, py), radius=1400):
-            car = Car(sx, sy)
+            # kerb spots are sized for ordinary cars, so keep the big rigs out
+            car = Car(sx, sy, variant=random.choice(CIVILIAN_VARIANTS))
             car.angle = sangle
             car.parked = True
             car.velocity = 0.0
@@ -6156,6 +6383,8 @@ class Game:
         for _ in range(MOVING_CAR_COUNT):
             cx, cy = random_open_spawn(road_only=True)
             self.cars.append(Car(cx, cy))
+
+        self.rail = build_rail_vehicles()
 
         traffic_set_hooks(is_blocked, GAME_MAP, TILE_SIZE,
                           MAP_TILES_W, MAP_TILES_H, ROAD_LINES)
@@ -6327,6 +6556,9 @@ class Game:
 
         for ped in self.pedestrians:
             ped.update()
+
+        for rv in self.rail:
+            rv.update()
 
         self.handle_collisions()
         self.update_police()
@@ -6619,6 +6851,9 @@ class Game:
                 lw = hud_text_width(name, 1)
                 hud_text(self.screen, name, int(sx) - lw // 2, int(sy) - 3,
                          hud_HUD_WHITE, True, 1)
+
+        for rv in self.rail:
+            rv.draw(self.screen, self.camera)
 
         for ped in self.pedestrians:
             ped.draw(self.screen, self.camera)
