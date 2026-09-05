@@ -4,15 +4,15 @@ A top-down open-world game inspired by the original GTA games, set in St. Louis,
 
 ## 🎮 Features
 
-- **9 Real St. Louis Landmarks**: Gateway Arch, Downtown & Busch Stadium, Soulard & Anheuser-Busch, Forest Park, Central West End, The Hill, Delmar Loop, Tower Grove Park, and the Grand Center Arts District — each discoverable for score
-- **Steal Any Car**: ~16 wandering traffic vehicles patrol the roads; walk up and press `E` to jack one
-- **Wanted System**: reckless driving (hitting pedestrians, traffic, or walls) raises a GTA1-style wanted level; police cars spawn from the station and chase you until you shake them or get busted
-- **NPC Pedestrians**: 24 wandering pedestrians roam the city on foot
-- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag
-- **Scrolling Camera**: follows the player or car smoothly across the full 100×100-tile map (this used to be broken — tiles/sprites were drawn at raw world coordinates instead of camera-relative ones, so the world would vanish as soon as you moved; fixed)
-- **Minimap**: top-right corner minimap showing the full city, scaled correctly to its box
-- **Save/Load**: `F5` to save, `F9` to load (JSON save file)
-- **Cartoonish visual style**: bright, saturated colors and rounded-corner sprites for a GTA1-poster feel
+- **A city laid out like St. Louis**: the Gateway Arch on the riverfront with downtown and the ballpark just inland, Soulard and the Anheuser-Busch brewery south along the river, a midtown spine (Grand Center → Central West End) running west to a big Forest Park, the Delmar Loop up in the north-west, and The Hill and Tower Grove Park down in the south. Compressed and not to scale, but recognisable in the hand — 9 landmarks, each discoverable for score.
+- **A real brick city between the roads**: every block is filled with St. Louis masonry — red / brown / buff brick and limestone — rendered in a hybrid view: dark top-down roofs with a lit south **facade** showing brick courses, windows, rowhouse stoops and awninged storefronts. Parks, surface lots and tree-lined sidewalks fill the rest.
+- **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts and a **Cardinals player** by the ballpark. ~40 pedestrians, each a figure with a front / back / profile walk cycle.
+- **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, a box truck, a school bus and a Hill delivery Vespa — each with its own size and handling. Ambient **MetroLink** light-rail trains and a **Loop trolley** run their lines through downtown and the Loop.
+- **Steal Any Car**: walk up to traffic or a parked car and press `E` to jack it.
+- **Wanted System**: reckless driving (hitting pedestrians, traffic, or walls) raises a GTA1-style wanted level; police cars spawn from the downtown station and chase you until you shake them or get busted.
+- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag.
+- **Scrolling camera + minimap** across the full 100×100-tile map, with `F5` / `F9` JSON save/load.
+- **Chunky 1997-console look**: everything is procedurally baked hard-pixel art at a 640×360 internal buffer, nearest-neighbour upscaled 2×. Optional CRT scanline / vignette pass on `F2`. No image assets.
 
 ## 🚀 How to Run (Step by Step)
 
@@ -57,6 +57,7 @@ python main.py
 | `A` / `←` | Move left / Steer left |
 | `D` / `→` | Move right / Steer right |
 | `E` | Enter or exit a vehicle |
+| `F2` | Cycle CRT post-effects (off → scanlines → scanlines + vignette) |
 | `F5` | Save game |
 | `F9` | Load game |
 | `ESC` / `Q` | Quit game |
@@ -88,20 +89,19 @@ Make sure you're running from the correct directory: `C:\Users\lrger\Desktop\GTA
 ## 🛠️ Development Notes
 
 - Single-file architecture for simplicity, organized around a `Game` class instead of loose globals
-- Pygame for rendering and input
-- Velocity/momentum-based physics model shared by the player's car and traffic/police cars
-- Tile-based collision detection
-- `Camera` class centers on the active entity (on-foot player or driven car) and clamps to map bounds; all drawing goes through `camera.apply()` / `camera.apply_pos()` so world, sprites, and minimap all move consistently
-- Simple road-following wander AI for traffic; simple chase-the-player AI for police
+- All art is procedurally **baked** once at startup into hard-pixel surfaces — no image files. The bakers are grouped by a `gfx_*` prefix: `gfx_cars`, `gfx_peds`, `gfx_followers`, `gfx_props`, `gfx_roofs`, `gfx_lm` (landmarks), `gfx_hud`, `gfx_fx`
+- The map is a road grid with a deterministic brick-block fabric stamped between the roads (`_fill_city_blocks`), then the real landmark footprints stamped on top (`LANDMARKS`, mirrored into the parking and landmark-size tables)
+- Velocity/momentum physics shared by the player car and traffic/police; per-variant handling via `VEHICLE_TUNING`
+- Tile-based collision; `Camera` centers on the active entity and everything draws through `camera.apply()` / `camera.apply_pos()`
+- Road-following wander AI for traffic, chase-the-player AI for police; `RailVehicle` bypasses both and runs a fixed line
 
 ## 📝 Future Plans
 
 - [ ] Mission / job system (GTA1 had phone-booth and special-car missions)
-- [ ] More vehicle types (trucks, buses, sports cars with different handling)
-- [ ] More St. Louis landmarks and neighborhoods
+- [ ] Bespoke landmark art for the remaining districts (Ted Drewes, Imo's, Soulard Market, the Old Courthouse, Fox Theatre, City Museum, the Piasa Bird)
+- [ ] Rails drawn under the MetroLink / trolley; a proper river bend with a bridge
 - [ ] Day/night cycle
 - [ ] Sound effects and music
-- [ ] Multiplayer support
 
 ---
 
