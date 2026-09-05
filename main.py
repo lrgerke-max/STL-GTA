@@ -122,16 +122,26 @@ CAR_COLORS = [
 # (x_tile, y_tile, w_tiles, h_tiles, kind, name, color)
 LANDMARK_OPEN_GROUND = {"Gateway Arch"}
 
+# Positions trace the real St. Louis map (north = up, Mississippi on the east
+# edge): the Arch on the riverfront with downtown and the ballpark just inland,
+# Soulard and the brewery south of downtown by the river, a midtown spine
+# (Grand Center -> Central West End) running west to Forest Park, the Delmar
+# Loop up in the north-west, and the south-city parks (The Hill, Tower Grove)
+# down in the south. Compressed and not to scale, but recognisable in the hand.
 LANDMARKS = [
-    (78, 40, 6, 8, "building", "Gateway Arch", (158, 160, 156)),
-    (66, 42, 10, 8, "building", "Downtown & Busch Stadium", (98, 88, 106)),
-    (66, 54, 9, 7, "building", "Soulard & Anheuser-Busch", (140, 96, 58)),
-    (12, 30, 22, 18, "park", "Forest Park", COLOR_PARK),
-    (16, 18, 9, 8, "building", "Central West End", (86, 94, 122)),
-    (22, 52, 7, 6, "building", "The Hill", (146, 106, 64)),
-    (6, 6, 12, 8, "building", "Delmar Loop", (130, 72, 108)),
-    (40, 62, 14, 12, "park", "Tower Grove Park", COLOR_PARK),
-    (46, 34, 8, 7, "building", "Grand Center Arts District", (98, 70, 128)),
+    # --- East: the river, the Arch, downtown, the ballpark ---
+    (87, 42, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
+    (71, 41, 13, 12, "building", "Downtown & Busch Stadium", (118, 108, 122)),
+    (73, 60, 11, 10, "building", "Soulard & Anheuser-Busch", (150, 92, 58)),
+    # --- Midtown spine, running west from downtown ---
+    (50, 40, 9, 9, "building", "Grand Center Arts District", (108, 78, 136)),
+    (30, 28, 9, 10, "building", "Central West End", (96, 104, 132)),
+    (5, 30, 22, 22, "park", "Forest Park", COLOR_PARK),
+    # --- North-west ---
+    (9, 8, 15, 6, "building", "Delmar Loop", (150, 84, 76)),
+    # --- South city ---
+    (28, 60, 9, 8, "building", "The Hill", (156, 108, 66)),
+    (42, 63, 14, 13, "park", "Tower Grove Park", COLOR_PARK),
 ]
 
 CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
@@ -215,7 +225,7 @@ def ped_sprite(palette, facing, moving, anim):
     return sets['walk'][d][f], sets['walk_sh'][d][f]
 
 
-POLICE_STATION_TILE = (50, 50)
+POLICE_STATION_TILE = (64, 46)   # downtown, just west of the ballpark district
 
 
 def _hash2(a, b, salt=0):
@@ -3024,19 +3034,13 @@ parking_ANG_N = math.pi * 1.5
 parking_AXIS_NS = 0                 # street runs north-south (a road COLUMN)
 parking_AXIS_EW = 1                 # street runs east-west   (a road ROW)
 
-# Landmark footprints, mirrored from main.LANDMARKS: (col, row, w, h, collidable).
+# Landmark footprints, derived from LANDMARKS: (col, row, w, h, collidable).
 # They are stamped over the road grid, so a "road" tile inside one can actually
 # be a building wall or the middle of Forest Park - no kerb parking there.
-parking__LANDMARKS = (
-    (78, 40, 6, 8, True),      # Gateway Arch
-    (66, 42, 10, 8, True),     # Downtown & Busch Stadium
-    (66, 54, 9, 7, True),      # Soulard & Anheuser-Busch
-    (12, 30, 22, 18, False),   # Forest Park
-    (16, 18, 9, 8, True),      # Central West End
-    (22, 52, 7, 6, True),      # The Hill
-    (6, 6, 12, 8, True),       # Delmar Loop
-    (40, 62, 14, 12, False),   # Tower Grove Park
-    (46, 34, 8, 7, True),      # Grand Center Arts District
+# Parks stay open (collidable=False); anything built blocks kerb parking.
+parking__LANDMARKS = tuple(
+    (lx, ly, lw, lh, kind != "park")
+    for (lx, ly, lw, lh, kind, _name, _color) in LANDMARKS
 )
 
 
@@ -4030,18 +4034,10 @@ lm_LANDMARK_ART = {
     "Grand Center Arts District": "grand_center",
 }
 
-#: natural footprint of each landmark in tiles, mirroring main.LANDMARKS.
+#: natural footprint of each landmark in tiles, derived from main.LANDMARKS.
 #: Used by lm_bake() so the common sizes are ready before the first frame.
 lm_FOOTPRINT_TILES = {
-    "Gateway Arch": (6, 8),
-    "Downtown & Busch Stadium": (10, 8),
-    "Soulard & Anheuser-Busch": (9, 7),
-    "Forest Park": (22, 18),
-    "Central West End": (9, 8),
-    "The Hill": (7, 6),
-    "Delmar Loop": (12, 8),
-    "Tower Grove Park": (14, 12),
-    "Grand Center Arts District": (8, 7),
+    name: (w, h) for (x, y, w, h, kind, name, color) in LANDMARKS
 }
 
 #: walkable ground / plaza colour per style
