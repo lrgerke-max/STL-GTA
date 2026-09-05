@@ -352,6 +352,11 @@ def draw_game():
 def main():
     """The main game loop."""
     global running
+    # Initialize Pygame (Crucial for video and audio systems)
+    pygame.init()
+    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    pygame.display.set_caption("St. Louis GTA Clone")
+    
     print("=============================================")
     print("St. Louis GTA Clone Initialized!")
     print("--- Controls ---")
