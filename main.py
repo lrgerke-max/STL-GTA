@@ -104,6 +104,17 @@ CITY_BRICKS = [
     (110, 98, 96),      # weathered painted masonry
 ]
 
+# Storefront awnings on the hybrid facades: muted shop colours.
+_AWNING_COLORS = [
+    (150, 66, 58), (74, 104, 92), (72, 92, 128), (170, 132, 70),
+    (110, 78, 120), (86, 110, 76),
+]
+# Landmark districts whose street level should always read as shopfronts.
+_COMMERCIAL_LANDMARKS = {
+    "Delmar Loop", "Grand Center Arts District", "Central West End",
+    "The Hill", "Downtown & Busch Stadium",
+}
+
 PLAYER_COLOR = (206, 92, 110)
 POLICE_COLOR = (46, 64, 152)
 # Muted 90s console body paint - dirty primaries, nothing saturated.
@@ -2021,6 +2032,7 @@ hud__FONT = {
     "/": "....#|....#|...#.|..#..|.#...|#....|#....",
     "'": "..#..|..#..|..#..|.....|.....|.....|.....",
     "%": "##..#|##..#|...#.|..#..|.#...|#..##|#..##",
+    "&": ".##..|#..#.|#.#..|.#...|#.#.#|#..#.|.##.#",
 }
 
 hud__MISSING = "#####|#...#|#...#|#...#|#...#|#...#|#####"
@@ -4387,16 +4399,17 @@ lm_TILE = 64
 # --------------------------------------------------------------------------
 
 #: landmark name (exactly as in main.LANDMARKS) -> style key
+# Only the landmarks that need a bespoke composition. The district landmarks
+# (CWE, The Hill, Delmar Loop, Grand Center) now read through the generic
+# brick-block + hybrid-facade renderer, tinted by their LANDMARKS colour and
+# flagged commercial in _COMMERCIAL_LANDMARKS - which looks better than the
+# old abstract top-down blobs did.
 lm_LANDMARK_ART = {
     "Gateway Arch": "arch",
     "Downtown & Busch Stadium": "stadium",
     "Soulard & Anheuser-Busch": "brewery",
     "Forest Park": "forest_park",
-    "Central West End": "central_west_end",
-    "The Hill": "the_hill",
-    "Delmar Loop": "delmar_loop",
     "Tower Grove Park": "tower_grove",
-    "Grand Center Arts District": "grand_center",
 }
 
 #: natural footprint of each landmark in tiles, derived from main.LANDMARKS.
@@ -6809,22 +6822,94 @@ class Game:
 
     def draw_building_roof(self, c, r):
         """Pseudo-3D building: dark side walls on the east/south faces with
-        the roof pulled back toward the north-west, plus rooftop clutter."""
+        the roof pulled back toward the north-west, plus rooftop clutter.
+        The roof is a stop darker than the tile's brick colour so the lit
+        south facade (draw_building_facade) reads as the front of the block."""
         tile = GAME_MAP[r][c]
         if tile['type'] != TILE_BUILDING or self.landmark_has_art(tile):
             return
         rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
         base = tile['color']
+        roof_col = _blend(base, (0, 0, 0), 0.34)
         darker = tuple(int(v * 0.55) for v in base)
 
         pygame.draw.rect(self.screen, COLOR_BUILDING_WALL, rect)
         roof = (rect.left, rect.top, rect.width - 8, rect.height - 8)
-        pygame.draw.rect(self.screen, base, roof)
+        pygame.draw.rect(self.screen, roof_col, roof)
         pygame.draw.rect(self.screen, darker, roof, 1)
 
         # rooftop clutter: deterministic per tile, one shared style per landmark
         style = roofs_style_for(c, r, tile['landmark'])
-        roofs_draw_roof_detail(self.screen, pygame.Rect(roof), base, c, r, style)
+        roofs_draw_roof_detail(self.screen, pygame.Rect(roof), roof_col, c, r, style)
+
+    def draw_building_facade(self, c, r):
+        """Hybrid look: a building tile whose south neighbour is open ground
+        shows its front wall - brick courses, a row of windows, and either a
+        storefront or a residential stoop at street level - instead of roof."""
+        tile = GAME_MAP[r][c]
+        if tile['type'] != TILE_BUILDING or self.landmark_has_art(tile):
+            return
+        south = tile_at(c, r + 1)
+        if south is None or south['type'] in (TILE_BUILDING, TILE_WATER):
+            return                                  # interior of the mass
+        rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+        if rect.right < 0 or rect.left > SCREEN_WIDTH or rect.bottom < -8 or rect.top > SCREEN_HEIGHT:
+            return
+
+        base = tile['color']
+        wall = _blend(base, COLOR_SIDEWALK, 0.22)          # lit front, brighter than roof
+        wall_lo = _blend(base, (0, 0, 0), 0.28)
+        course = _blend(base, (0, 0, 0), 0.34)
+        trim = _blend(base, COLOR_SIDEWALK, 0.55)
+        n = _noise(c, r, 71)
+        WALL_H, SKIRT = 24, 7
+        top_y = rect.bottom - WALL_H
+
+        pygame.draw.rect(self.screen, wall, (rect.left, top_y, TILE_SIZE, WALL_H + SKIRT))
+        pygame.draw.rect(self.screen, trim, (rect.left, top_y - 2, TILE_SIZE, 3))          # cornice
+        for yy in range(top_y + 5, rect.bottom + SKIRT, 6):
+            pygame.draw.line(self.screen, course, (rect.left, yy), (rect.right - 1, yy))
+        pygame.draw.rect(self.screen, wall_lo, (rect.left, rect.bottom - 2, TILE_SIZE, SKIRT + 2))
+        pygame.draw.line(self.screen, COLOR_OUTLINE, (rect.left, rect.bottom + SKIRT - 1),
+                         (rect.right - 1, rect.bottom + SKIRT - 1))
+
+        kind = n % 10
+        if kind == 0:                                       # blank party wall
+            if n & 16:                                      # ...with a downspout
+                pygame.draw.rect(self.screen, course, (rect.left + 30, top_y, 2, WALL_H))
+            return
+        commercial = tile['landmark'] in _COMMERCIAL_LANDMARKS
+        storefront = commercial or kind <= 3
+        win_y = top_y + 6
+        if storefront:
+            awn = _AWNING_COLORS[n % len(_AWNING_COLORS)]
+            pygame.draw.rect(self.screen, _blend(awn, (0, 0, 0), 0.3),
+                             (rect.left + 2, win_y - 5, TILE_SIZE - 4, 6))
+            pygame.draw.rect(self.screen, awn, (rect.left + 2, win_y - 5, TILE_SIZE - 4, 4))
+            sw = pygame.Rect(rect.left + 5, win_y + 2, TILE_SIZE - 26, rect.bottom + SKIRT - win_y - 3)
+            pygame.draw.rect(self.screen, (44, 52, 60), sw)
+            pygame.draw.rect(self.screen, (120, 150, 168) if n & 8 else (150, 120, 70),
+                             sw.inflate(-4, -6))            # lit shop glass
+            pygame.draw.rect(self.screen, (26, 22, 24),
+                             (rect.right - 17, win_y, 12, rect.bottom + SKIRT - win_y))  # door
+            pygame.draw.rect(self.screen, trim, (rect.right - 17, win_y, 12, 2))
+        else:
+            xs = (rect.left + 12, rect.left + 40) if kind in (4, 5) else \
+                 (rect.left + 7, rect.left + 26, rect.left + 45)
+            for wx in xs:
+                lit = _noise(c, r, wx) % 3 == 0
+                glass = (210, 184, 120) if lit else (44, 52, 64)
+                pygame.draw.rect(self.screen, (18, 16, 20), (wx - 1, win_y - 1, 15, 15))
+                pygame.draw.rect(self.screen, glass, (wx, win_y, 13, 13))
+                pygame.draw.line(self.screen, (18, 16, 20), (wx + 6, win_y), (wx + 6, win_y + 12))
+                pygame.draw.line(self.screen, trim, (wx - 1, win_y + 13), (wx + 13, win_y + 13))
+            if kind in (6, 7):                              # zig-zag fire escape
+                for k in range(3):
+                    fy = top_y + 4 + k * 7
+                    pygame.draw.line(self.screen, COLOR_OUTLINE,
+                                     (rect.left + 6, fy), (rect.right - 6, fy))
+            pygame.draw.rect(self.screen, trim, (rect.centerx - 7, rect.bottom, 14, SKIRT))
+            pygame.draw.rect(self.screen, (26, 22, 24), (rect.centerx - 4, rect.bottom - 6, 8, 6))
 
     def draw(self):
         self.screen.fill(COLOR_SKY_BG)
@@ -6842,6 +6927,9 @@ class Game:
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):
                 self.draw_building_roof(c, r)
+        for r in range(start_row, end_row):
+            for c in range(start_col, end_col):
+                self.draw_building_facade(c, r)
 
         for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
             frect = self.camera.apply(pygame.Rect(lx * TILE_SIZE, ly * TILE_SIZE,
