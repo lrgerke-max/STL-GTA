@@ -2443,9 +2443,10 @@ props_C_METAL = (114, 110, 100)
 props_C_METAL_DARK = (82, 78, 70)
 props_C_LAMP = (214, 198, 138)        # warm bulb, not neon
 props_C_LAMP_DIM = (168, 154, 104)
-props_C_RED = (140, 60, 52)
-props_C_RED_DARK = (104, 44, 38)
-props_C_RED_LIT = (172, 70, 60)
+# St. Louis fire hydrants are chrome-yellow with a red bonnet + caps.
+props_C_RED = (198, 158, 46)          # hydrant body (gold)
+props_C_RED_DARK = (150, 118, 36)     # body shade
+props_C_RED_LIT = (176, 58, 48)       # bonnet / side-cap red
 props_C_GREEN_BIN = (72, 90, 62)
 props_C_GREEN_BIN_LID = (86, 104, 74)
 props_C_GREEN_BIN_DARK = (48, 62, 42)
@@ -6661,6 +6662,16 @@ class Game:
             self.add_toast(f"Discovered: {name}!")
 
     # ---------------- drawing ----------------
+    _TREE_GREENS = ((58, 84, 46), (50, 74, 40), (66, 92, 52), (46, 66, 38))
+
+    def _draw_street_tree(self, cx, cy, variant):
+        """A small boulevard tree: SE shadow blob, canopy, a fleck of highlight."""
+        canopy = self._TREE_GREENS[variant % len(self._TREE_GREENS)]
+        pygame.draw.circle(self.screen, COLOR_TREE_SHADOW, (cx + 4, cy + 5), 10)
+        pygame.draw.circle(self.screen, (48, 38, 30), (cx, cy + 6), 2)          # trunk
+        pygame.draw.circle(self.screen, canopy, (cx, cy), 9)
+        pygame.draw.circle(self.screen, _blend(canopy, (255, 255, 255), 0.22), (cx - 3, cy - 3), 3)
+
     def draw_tile(self, c, r):
         """Flat terrain: asphalt, sidewalks, markings, parks, water."""
         tile = GAME_MAP[r][c]
@@ -6681,6 +6692,11 @@ class Game:
                 gx = rect.left + ((n >> (i * 6)) % 52) + 6
                 gy = rect.top + ((n >> (i * 6 + 3)) % 52) + 6
                 pygame.draw.rect(self.screen, COLOR_SIDEWALK_SEAM, (gx, gy, 5, 4))
+            # boulevard tree: kerbside sidewalk tiles, deterministic ~1 in 4
+            if tile['landmark'] is None and n % 4 == 0 and (
+                    tile_type_at(c, r + 1) == TILE_ROAD or tile_type_at(c, r - 1) == TILE_ROAD
+                    or tile_type_at(c - 1, r) == TILE_ROAD or tile_type_at(c + 1, r) == TILE_ROAD):
+                self._draw_street_tree(rect.centerx, rect.centery, (n >> 5) & 3)
             return
 
         if t == TILE_PARK:
@@ -6705,6 +6721,17 @@ class Game:
                 pygame.draw.rect(self.screen, COLOR_WATER_DARK, (wx, wy, 10, 5))
             pygame.draw.line(self.screen, COLOR_WATER_LINE,
                              (rect.left, rect.centery), (rect.right, rect.centery), 1)
+            return
+
+        if t == TILE_GRASS:
+            pygame.draw.rect(self.screen, COLOR_GRASS, rect)
+            n = _noise(c, r, 9)
+            for i in range(3):
+                gx = rect.left + ((n >> (i * 5)) % 52) + 4
+                gy = rect.top + ((n >> (i * 5 + 2)) % 52) + 4
+                pygame.draw.rect(self.screen, COLOR_GRASS_DARK, (gx, gy, 6, 5))
+            if n % 3 == 0:
+                self._draw_street_tree(rect.centerx, rect.centery, (n >> 6) & 3)
             return
 
         # --- Roads ---
