@@ -208,8 +208,7 @@ def handle_events():
             global running
             running = False
         elif event.type == pygame.KEYDOWN:
-            # State transitions are now handled passively in update_game() via proximity checks.
-            # Keep other key handling as is if necessary, but remove the manual state change logic here.
+            pass # Placeholder for future key handling
 
     # --- Vehicle Input Handling (Only active in VEHICLE mode) ---
     if GAME_STATE_MODE == 'VEHICLE':
@@ -229,7 +228,7 @@ def handle_events():
             steer_input += 1.0
         elif keys[pygame.K_d]:
             steer_input -= 1.0
-            
+
         # Store raw input for update_game() to consume (acceleration magnitude, steering angle)
         vehicle.input = {'throttle': accel_input, 'steer': steer_input}
 
@@ -438,3 +437,6 @@ def test_physics():
     print("\n=============================================")
     print("Simulation Complete: Physics and State Logic Confirmed.")
     print("The core physics model and proximity state transitions are successfully implemented in main.py.")
+
+if __name__ == "__main__":
+    main()
