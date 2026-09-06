@@ -1066,6 +1066,17 @@ def test_the_arch_lets_you_walk_under_the_span():
         assert not M.GAME_MAP[ly + row][lx + sx]['collidable']
 
 
+def test_the_police_station_is_not_inside_a_landmark():
+    """It landed inside Union Station's train shed once that went in, which
+    walls in anything that spawns there - a cop, or you after a bust."""
+    col, row = M.POLICE_STATION_TILE
+    assert M.GAME_MAP[row][col]['landmark'] is None, (
+        f"the station is inside {M.GAME_MAP[row][col]['landmark']}")
+    for entry in M.LANDMARKS:
+        r = pygame.Rect(entry[0] - 1, entry[1] - 1, entry[2] + 2, entry[3] + 2)
+        assert not r.collidepoint(col, row), f"station abuts {entry[5]}"
+
+
 def test_no_two_landmarks_overlap():
     """Landmarks are stamped in list order, so an overlap silently deletes
     whatever was underneath - Busch Stadium was found sitting on top of the
@@ -2048,29 +2059,50 @@ def test_delivering_puts_the_next_run_straight_on_the_table():
 
 
 def test_taking_the_next_run_quickly_pays_more():
-    def run(hurry):
+    """Same run, both ways - two different Job.generate() results would differ
+    by distance alone and prove nothing."""
+    def deliver(hot):
         g = game()
         g.streak = 0
         job = g.job
         teleport(g, job.pickup_pos)
         g.update_job()
+        assert job.collected
+        job.hot = hot
+        before = g.cash
         teleport(g, job.drop_pos)
         g.update_job()
-        nxt = g.job
-        if not hurry:
-            g.frame += M.JOB_CHAIN_WINDOW + 10
-        teleport(g, nxt.pickup_pos)
-        g.update_job()
-        assert nxt.collected
-        before = g.cash
-        teleport(g, nxt.drop_pos)
-        g.update_job()
-        return g.cash - before, nxt.hot
+        return g.cash - before
 
-    fast_pay, fast_hot = run(True)
-    slow_pay, slow_hot = run(False)
-    assert fast_hot and not slow_hot
-    assert fast_pay > slow_pay, f"hot {fast_pay} vs cold {slow_pay}"
+    fast, cold = deliver(True), deliver(False)
+    assert fast > cold, f"hot {fast} vs cold {cold}"
+    assert fast >= int(cold * (1.0 + M.JOB_CHAIN_BONUS)) - 1
+
+
+def test_the_chain_window_is_what_marks_a_run_hot():
+    g = game()
+    job = g.job
+    teleport(g, job.pickup_pos)
+    g.update_job()
+    teleport(g, job.drop_pos)
+    g.update_job()
+    nxt = g.job
+    assert not nxt.hot
+    teleport(g, nxt.pickup_pos)
+    g.update_job()
+    assert nxt.hot, "picked up inside the window and it was not hot"
+
+    g2 = game()
+    j2 = g2.job
+    teleport(g2, j2.pickup_pos)
+    g2.update_job()
+    teleport(g2, j2.drop_pos)
+    g2.update_job()
+    n2 = g2.job
+    g2.frame += M.JOB_CHAIN_WINDOW + 10
+    teleport(g2, n2.pickup_pos)
+    g2.update_job()
+    assert not n2.hot, "the window never closed"
 
 
 def test_a_run_you_never_take_goes_stale():

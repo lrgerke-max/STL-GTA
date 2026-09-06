@@ -473,7 +473,7 @@ _AWNING_COLORS = [
 # Landmark districts whose street level should always read as shopfronts.
 _COMMERCIAL_LANDMARKS = {
     "Delmar Loop", "Grand Center Arts District", "Central West End",
-    "The Hill", "Downtown", "Soulard Farmers Market",
+    "The Hill", "Downtown", "Soulard Farmers Market", "Cherokee Street",
 }
 
 PLAYER_COLOR = (206, 92, 110)
@@ -504,6 +504,10 @@ LANDMARK_LAYOUT = {
     "Ted Drewes": "drivein",             # stand at the back, queue in the lot
     "Ted Drewes on Grand": "drivein",
     "Soulard Farmers Market": "market",  # open sheds you walk the aisles of
+    "Union Station": "trainshed",        # one arched entry, a shed of columns
+    "Compton Hill Water Tower": "tower",  # one solid tile in an open lawn
+    "Bevo Mill": "tower",
+    "Cherokee Street": "strip",          # two shop rows with the street between
 }
 LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
 
@@ -548,6 +552,25 @@ LANDMARKS = [
     (45, 74, 5, 3, "building", "Ted Drewes on Grand", (226, 222, 212)),
     (23, 55, 10, 9, "building", "The Hill", (156, 108, 66)),
     (38, 59, 14, 13, "park", "Tower Grove Park", COLOR_PARK),
+    # --- Downtown, working out from the Arch ---
+    # The green dome you see framed through the Arch. Dred Scott was tried
+    # here, and the Arch was deliberately sited on its axis - so it goes on
+    # the Arch's own row, which is the whole composition.
+    (76, 33, 5, 5, "building", "Old Courthouse", (196, 190, 172)),
+    # Union Station: the headhouse, the shed, and the clock tower.
+    (61, 44, 10, 6, "building", "Union Station", (176, 166, 142)),
+    # City Museum: a former shoe factory with a school bus on the roof.
+    (55, 44, 6, 5, "building", "City Museum", (150, 66, 58)),
+    # --- South city ---
+    # Compton Hill Water Tower: one of three still standing, which is more
+    # than any other city in the country has, and locals will tell you.
+    (48, 52, 5, 5, "building", "Compton Hill Water Tower", (196, 180, 150)),
+    # Henry Shaw's garden, half a mile from Henry Shaw's park.
+    (30, 46, 8, 7, "building", "Missouri Botanical Garden", (96, 128, 84)),
+    # Meet me by the windmill.
+    (32, 82, 5, 5, "building", "Bevo Mill", (206, 190, 164)),
+    # Cherokee Street: antiques at the east end, mercados at the west.
+    (54, 76, 16, 4, "building", "Cherokee Street", (168, 100, 62)),
 ]
 
 # Road rows carried across the Mississippi. 44 is the Eads, level with the
@@ -686,7 +709,11 @@ def ped_sprite(palette, facing, moving, anim):
     return sets['walk'][d][f], sets['walk_sh'][d][f]
 
 
-POLICE_STATION_TILE = (64, 46)   # downtown, just west of the ballpark district
+# The Justice Center, downtown between Tucker and the ballpark. Kept clear of
+# every landmark footprint: it used to land inside Union Station once that
+# went in, which walled a released player - and any cop spawned there - into
+# a train shed.
+POLICE_STATION_TILE = (68, 52)
 
 
 def _hash2(a, b, salt=0):
@@ -1054,6 +1081,36 @@ def _lm_solid_district(lx, ly, lw, lh):
     return False                          # inner courtyard
 
 
+def _lm_solid_tower(lx, ly, lw, lh):
+    """A single tower in an open lawn: one solid tile, dead centre.
+
+    You can walk right round it, which is what makes a water tower useful to
+    navigate by - it reads from every direction and never blocks a route.
+    """
+    return lx == lw // 2 and ly == lh // 2
+
+
+def _lm_solid_strip(lx, ly, lw, lh):
+    """A commercial strip: two rows of shopfronts with the street between
+    them, and a cross street punched through every few blocks."""
+    if ly == lh // 2:
+        return False                      # the street itself
+    if lx % 5 == 0:
+        return False                      # cross streets
+    return 0 < ly < lh - 1
+
+
+def _lm_solid_trainshed(lx, ly, lw, lh):
+    """Union Station: the headhouse across the north with one arched entry,
+    then the train shed - rows of columns you walk between - and a plaza on
+    the south side where the Meeting of the Waters fountain sits."""
+    if ly == 0:
+        return not (abs(lx - lw // 2) <= 1)   # the great arched entry
+    if ly >= lh - 1:
+        return False                          # the plaza
+    return lx % 3 == 0                        # shed columns
+
+
 def _lm_solid_market(lx, ly, lw, lh):
     """Soulard Market: open-sided sheds with aisles you walk down.
 
@@ -1082,6 +1139,9 @@ _LM_SOLID = {
     "district": _lm_solid_district,
     "drivein": _lm_solid_drivein,
     "market": _lm_solid_market,
+    "tower": _lm_solid_tower,
+    "strip": _lm_solid_strip,
+    "trainshed": _lm_solid_trainshed,
 }
 
 
@@ -12060,27 +12120,39 @@ class Game:
         for row, name in STREET_ROWS.items():
             _, ly2 = to_map(0, row * TILE_SIZE + TILE_SIZE // 2)
             hud_text(self.screen, name, mx + 3, ly2 - 3, (172, 168, 150), True, 1)
-        for col, name in STREET_COLS.items():
+        # North-south names stagger over two rows: at map scale the columns
+        # are 26px apart and the names are up to 55px wide, so one row of them
+        # was an unreadable smear.
+        for i, (col, name) in enumerate(sorted(STREET_COLS.items())):
             lx2, _ = to_map(col * TILE_SIZE + TILE_SIZE // 2, 0)
             w = hud_text_width(name, 1)
             if lx2 - w // 2 < mx or lx2 + w // 2 > mx + mv:
                 continue
-            hud_text(self.screen, name, lx2 - w // 2, my + mv - 9,
-                     (172, 168, 150), True, 1)
+            hud_text(self.screen, name, lx2 - w // 2,
+                     my + mv - (17 if i % 2 else 9), (172, 168, 150), True, 1)
 
-        lx, ly = mx + mv + 18, my
-        for i, (_a, _b, _c, _d, _kind, name, color) in enumerate(LANDMARKS, 1):
-            self.screen.fill(_blend(color, (255, 255, 255), 0.3), (lx, ly + 1, 6, 6))
-            hud_text(self.screen, f"{i} {name}", lx + 11, ly, hud_HUD_WHITE, True, 1)
-            ly += 12
-        ly += 8
-        for col, name in (((232, 232, 232), "YOU"), (hud_HUD_GOLD, "PICKUP"),
-                          (hud_HUD_GREEN, "DROP-OFF"), (hud_HUD_RED, "POLICE"),
-                          ((90, 150, 240), "POLICE STATION"),
-                          ((110, 170, 220), "BODY SHOP - $300")):
-            self.screen.fill(col, (lx, ly + 1, 6, 6))
-            hud_text(self.screen, name, lx + 11, ly, hud_HUD_WHITE, True, 1)
-            ly += 12
+        # The legend runs down the side in as many columns as it needs. With
+        # twenty landmarks a single column ran off the bottom of the panel.
+        lx0 = mx + mv + 14
+        avail = panel.bottom - 20 - my
+        rows = max(1, avail // 9)
+        entries = [(f"{i} {name}", _blend(color, (255, 255, 255), 0.3))
+                   for i, (_a, _b, _c, _d, _kind, name, color)
+                   in enumerate(LANDMARKS, 1)]
+        entries.append(("", None))
+        entries += [("YOU", (232, 232, 232)), ("PICKUP", hud_HUD_GOLD),
+                    ("DROP-OFF", hud_HUD_GREEN), ("POLICE", hud_HUD_RED),
+                    ("STATION", (90, 150, 240)),
+                    ("BODY SHOP $300", (110, 170, 220))]
+        colw = 104
+        for i, (name, col) in enumerate(entries):
+            cx = lx0 + (i // rows) * colw
+            cy = my + (i % rows) * 9
+            if not name:
+                continue
+            if col is not None:
+                self.screen.fill(col, (cx, cy + 1, 5, 5))
+            hud_text(self.screen, name, cx + 8, cy, hud_HUD_WHITE, True, 1)
 
         hint = "M / TAB / ESC  CLOSE MAP"
         hud_text(self.screen, hint, (SCREEN_WIDTH - hud_text_width(hint, 1)) // 2,
