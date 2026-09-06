@@ -406,6 +406,7 @@ DROPPED_CASH_RADIUS = 34
 ARCH_JOB_TARGET = 50000     # banked. The door at the end of the ladder.
 ARCH_JOB_SECONDS = 90
 ARCH_JOB_SCORE = 50000
+ARCH_VICTORY_HOLD_STEPS = FPS * 5
 ARCH_LOCKED = 'locked'
 ARCH_READY = 'ready'
 ARCH_CUTTER = 'cutter'
@@ -763,7 +764,8 @@ PARKED_VARIANTS_WEIGHTED = (['sedan'] * 8 + ['coupe'] * 5 + ['van'] * 4
 # in the mix but rare, so the streets still read as mostly ordinary cars.
 CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 3
                       + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
-                      + ['bus'] * 1 + ['garbage_truck'] * 1 + ['trans_am'] * 1)
+                      + ['bus'] * 1 + ['metrobus_70'] * 1
+                      + ['garbage_truck'] * 1 + ['trans_am'] * 1)
 
 # Default car collider. The kerbside parking layout is sized against this, so
 # it is a named constant both places can assert on rather than a loose 34/18.
@@ -797,6 +799,7 @@ SKID_MIN_SLIP = 1.6         # ... and before they leave a mark on the road
 VEHICLE_TUNING = {
     'garbage_truck': dict(w=42, h=18, acceleration=0.15, max_steer=0.034, speed_factor=0.72),
     'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.78),
+    'metrobus_70':   dict(w=44, h=18, acceleration=0.18, max_steer=0.032, speed_factor=0.80),
     'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.86),
     'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.15),
     'trans_am':      dict(w=34, h=18, acceleration=0.38, max_steer=0.052, speed_factor=1.12),
@@ -850,7 +853,7 @@ def bake_car_sprites():
             sets[(variant, c)] = entry
     # St. Louis service vehicles: fixed liveries, so one bake covers every
     # colour slot the spawner might ask for (same trick as the taxi).
-    for variant in ('garbage_truck', 'bus', 'box_truck', 'vespa'):
+    for variant in ('garbage_truck', 'bus', 'metrobus_70', 'box_truck', 'vespa'):
         frames = _scale_frames(cars_bake_variant(variant), SPRITE_SCALE_CAR)
         entry = (frames, [cars_make_shadow(f) for f in frames])
         for c in CAR_COLORS:
@@ -2038,6 +2041,9 @@ cars_POLICE_BODY = (44, 46, 52)
 cars_POLICE_DOOR = (214, 214, 206)
 cars_TRANS_AM_BODY = (30, 29, 32)
 cars_TRANS_AM_GOLD = (206, 154, 54)
+cars_METROBUS_BLUE = (42, 82, 142)
+cars_METROBUS_RED = (184, 48, 48)
+cars_METROBUS_ROUTE = (242, 184, 52)
 
 cars_SHADOW_ALPHA = 115  # 45% of 255
 
@@ -2296,6 +2302,7 @@ def cars__build_grid(spec, body):
 cars_BIG_SPECS = {
     'garbage_truck': (48, 22),
     'bus':           (54, 20),
+    'metrobus_70':   (54, 20),
     'box_truck':     (44, 20),
 }
 
@@ -2367,6 +2374,29 @@ def cars_big_grid(kind):
             cars__put_r(grid, x, bot - 2, x + 3, bot - 1, glass)
         cars__put_r(grid, L - 6, top + 2, L - 3, bot - 2, cars_GLASS_FRONT)
         cars__put_r(grid, 1, top + 2, 2, bot - 2, trim)
+    elif kind == 'metrobus_70':
+        body = (218, 220, 216)
+        glass = (92, 126, 154)
+        dark = (24, 28, 36)
+        cars__put_r(grid, 2, top, L - 2, bot, body)
+        # Bi-State/Metro blue with a thin red slash, visible from either curb.
+        cars__put_r(grid, 3, top + 3, L - 7, top + 5, cars_METROBUS_BLUE)
+        cars__put_r(grid, 3, bot - 5, L - 7, bot - 3, cars_METROBUS_BLUE)
+        cars__put_r(grid, 24, top + 3, 25, top + 5, cars_METROBUS_RED)
+        cars__put_r(grid, 24, bot - 5, 25, bot - 3, cars_METROBUS_RED)
+        for x in range(5, L - 11, 6):
+            cars__put_r(grid, x, top + 1, x + 3, top + 2, glass)
+            cars__put_r(grid, x, bot - 2, x + 3, bot - 1, glass)
+        cars__put_r(grid, L - 7, top + 2, L - 3, bot - 2, cars_GLASS_FRONT)
+        # Roof route box: an actual 3x5 "70", not just a yellow rectangle.
+        cars__put_r(grid, 20, 7, 32, 13, dark)
+        seven = ("###", "..#", ".#.", ".#.", ".#.")
+        zero = ("###", "#.#", "#.#", "#.#", "###")
+        for ox, glyph in ((22, seven), (27, zero)):
+            for gy, row in enumerate(glyph):
+                for gx, bit in enumerate(row):
+                    if bit == '#':
+                        cars__put(grid, ox + gx, 8 + gy, cars_METROBUS_ROUTE)
     else:  # box_truck
         box = (210, 206, 198)
         cab = (108, 114, 124)
@@ -3854,6 +3884,7 @@ props_PROPS = [
     'trashcan',
     'bench', 'mailbox', 'phonebooth', 'bus_stop', 'manhole', 'roadcone',
     'planter', 'newsbox', 'chainlink', 'above_pool', 'tub_madonna',
+    'backyard_bbq', 'clothesline',
 ]
 
 # Props that never cast a shadow (flat on the ground).
@@ -3878,6 +3909,8 @@ props__ANCHORS = {
     'chainlink': (10, 11),
     'above_pool': (11, 13),
     'tub_madonna': (5, 13),
+    'backyard_bbq': (12, 15),
+    'clothesline': (13, 14),
 }
 
 props__SPRITES = {}
@@ -4125,6 +4158,41 @@ def props__build_tub_madonna():
     return s
 
 
+def props__build_backyard_bbq():
+    """Kettle grill, two folding chairs and the cooler nobody is guarding."""
+    s = props__surf(25, 16)
+    # Weber-shaped kettle with three tiny legs and one hot coal pixel.
+    pygame.draw.circle(s, props_C_OUT, (12, 6), 5)
+    pygame.draw.circle(s, (66, 62, 64), (12, 6), 4)
+    props__rect(s, 8, 4, 9, 1, (126, 122, 116))
+    props__rect(s, 11, 10, 2, 5, props_C_METAL_DARK)
+    props__rect(s, 8, 14, 3, 1, props_C_METAL_DARK)
+    props__rect(s, 14, 14, 3, 1, props_C_METAL_DARK)
+    props__rect(s, 12, 6, 1, 1, (212, 104, 48))
+    # Mismatched folding lawn chairs: green webbing and Cardinals red.
+    for x, col in ((1, (72, 116, 76)), (19, (166, 46, 46))):
+        props__box(s, x, 7, 5, 6, col)
+        props__rect(s, x + 1, 9, 3, 1, props_C_OUT)
+        props__rect(s, x + 1, 13, 1, 3, props_C_METAL)
+        props__rect(s, x + 3, 13, 1, 3, props_C_METAL)
+    return s
+
+
+def props__build_clothesline():
+    """A yard-width line with sheets, a red towel and impossible optimism."""
+    s = props__surf(27, 15)
+    pole = (94, 84, 72)
+    props__rect(s, 1, 1, 2, 14, pole)
+    props__rect(s, 24, 1, 2, 14, pole)
+    pygame.draw.line(s, (184, 178, 158), (2, 2), (25, 2), 1)
+    # White sheet, blue work shirt, Cardinals towel.
+    props__box(s, 5, 2, 7, 7, (218, 214, 198))
+    props__rect(s, 6, 3, 5, 1, (238, 234, 218))
+    props__box(s, 14, 2, 4, 6, (72, 102, 142))
+    props__box(s, 20, 2, 3, 5, (174, 42, 44))
+    return s
+
+
 props__BUILDERS = {
     'streetlight': props__build_streetlight,
     'hydrant': props__build_hydrant,
@@ -4143,6 +4211,8 @@ props__BUILDERS = {
     'chainlink': props__build_chainlink,
     'above_pool': props__build_above_pool,
     'tub_madonna': props__build_tub_madonna,
+    'backyard_bbq': props__build_backyard_bbq,
+    'clothesline': props__build_clothesline,
 }
 
 
@@ -4269,13 +4339,17 @@ def props_props_for_tile(c, r, tile_type, is_sidewalk, district=None):
     # courtyards. They are walkable, so these stay visual-only and sparse.
     if tile_type == props_TILE_PLAZA and not is_sidewalk and district in ('hill', 'south'):
         n = props__noise(c, r, 149)
-        phase = n % 53
+        phase = n % 31
         if phase < 3:
             return [props__place('chainlink', 14 + ((n >> 8) % 34), 18 + ((n >> 13) % 28))]
-        if phase == 7:
+        if phase == 6:
             return [props__place('above_pool', 18 + ((n >> 9) % 28), 22 + ((n >> 15) % 22))]
-        if phase == 19:
+        if phase == 11:
             return [props__place('tub_madonna', 12 + ((n >> 10) % 40), 20 + ((n >> 16) % 24))]
+        if phase in (15, 16):
+            return [props__place('backyard_bbq', 16 + ((n >> 7) % 30), 24 + ((n >> 14) % 18))]
+        if phase == 23:
+            return [props__place('clothesline', 17 + ((n >> 10) % 26), 20 + ((n >> 16) % 22))]
         return []
 
     # --- Everything else is furniture, sidewalks only ---
@@ -9640,6 +9714,7 @@ class Game:
         self.arch_job_phase = ARCH_LOCKED
         self.arch_job_timer = 0
         self.arch_job_offer_after = 0
+        self.arch_victory_timer = 0
 
         # --- who are you? -------------------------------------------------
         # This is intentionally lightweight mechanically and extremely heavy
@@ -9754,6 +9829,7 @@ class Game:
                                    ARCH_READY if self.arch_job_unlocked else ARCH_LOCKED)
             self.arch_job_timer = 0
             self.arch_job_offer_after = self.frame + FPS * 2
+            self.arch_victory_timer = 0
             self.streak = 0
             self.police = []
             self.foot_police = []
@@ -9847,13 +9923,26 @@ class Game:
         self.arch_job_unlocked = True
         self.arch_job_phase = ARCH_COMPLETE
         self.arch_job_timer = 0
+        self.arch_victory_timer = ARCH_VICTORY_HOLD_STEPS
         self.add_score(ARCH_JOB_SCORE, self.active_rect().center, mult=False)
         self.add_callout("ARCH JOB COMPLETE", hud_HUD_GOLD, scale=2)
         self.add_toast("The Italian Job. Missouri rules.")
         self.play_sound('cash', vol=1.0)
-        self.job = Job.generate()
+        # Let the finale breathe. Ordinary work returns after the card, not in
+        # the same frame as the fifty-grand payoff.
+        self.job = None
         self.job_cooldown = 0
         self.save_game(announce=False)
+
+    def update_arch_victory(self):
+        """Hold the whole city for one earned beat, then reopen the sandbox."""
+        if self.arch_victory_timer <= 0:
+            return False
+        self.arch_victory_timer -= 1
+        if self.arch_victory_timer <= 0 and self.job is None:
+            self.job = Job.generate()
+            self.add_toast("St. Louis keeps moving.")
+        return True
 
     def update_arch_job(self):
         """The real end of the $50,000 ladder. This sits beside the ordinary
@@ -10948,10 +11037,28 @@ class Game:
                 self.handle_keydown(pygame.K_RETURN)
             elif button == PAD_B:
                 self.handle_keydown(pygame.K_ESCAPE)
+            elif self.state == STATE_CHARACTER and self.school_open and button == PAD_LB:
+                self.handle_keydown(pygame.K_PAGEUP)
+            elif self.state == STATE_CHARACTER and self.school_open and button == PAD_RB:
+                self.handle_keydown(pygame.K_PAGEDOWN)
             return
         key = PAD_BUTTON_KEYS.get(button)
         if key is not None:
             self.handle_keydown(key)
+
+    def handle_pad_hat(self, value):
+        """Turn a D-pad edge into the same one-shot menu movement as arrows."""
+        if self.state not in (STATE_TITLE, STATE_CHARACTER):
+            return
+        hx, hy = value
+        if hy > 0:
+            self.handle_keydown(pygame.K_UP)
+        elif hy < 0:
+            self.handle_keydown(pygame.K_DOWN)
+        elif hx < 0:
+            self.handle_keydown(pygame.K_LEFT)
+        elif hx > 0:
+            self.handle_keydown(pygame.K_RIGHT)
 
     def pad_handbrake(self):
         """LB is the handbrake. It sits under the left index finger, which is
@@ -11137,13 +11244,15 @@ class Game:
                 self.handle_keydown(event.key, getattr(event, 'unicode', ''))
             elif event.type == pygame.JOYBUTTONDOWN:
                 self.handle_pad_button(event.button)
+            elif event.type == pygame.JOYHATMOTION:
+                self.handle_pad_hat(event.value)
             elif event.type == pygame.JOYDEVICEADDED:
                 self.open_gamepad()
             elif event.type == pygame.JOYDEVICEREMOVED:
                 self.drop_gamepad()
                 self.open_gamepad()
 
-        if self.state != STATE_PLAYING or self.show_map:
+        if self.state != STATE_PLAYING or self.show_map or self.arch_victory_timer > 0:
             # Paused, dead, or reading the map: hold everything still rather
             # than letting the last throttle value keep the car rolling on.
             if self.driving:
@@ -11203,6 +11312,12 @@ class Game:
         """
         if key == pygame.K_F11:
             self.toggle_fullscreen()
+            return
+
+        if self.arch_victory_timer > 0:
+            if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE,
+                       pygame.K_e, pygame.K_ESCAPE):
+                self.arch_victory_timer = 1
             return
 
         if self.state == STATE_TITLE:
@@ -11370,6 +11485,8 @@ class Game:
     def update(self):
         """One fixed 1/60s simulation step."""
         self.frame += 1
+        if self.update_arch_victory():
+            return
         # Hitstop: freeze the whole sim for a frame or two on a big impact.
         # step_sim only ever calls update() in whole SIM_DT slices, so N frozen
         # steps is exactly N/60s on any machine, and nothing changed this step
@@ -12884,6 +13001,7 @@ class Game:
 
         if self.driving:
             self.driving.draw(self.screen, self.camera, flash)
+            self.draw_arch_cargo()
         else:
             ppos = self.camera.apply_pos(self.player_rect.center)
             sx, sy = int(ppos[0]), int(ppos[1])
@@ -12918,7 +13036,11 @@ class Game:
             fl = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             fl.fill((255, 255, 255, min(210, int(210 * self.hit_flash / 2.0))))
             self.screen.blit(fl, (0, 0))
-        if self.state == STATE_DEAD:
+        if self.arch_victory_timer > 0:
+            # The finale gets the whole screen for one beat. HUD numbers,
+            # courier work and stale chase callouts would cheapen the landing.
+            self.draw_arch_victory_card()
+        elif self.state == STATE_DEAD:
             # Nothing else draws over a death card. The old build kept the
             # stars, radar, multiplier, frenzy clock, toasts and three stale
             # callouts at full strength on top of it.
@@ -12936,6 +13058,76 @@ class Game:
 
         self.postfx.present(self.screen, self.window)
         pygame.display.flip()
+
+    def draw_arch_cargo(self):
+        """Strap the stolen 43-pound Arch slice visibly to the getaway car."""
+        if (self.driving is None or
+                self.arch_job_phase not in (ARCH_ESCAPE, ARCH_LAY_LOW)):
+            return False
+        cx, cy = self.camera.apply_pos(self.driving.rect.center)
+        a = self.driving.angle
+        fx, fy = math.cos(a), math.sin(a)
+        sx, sy = -fy, fx
+
+        def quad(length, width, ox=0.0, oy=0.0):
+            mx, my = cx + sx * ox + fx * oy, cy + sy * ox + fy * oy
+            return [(int(mx + fx * dl + sx * dw), int(my + fy * dl + sy * dw))
+                    for dl, dw in ((-length, -width), (length, -width),
+                                   (length, width), (-length, width))]
+
+        pygame.draw.polygon(self.screen, (14, 14, 18), quad(11, 4, 0, 2))
+        pygame.draw.polygon(self.screen, (164, 174, 178), quad(10, 3, 0, 1))
+        pygame.draw.line(self.screen, (232, 234, 226),
+                         (int(cx - fx * 8 - sx * 2), int(cy - fy * 8 - sy * 2)),
+                         (int(cx + fx * 8 - sx * 2), int(cy + fy * 8 - sy * 2)), 1)
+        # Two ratchet straps: safety first during a five-star felony.
+        for along in (-4, 5):
+            px, py = cx + fx * along, cy + fy * along
+            pygame.draw.line(self.screen, (174, 46, 42),
+                             (int(px - sx * 4), int(py - sy * 4)),
+                             (int(px + sx * 4), int(py + sy * 4)), 2)
+        return True
+
+    def draw_arch_victory_card(self):
+        """A five-second end card over the exact street where you escaped."""
+        dim = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        dim.fill((5, 7, 12, 226))
+        self.screen.blit(dim, (0, 0))
+
+        # A compact silver Arch owns the top half; the shape is redrawn from
+        # primitives so the no-runtime-assets promise remains intact.
+        points = []
+        for i in range(33):
+            t = math.pi * i / 32.0
+            points.append((int(320 + 74 * math.cos(t)),
+                           int(166 - 112 * math.sin(t))))
+        pygame.draw.lines(self.screen, (20, 18, 24), False,
+                          [(x + 4, y + 5) for x, y in points], 13)
+        pygame.draw.lines(self.screen, (170, 180, 184), False, points, 10)
+        pygame.draw.lines(self.screen, (232, 232, 220), False,
+                          [(x - 2, y - 1) for x, y in points], 2)
+
+        line = "THE ARCH JOB"
+        hud_text(self.screen, line,
+                 (SCREEN_WIDTH - hud_text_width(line, 2)) // 2, 185,
+                 hud_HUD_WHITE, True, 2)
+        line = "COMPLETE"
+        hud_text(self.screen, line,
+                 (SCREEN_WIDTH - hud_text_width(line, 4)) // 2, 211,
+                 hud_HUD_GOLD, True, 4)
+        line = f"+${ARCH_JOB_SCORE} SCORE   43 LB LIGHTER"
+        hud_text(self.screen, line,
+                 (SCREEN_WIDTH - hud_text_width(line, 1)) // 2, 254,
+                 hud_HUD_GREEN, True, 1)
+        line = "THE ITALIAN JOB. MISSOURI RULES."
+        hud_text(self.screen, line,
+                 (SCREEN_WIDTH - hud_text_width(line, 1)) // 2, 275,
+                 hud_HUD_WHITE, True, 1)
+        if (self.arch_victory_timer // 24) % 2 == 0:
+            line = "PRESS ENTER TO KEEP DRIVING"
+            hud_text(self.screen, line,
+                     (SCREEN_WIDTH - hud_text_width(line, 1)) // 2, 326,
+                     hud_HUD_GREY_DIM, True, 1)
 
     # ---------------- the death card ----------------
     def draw_death_card(self):

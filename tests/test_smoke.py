@@ -62,6 +62,7 @@ def reset(g):
     g.arch_job_phase = M.ARCH_LOCKED
     g.arch_job_timer = 0
     g.arch_job_offer_after = 0
+    g.arch_victory_timer = 0
     g.state = M.STATE_PLAYING
     g.busted_flash = 0
     g.wasted_flash = 0
@@ -981,6 +982,22 @@ def test_the_rare_black_trans_am_has_its_own_art_and_handling():
     assert M.cars_TRANS_AM_GOLD in colors
 
 
+def test_route_70_metrobus_is_a_moving_fixed_livery():
+    game()
+    assert M.CIVILIAN_WEIGHTED.count("metrobus_70") == 1
+    assert "metrobus_70" not in M.PARKED_VARIANTS_WEIGHTED
+    assert M.VEHICLE_TUNING["metrobus_70"]["w"] == M.VEHICLE_TUNING["bus"]["w"]
+    for color in M.CAR_COLORS:
+        assert ("metrobus_70", color) in M.CAR_SPRITES
+    frames, shadows = M.CAR_SPRITES[("metrobus_70", M.CAR_COLORS[0])]
+    assert len(frames) == len(shadows) == M.cars_ANGLE_STEPS
+    colors = {tuple(frames[0].get_at((x, y))[:3])
+              for y in range(frames[0].get_height())
+              for x in range(frames[0].get_width())}
+    assert {M.cars_METROBUS_BLUE, M.cars_METROBUS_RED,
+            M.cars_METROBUS_ROUTE} <= colors
+
+
 def test_the_streets_are_actually_populated():
     """The whole point, measured the way a player meets it: boot the game and
     look at the screen. A fresh Game, not the shared one, because this is
@@ -1032,6 +1049,28 @@ def test_gamepad_buttons_map_onto_real_keys():
     assert all(0 <= b <= 10 for b in M.PAD_BUTTON_KEYS)
 
 
+def test_gamepad_dpad_navigates_title_creator_and_school_picker():
+    g = game()
+    g.state = M.STATE_TITLE
+    g.title_index = 0
+    g.handle_pad_hat((0, -1))
+    assert g.title_index == 1 % len(g.title_options())
+
+    g.state = M.STATE_CHARACTER
+    g.setup_row = 0
+    g.handle_pad_hat((0, -1))
+    assert g.setup_row == 1
+    g.handle_pad_hat((1, 0))
+    assert g.school_open
+    before = g.school_cursor
+    g.handle_pad_hat((0, -1))
+    assert g.school_cursor == min(before + 1, len(g.school_matches()) - 1)
+    g.handle_pad_button(M.PAD_RB)
+    assert g.school_cursor >= min(before + 1, len(g.school_matches()) - 1)
+    g.handle_pad_button(M.PAD_B)
+    assert not g.school_open
+
+
 def test_shop_signs_fit_on_a_shopfront():
     """A 64px tile leaves a 60px sign board; anything wider silently vanishes."""
     for hood, pool in M.HOOD_SIGNS.items():
@@ -1064,7 +1103,8 @@ def test_neighbourhoods_pick_their_own_character():
 
 def test_south_city_yards_have_local_micro_landmarks_only():
     """Tiny yard jokes belong behind South City buildings, never downtown."""
-    expected = {'chainlink', 'above_pool', 'tub_madonna'}
+    expected = {'chainlink', 'above_pool', 'tub_madonna',
+                'backyard_bbq', 'clothesline'}
     seen = set()
     for r in range(M.MAP_TILES_H):
         for c in range(M.MAP_TILES_W):
@@ -1880,7 +1920,13 @@ def test_arch_job_runs_city_museum_to_arch_to_hill_and_back_to_jobs():
             assert g.arch_job_completed
             assert g.arch_job_phase == M.ARCH_COMPLETE
             assert g.score == score + M.ARCH_JOB_SCORE
-            assert g.job is not None, "ordinary St. Louis keeps going after the finale"
+            assert g.arch_victory_timer == M.ARCH_VICTORY_HOLD_STEPS
+            assert g.job is None, "a courier offer stepped on the finale card"
+            g.draw()
+            # The card freezes the city, then ordinary St. Louis keeps going.
+            for _ in range(M.ARCH_VICTORY_HOLD_STEPS):
+                g.update_arch_victory()
+            assert g.arch_victory_timer == 0 and g.job is not None
             g.update_arch_job()
             assert g.score == score + M.ARCH_JOB_SCORE, "completion reward fired twice"
         finally:
@@ -1936,6 +1982,10 @@ def test_arch_job_objective_renders_in_every_phase():
         g.draw_radar(M.SCREEN_WIDTH - M.RADAR_SIZE - 10, 76)
         g.draw_objective()
         g.draw_map_screen()
+    assert not g.draw_arch_cargo(), "cargo appeared without a getaway car"
+    _drive(g)
+    g.arch_job_phase = M.ARCH_ESCAPE
+    assert g.draw_arch_cargo(), "the stolen Arch slice is invisible on the getaway car"
     random.setstate(rng_state)
 
 
