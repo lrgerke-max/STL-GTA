@@ -297,6 +297,22 @@ JOB_MIN_TILE_SPAN = 12      # never pair two landmarks that are basically adjace
 JOB_STREAK_BONUS = 0.15     # +15% per consecutive on-time drop, capped below
 JOB_STREAK_CAP = 6
 JOB_HEAT_LIMIT = 3          # no dispatcher will hand you a run at 3+ stars
+# The pickup leg has no clock, which is right - exploring toward a job should
+# never be punished - but it also meant a run you did not want sat on the HUD
+# for the whole session. It expires, and R rerolls it on the spot.
+JOB_OFFER_SECONDS = 100
+# Deliver and the next run is already on the table, worth more if you take it
+# straight away. This replaces two seconds of silence with a decision.
+JOB_CHAIN_WINDOW = FPS * 6
+JOB_CHAIN_BONUS = 0.20
+
+# --- The body shop --------------------------------------------------------
+# Kingshighway. Drive in hot, come out a different colour. The classic GTA
+# cash sink, and the game's first answer to "what do I spend money on" beyond
+# bail - which was previously the entire economy.
+BODY_SHOP_COST = 300
+BODY_SHOP_RADIUS = 52
+BODY_SHOP_TILES = ((21, 45), (52, 68), (75, 28))
 
 # --- Chaos score multiplier --------------------------------------------------
 # The GTA1 compulsion spine: every reckless act feeds a running multiplier,
@@ -390,6 +406,7 @@ CALLOUT_STRINGS = (
     "TALLBOY", "+42HP", "PORK STEAK 20",
     # St. Louis
     "CITY OF ST LOUIS", HS_QUESTION, "CROSSED DELMAR",
+    "RESPRAYED", "HOT STREAK", "BODY SHOP - $300", "-$300",
     ) + tuple(STREET_ROWS.values()) + tuple(STREET_COLS.values()) + tuple(
         HS_ANSWERS) + tuple(HS_REPLIES) + (
     # the bank under the Arch
@@ -7851,6 +7868,10 @@ class Job:
         self.pickup = pickup
         self.dropoff = dropoff
         self.cargo = random.choice(self.CARGO)
+        # The offer clock. Only runs before pickup; once the cargo is aboard
+        # the delivery clock takes over.
+        self.offer_left = int(JOB_OFFER_SECONDS * FPS)
+        self.hot = False              # taken inside the chain window
         self.pickup_pos = landmark_dropoff_point(pickup)
         self.drop_pos = landmark_dropoff_point(dropoff)
         self.collected = False
@@ -8780,6 +8801,15 @@ class Game:
         self.crime_pos = None        # where the offence that raised this star was
         self.crime_frame = -10 ** 9
         self.hs_cooldown = 0         # steps before anybody asks you again
+        self.body_shops = []
+        for (bcol, brow) in BODY_SHOP_TILES:
+            spot = free_point_near(bcol * TILE_SIZE + TILE_SIZE // 2,
+                                   brow * TILE_SIZE + TILE_SIZE // 2,
+                                   VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H,
+                                   max_rings=8)
+            if spot is not None:
+                self.body_shops.append(spot)
+        self.shop_cooldown = 0
         self.hs_asked = 0            # how many times you have answered it
         self.peak_star = 0           # highest star reached this life
         self.chase_steps = 0         # steps spent at 1+ stars this life
@@ -8858,6 +8888,7 @@ class Game:
         self.streak = 0
         self.best_streak = 0
         self.job_cooldown = 0
+        self.chain_until = 0         # frame the hot-streak bonus expires on
 
         # --- heat ---------------------------------------------------------
         self.infraction_at = {}   # offence key -> sim step it may re-arm at
@@ -9666,6 +9697,44 @@ class Game:
                             car.rect.centery + back[1] + side[1] * sgn),
                            'skid', 0.34)
 
+    def update_body_shop(self):
+        """Drive in hot, come out a different colour, $300 lighter.
+
+        Only from a car, because the joke is a respray - and only with a
+        wanted level, so it is a decision you make under pressure rather than
+        a button you press for nothing.
+        """
+        if self.shop_cooldown > 0:
+            self.shop_cooldown -= 1
+            return
+        if self.driving is None or self.wanted_level <= 0:
+            return
+        here = self.driving.rect.center
+        for (sx, sy) in self.body_shops:
+            if math.hypot(here[0] - sx, here[1] - sy) > BODY_SHOP_RADIUS:
+                continue
+            if self.cash + self.banked < BODY_SHOP_COST:
+                if self.frame % (FPS * 2) == 0:
+                    self.add_toast(f"Respray is ${BODY_SHOP_COST}. Come back.")
+                return
+            paid = min(self.cash, BODY_SHOP_COST)
+            self.cash -= paid
+            self.banked -= (BODY_SHOP_COST - paid)
+            self.shop_cooldown = FPS * 6
+            self.wanted_level = 0
+            self.police = []
+            self.foot_police = []
+            self.bust_meter = 0
+            self.heat_timer = 0
+            self.wanted_decay_timer = 0
+            self.crime_pos = None
+            self.driving.color = cars_random_body_color()
+            self.driving.hp = self.driving.max_hp
+            self.add_callout("RESPRAYED", hud_HUD_GREEN, scale=2)
+            self.add_pop(here, f"-${BODY_SHOP_COST}", hud_HUD_RED)
+            self.play_sound('cash', vol=0.7)
+            return
+
     def check_potholes(self):
         """City of St. Louis."""
         car = self.driving
@@ -10064,6 +10133,8 @@ class Game:
             self.player_attack()
         elif key == pygame.K_e:
             self.toggle_enter_exit()
+        elif key == pygame.K_r:
+            self.reroll_job()
         elif key == pygame.K_F5:
             self.save_game()
         elif key == pygame.K_F9:
@@ -10255,6 +10326,7 @@ class Game:
         self.update_grub()
         self.update_bank()
         self.update_dropped_cash()
+        self.update_body_shop()
         self.lay_skid_marks()
         if self.hs_cooldown > 0:
             self.hs_cooldown -= 1
@@ -10412,6 +10484,14 @@ class Game:
         near = math.hypot(active.centerx - tx, active.centery - ty) <= JOB_MARKER_RADIUS
 
         if not self.job.collected:
+            # An offer you never take goes stale rather than sitting on the
+            # HUD for the whole session.
+            self.job.offer_left -= 1
+            if self.job.offer_left <= 0:
+                self.job = None
+                self.job_cooldown = FPS
+                self.add_toast("That run went to somebody else")
+                return
             if not near:
                 return
             if self.wanted_level >= JOB_HEAT_LIMIT:
@@ -10420,7 +10500,11 @@ class Game:
                     self.add_toast("Too hot - lose the cops first")
                 return
             self.job.collect()
+            if self.chain_until > self.frame:
+                self.job.hot = True
+                self.add_callout("HOT STREAK", hud_HUD_GOLD, scale=1, tag='chain')
             self.add_toast(f"Picked up: {self.job.cargo}")
+            self.play_sound('pickup', vol=0.5)
             return
 
         if self.job.tick():
@@ -10428,6 +10512,8 @@ class Game:
             return
         if near:
             paid = self.job.payout(self.streak)
+            if self.job.hot:
+                paid = int(paid * (1.0 + JOB_CHAIN_BONUS))
             self.cash += paid
             self.add_score(50, mult=False)         # the careful loop stays flat
             self.jobs_done += 1
@@ -10437,8 +10523,23 @@ class Game:
             self.add_toast(f"Delivered! ${paid}{tail}")
             self.add_callout("DELIVERED!", hud_HUD_GREEN, scale=2)
             self.add_pop(active.center, f"+${paid}", hud_HUD_GREEN)
-            self.job = None
-            self.job_cooldown = FPS * 2
+            self.play_sound('cash', vol=0.8)
+            # The next run is already on the table. Take it inside the window
+            # and it pays more - which replaces two seconds of silence with a
+            # decision, and is the cheapest retention in the game.
+            self.job = Job.generate()
+            self.job_cooldown = 0
+            self.chain_until = self.frame + JOB_CHAIN_WINDOW
+            self.add_toast(f"Next: {self.job.pickup[5]} (+{int(JOB_CHAIN_BONUS * 100)}% if you hurry)")
+
+    def reroll_job(self):
+        """R: throw this run back. Only before you have picked the cargo up -
+        once it is in the boot it is yours."""
+        if self.job is None or self.job.collected:
+            return
+        self.job = Job.generate()
+        self.chain_until = 0
+        self.add_toast(f"New run: {self.job.pickup[5]}")
 
     def fail_job(self, reason):
         if self.job is None:
@@ -11398,6 +11499,7 @@ class Game:
         self.draw_fx()
         self.draw_weapon_pickups()
         self.draw_grub_pickups()
+        self.draw_body_shops()
         self.draw_potholes()
         self.draw_dropped_cash()
         self.draw_foot_police()
@@ -11630,6 +11732,23 @@ class Game:
             if art is not None:
                 art(self, x, y)
 
+    def draw_body_shops(self):
+        """A roll-up garage door with a paint stripe over it. Drive in hot."""
+        for (sx, sy) in self.body_shops:
+            px, py = self.camera.apply_pos((sx, sy))
+            if not (-60 < px < SCREEN_WIDTH + 60 and -60 < py < SCREEN_HEIGHT + 60):
+                continue
+            x, y = int(px), int(py)
+            open_now = self.wanted_level > 0 and self.shop_cooldown <= 0
+            self.screen.fill((26, 26, 30), (x - 22, y - 16, 44, 32))
+            self.screen.fill((62, 66, 74), (x - 20, y - 14, 40, 28))
+            for i in range(4):                       # the roller door slats
+                self.screen.fill((44, 48, 56), (x - 19, y - 12 + i * 7, 38, 2))
+            band = (110, 170, 220) if open_now else (78, 84, 92)
+            self.screen.fill(band, (x - 20, y - 18, 40, 4))
+            if open_now and (self.frame // 14) % 2 == 0:
+                self.screen.fill((196, 226, 244), (x - 4, y - 18, 8, 4))
+
     def draw_potholes(self):
         """An irregular black hole with a ragged asphalt rim and a puddle."""
         for hole in self.potholes:
@@ -11810,6 +11929,7 @@ class Game:
         ("WASD / ARROWS", "MOVE OR DRIVE"),
         ("LSHIFT", "HANDBRAKE"),
         ("E", "ENTER / EXIT VEHICLE"),
+        ("R", "REROLL THE RUN ON OFFER"),
         ("SPACE / F", "PUNCH OR SHOOT"),
         ("GAMEPAD", "RT GO  LT BRAKE  A CAR"),
         ("", "LB HANDBRAKE  X HIT"),
@@ -11901,6 +12021,11 @@ class Game:
         def to_map(wx, wy):
             return mx + int(wx * s), my + int(wy * s)
 
+        for shop in self.body_shops:
+            sx2, sy2 = to_map(*shop)
+            pygame.draw.circle(self.screen, (110, 170, 220), (sx2, sy2), 3)
+            pygame.draw.circle(self.screen, (12, 16, 28), (sx2, sy2), 3, 1)
+
         stx, sty = to_map(*self.police_station)
         pygame.draw.circle(self.screen, (90, 150, 240), (stx, sty), 3)
         pygame.draw.circle(self.screen, (12, 16, 28), (stx, sty), 3, 1)
@@ -11951,7 +12076,8 @@ class Game:
         ly += 8
         for col, name in (((232, 232, 232), "YOU"), (hud_HUD_GOLD, "PICKUP"),
                           (hud_HUD_GREEN, "DROP-OFF"), (hud_HUD_RED, "POLICE"),
-                          ((90, 150, 240), "POLICE STATION")):
+                          ((90, 150, 240), "POLICE STATION"),
+                          ((110, 170, 220), "BODY SHOP - $300")):
             self.screen.fill(col, (lx, ly + 1, 6, 6))
             hud_text(self.screen, name, lx + 11, ly, hud_HUD_WHITE, True, 1)
             ly += 12
@@ -12083,6 +12209,8 @@ class Game:
                                 [(int(tip[0]), int(tip[1])),
                                  (int(a[0]), int(a[1])), (int(c[0]), int(c[1]))])
 
+        for shop in self.body_shops:
+            blip(shop, (110, 170, 220), 3)
         for d in self.dropped:
             blip((d['x'], d['y']), hud_HUD_GREEN, 3)
         for g in self.grub_pickups:

@@ -2029,6 +2029,111 @@ def test_the_map_names_its_streets():
     assert "KINGSHWY" in M.STREET_COLS.values()
 
 
+# ---------------------------------------------------------------------------
+# The job loop: chaining, expiry, and somewhere to spend the money
+# ---------------------------------------------------------------------------
+
+def test_delivering_puts_the_next_run_straight_on_the_table():
+    """A finished delivery used to be followed by two seconds of silence and
+    a cooldown. The next run is a decision, not a pause."""
+    g = game()
+    job = g.job
+    teleport(g, job.pickup_pos)
+    g.update_job()
+    assert job.collected
+    teleport(g, job.drop_pos)
+    g.update_job()
+    assert g.job is not None and g.job is not job, "no next run offered"
+    assert g.chain_until > g.frame, "the hot-streak window never opened"
+
+
+def test_taking_the_next_run_quickly_pays_more():
+    def run(hurry):
+        g = game()
+        g.streak = 0
+        job = g.job
+        teleport(g, job.pickup_pos)
+        g.update_job()
+        teleport(g, job.drop_pos)
+        g.update_job()
+        nxt = g.job
+        if not hurry:
+            g.frame += M.JOB_CHAIN_WINDOW + 10
+        teleport(g, nxt.pickup_pos)
+        g.update_job()
+        assert nxt.collected
+        before = g.cash
+        teleport(g, nxt.drop_pos)
+        g.update_job()
+        return g.cash - before, nxt.hot
+
+    fast_pay, fast_hot = run(True)
+    slow_pay, slow_hot = run(False)
+    assert fast_hot and not slow_hot
+    assert fast_pay > slow_pay, f"hot {fast_pay} vs cold {slow_pay}"
+
+
+def test_a_run_you_never_take_goes_stale():
+    """One unwanted job used to sit on the HUD for the whole session -
+    verified across three screenshots ninety seconds apart."""
+    g = game()
+    job = g.job
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    for _ in range(int(M.JOB_OFFER_SECONDS * M.FPS) + 4):
+        g.update_job()
+        if g.job is not job:
+            break
+    assert g.job is not job, "the offer never expired"
+
+
+def test_you_can_throw_a_run_back_but_not_the_cargo():
+    g = game()
+    first = g.job
+    g.reroll_job()
+    assert g.job is not first, "R did not reroll the offer"
+    held = g.job
+    teleport(g, held.pickup_pos)
+    g.update_job()
+    assert held.collected
+    g.reroll_job()
+    assert g.job is held, "cargo in the boot is yours; you cannot hand it back"
+
+
+def test_the_body_shop_takes_your_money_and_your_wanted_level():
+    g = game()
+    assert g.body_shops, "there should be a body shop somewhere"
+    car = _drive(g)
+    car.rect.center = g.body_shops[0]
+    g.wanted_level = 4
+    g.peak_star = 4
+    dispatch_cops(g, 4)
+    g.cash = 1000
+    g.shop_cooldown = 0
+    g.update_body_shop()
+    assert g.wanted_level == 0, "drove into the shop hot and came out hot"
+    assert g.police == [] and g.foot_police == []
+    assert g.cash == 1000 - M.BODY_SHOP_COST
+    g.driving = None
+
+
+def test_the_body_shop_is_not_a_free_button():
+    g = game()
+    car = _drive(g)
+    car.rect.center = g.body_shops[0]
+    g.cash = 0
+    g.banked = 0
+    g.wanted_level = 3
+    g.shop_cooldown = 0
+    g.update_body_shop()
+    assert g.wanted_level == 3, "resprayed for free"
+    # and it does nothing at all when you are clean
+    g.cash = 1000
+    g.wanted_level = 0
+    g.update_body_shop()
+    assert g.cash == 1000, "charged for a respray nobody needed"
+    g.driving = None
+
+
 def _run_all():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

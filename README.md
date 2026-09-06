@@ -87,6 +87,7 @@ any time.
 | `D` / `→` | Move right / Steer right |
 | `LSHIFT` | **Handbrake** — locks the back wheels so the car rotates on its momentum |
 | `E` | Enter or exit a vehicle |
+| `R` | Reroll the run currently on offer (before pickup only) |
 | `SPACE` / `F` | Punch, or fire the pistol if you're carrying one |
 | `M` / `TAB` | Full-city map (freezes the sim while it's up) |
 | `F11` | Toggle fullscreen / windowed |
