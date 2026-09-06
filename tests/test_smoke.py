@@ -2297,11 +2297,15 @@ def test_somebody_asks_where_you_went_to_high_school():
 
 def test_character_creator_has_the_whole_local_school_question():
     names = [name for name, _group in M.STL_HIGH_SCHOOLS]
-    assert len(names) >= 85, "the selector is a sample, not the promised area list"
+    assert len(names) >= 150, "the selector is a sample, not the promised metro-area list"
     assert len(names) == len(set(names)), "duplicate high-school choice"
     for expected in ("Vashon High School", "Kirkwood High School",
                      "Christian Brothers College High School",
-                     "St. Louis University High School", "MICDS"):
+                     "St. Louis University High School", "MICDS",
+                     "Francis Howell North High School", "Seckman Sr. High School",
+                     "Washington High School", "Edwardsville High School",
+                     "East St. Louis Senior High School", "Waterloo High School",
+                     "Gibault Catholic"):
         assert expected in names
     assert {group for _name, group in M.STL_HIGH_SCHOOLS} >= {
         "CITY PUBLIC", "COUNTY PUBLIC", "CHARTER", "TECHNICAL", "PRIVATE"
@@ -2315,6 +2319,10 @@ def test_character_creator_has_the_whole_local_school_question():
         "Christian Brothers College High School"
     ]
     assert any(row[0] == "Parkway West High School" for row in g.school_matches("park west"))
+    assert [row[0] for row in g.school_matches("fzw")] == ["Ft. Zumwalt West High School"]
+    assert [row[0] for row in g.school_matches("estl")] == [
+        "East St. Louis Senior High School"
+    ]
 
 
 def test_school_combobox_types_filters_and_selects():

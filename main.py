@@ -246,10 +246,13 @@ HS_ANSWERS = ("SLUH", "CBC", "MEHLVILLE", "KIRKWOOD", "VASHON", "ROSATI")
 HS_REPLIES = ("OH.", "OH, OKAY.", "HUH.", "OH, YOU KNOW MY COUSIN.",
               "MY BROTHER WENT THERE.")
 
-# Character-creator list: schools physically in St. Louis City or St. Louis
-# County with current whole-school enrollment >= 100. Public entries were
-# checked against Missouri DESE; private entries against NCES PSS 2023-24 and
-# current school sites. The tag is deliberately compact for the in-game picker.
+# Character-creator list: regular campuses serving a high-school grade across
+# the core St. Louis metro, with current whole-school enrollment >= 100. That
+# means City/County plus St. Charles, Jefferson, Franklin and the Metro East
+# counties of Madison, St. Clair and Monroe. Public entries were checked against
+# MO DESE / IL ISBE; private entries against NCES PSS, ISBE and current sites.
+# Virtual, admin-only, CTE-only, special/alternative and duplicate campuses are
+# excluded. The tag stays compact because this still has to fit a 640px screen.
 STL_HIGH_SCHOOLS = (
     # County public
     ("Affton High School", "COUNTY PUBLIC"),
@@ -345,6 +348,87 @@ STL_HIGH_SCHOOLS = (
     ("Visitation Academy", "PRIVATE"),
     ("Westminster Christian Academy", "PRIVATE"),
     ("Whitfield School", "PRIVATE"),
+    # St. Charles County public
+    ("Emil E. Holt Sr. High School", "ST CHARLES PUBLIC"),
+    ("Francis Howell Central High School", "ST CHARLES PUBLIC"),
+    ("Francis Howell High School", "ST CHARLES PUBLIC"),
+    ("Francis Howell North High School", "ST CHARLES PUBLIC"),
+    ("Ft. Zumwalt East High School", "ST CHARLES PUBLIC"),
+    ("Ft. Zumwalt North High School", "ST CHARLES PUBLIC"),
+    ("Ft. Zumwalt South High School", "ST CHARLES PUBLIC"),
+    ("Ft. Zumwalt West High School", "ST CHARLES PUBLIC"),
+    ("Liberty High School", "ST CHARLES PUBLIC"),
+    ("North Point High School", "ST CHARLES PUBLIC"),
+    ("Orchard Farm High School", "ST CHARLES PUBLIC"),
+    ("St. Charles High School", "ST CHARLES PUBLIC"),
+    ("St. Charles West High School", "ST CHARLES PUBLIC"),
+    ("Timberland High School", "ST CHARLES PUBLIC"),
+    # Jefferson County public
+    ("Crystal City High School", "JEFFERSON PUBLIC"),
+    ("De Soto Sr. High School", "JEFFERSON PUBLIC"),
+    ("Festus Sr. High School", "JEFFERSON PUBLIC"),
+    ("Fox Sr. High School", "JEFFERSON PUBLIC"),
+    ("Grandview High School", "JEFFERSON PUBLIC"),
+    ("Herculaneum High School", "JEFFERSON PUBLIC"),
+    ("Hillsboro High School", "JEFFERSON PUBLIC"),
+    ("Jefferson High School", "JEFFERSON PUBLIC"),
+    ("Northwest High School", "JEFFERSON PUBLIC"),
+    ("Seckman Sr. High School", "JEFFERSON PUBLIC"),
+    ("Windsor High School", "JEFFERSON PUBLIC"),
+    # Franklin County public
+    ("New Haven High School", "FRANKLIN PUBLIC"),
+    ("Pacific High School", "FRANKLIN PUBLIC"),
+    ("St. Clair High School", "FRANKLIN PUBLIC"),
+    ("Sullivan Sr. High School", "FRANKLIN PUBLIC"),
+    ("Union High School", "FRANKLIN PUBLIC"),
+    ("Washington High School", "FRANKLIN PUBLIC"),
+    # Missouri outer-metro private
+    ("Christian School District", "ST CHARLES PRIVATE"),
+    ("Duchesne High School", "ST CHARLES PRIVATE"),
+    ("Lutheran High School of St. Charles County", "ST CHARLES PRIVATE"),
+    ("St. Dominic High School", "ST CHARLES PRIVATE"),
+    ("St. John Paul II Preparatory", "ST CHARLES PRIVATE"),
+    ("St. Pius X Catholic High School", "JEFFERSON PRIVATE"),
+    ("Crosspoint Christian School", "FRANKLIN PRIVATE"),
+    ("St. Francis Borgia High School", "FRANKLIN PRIVATE"),
+    # Madison County, Illinois public
+    ("Alton High School", "MADISON PUBLIC"),
+    ("Civic Memorial High School", "MADISON PUBLIC"),
+    ("Collinsville High School", "MADISON PUBLIC"),
+    ("East Alton-Wood River High School", "MADISON PUBLIC"),
+    ("Edwardsville High School", "MADISON PUBLIC"),
+    ("Granite City High School", "MADISON PUBLIC"),
+    ("Highland High School", "MADISON PUBLIC"),
+    ("Madison Senior High School", "MADISON PUBLIC"),
+    ("Roxana Sr. High School", "MADISON PUBLIC"),
+    ("Triad High School", "MADISON PUBLIC"),
+    # St. Clair County, Illinois public
+    ("Belleville High School-East", "ST CLAIR PUBLIC"),
+    ("Belleville High School-West", "ST CLAIR PUBLIC"),
+    ("Cahokia High School", "ST CLAIR PUBLIC"),
+    ("Dupo High School", "ST CLAIR PUBLIC"),
+    ("East St. Louis Senior High School", "ST CLAIR PUBLIC"),
+    ("Freeburg Community High School", "ST CLAIR PUBLIC"),
+    ("Lebanon High School", "ST CLAIR PUBLIC"),
+    ("Marissa Jr. & Sr. High School", "ST CLAIR PUBLIC"),
+    ("Mascoutah High School", "ST CLAIR PUBLIC"),
+    ("New Athens High School", "ST CLAIR PUBLIC"),
+    ("O Fallon High School", "ST CLAIR PUBLIC"),
+    ("SIU Charter School of East St. Louis", "ST CLAIR CHARTER"),
+    # Monroe County, Illinois public
+    ("Columbia High School", "MONROE PUBLIC"),
+    ("Valmeyer High School", "MONROE PUBLIC"),
+    ("Waterloo High School", "MONROE PUBLIC"),
+    # Metro East private
+    ("Father McGivney Catholic High School", "MADISON PRIVATE"),
+    ("Marquette Catholic High School", "MADISON PRIVATE"),
+    ("Maryville Christian School", "MADISON PRIVATE"),
+    ("Metro-East Lutheran High School", "MADISON PRIVATE"),
+    ("Rivers of Life Christian School", "MADISON PRIVATE"),
+    ("Althoff Catholic High School", "ST CLAIR PRIVATE"),
+    ("First Baptist Academy", "ST CLAIR PRIVATE"),
+    ("Governor French Academy", "ST CLAIR PRIVATE"),
+    ("Gibault Catholic", "MONROE PRIVATE"),
 )
 HS_SPECIAL_CHOICES = (
     ("NOT FROM AROUND HERE", "BOLD CHOICE"),
@@ -358,6 +442,15 @@ HS_SEARCH_ALIASES = {
     "MICDS": "MICDS",
     "VIANNEY": "St. John Vianney High School",
     "ROSATI": "Rosati-Kain Academy",
+    "FHC": "Francis Howell Central High School",
+    "FHHS": "Francis Howell High School",
+    "FHN": "Francis Howell North High School",
+    "FZE": "Ft. Zumwalt East High School",
+    "FZN": "Ft. Zumwalt North High School",
+    "FZS": "Ft. Zumwalt South High School",
+    "FZW": "Ft. Zumwalt West High School",
+    "ESTL": "East St. Louis Senior High School",
+    "OFALLON": "O Fallon High School",
 }
 CHARACTER_LOOKS = (
     "RED JACKET", "TEAL WINDBREAKER", "GOLD HOODIE",
