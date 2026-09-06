@@ -1938,6 +1938,97 @@ def test_which_car_you_steal_actually_matters():
     assert tops['vespa'] / tops['garbage_truck'] > 1.4, tops
 
 
+# ---------------------------------------------------------------------------
+# St. Louis, specifically
+# ---------------------------------------------------------------------------
+
+def test_somebody_asks_where_you_went_to_high_school():
+    """The question. You will be asked it by strangers within ninety seconds
+    of arriving, and the answer places you more precisely than an address."""
+    g = game()
+    g.wanted_level = 0
+    g.hs_cooldown = 0
+    asked = 0
+    for _ in range(400):
+        ped = g.pedestrians[0]
+        ped.mood = 'calm'
+        ped.down_timer = 0
+        ped.rect.center = g.player_rect.center
+        g.hs_cooldown = 0
+        before = g.hs_asked
+        g.barge_pedestrians()
+        if g.hs_asked > before:
+            asked += 1
+        if asked >= 3:
+            break
+    assert asked >= 3, "nobody ever asked"
+    assert g.hs_asked >= 3
+    # every answer and reply has to be renderable in the bitmap font
+    for text in M.HS_ANSWERS + M.HS_REPLIES + (M.HS_QUESTION,):
+        assert M.hud_text_width(text, 1) > 0, text
+
+
+def test_nobody_asks_while_the_police_are_chasing_you():
+    g = game()
+    g.wanted_level = 3
+    g.hs_cooldown = 0
+    before = g.hs_asked
+    for _ in range(200):
+        ped = g.pedestrians[0]
+        ped.mood = 'calm'
+        ped.down_timer = 0
+        ped.rect.center = g.player_rect.center
+        g.barge_pedestrians()
+    assert g.hs_asked == before, "asked mid-chase, which nobody would"
+
+
+def test_potholes_are_on_roads_and_there_is_exactly_one_cone():
+    g = game()
+    assert len(g.potholes) == M.POTHOLE_COUNT
+    for hole in g.potholes:
+        col = int(hole['x']) // M.TILE_SIZE
+        row = int(hole['y']) // M.TILE_SIZE
+        assert M.tile_type_at(col, row) == M.TILE_ROAD, (
+            f"a pothole in a building at {col},{row}")
+    cones = [h for h in g.potholes if h['cone']]
+    assert len(cones) == 1, "there is one cone and it never moves"
+
+
+def test_hitting_a_pothole_costs_you_and_only_once():
+    g = game()
+    car = _drive(g)
+    hole = g.potholes[0]
+    car.rect.center = (hole['x'], hole['y'])
+    car.velocity = 8.0
+    hp0 = car.hp
+    g.check_potholes()
+    assert car.hp < hp0, "the pothole did nothing"
+    hp1 = car.hp
+    g.check_potholes()
+    assert car.hp == hp1, "the same hole hit twice in consecutive frames"
+    g.driving = None
+
+
+def test_the_clydesdales_are_on_the_street_and_in_the_way():
+    g = game()
+    wide = max(rv.w for rv in g.rail)
+    assert wide >= 100, "the hitch should be as long as a lane is wide"
+    slow = min(abs(rv.speed) for rv in g.rail)
+    assert slow < 1.0, "eight horses do not hurry"
+
+
+def test_the_map_names_its_streets():
+    """A St. Louis street grid with no names on it is any city's grid."""
+    for row, name in M.STREET_ROWS.items():
+        assert row % 8 == 4, f"{name} is not on a road line"
+        assert len(name) <= 10, name
+    for col, name in M.STREET_COLS.items():
+        assert col % 8 == 4, f"{name} is not on a road line"
+        assert len(name) <= 10, name
+    assert "GRAVOIS" in M.STREET_ROWS.values()
+    assert "KINGSHWY" in M.STREET_COLS.values()
+
+
 def _run_all():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

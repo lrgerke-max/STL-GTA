@@ -232,6 +232,41 @@ ROADKILL_MAX = 30.0         # HP ceiling on a single hit, whatever the speed
 RESPAWN_IMMUNE_STEPS = FPS * 2   # you come to next to live Memorial Drive traffic
 COP_RAMMING_STAR = 4        # below this, cops brake for you instead of mowing
 
+# --- "Where'd you go to high school?" -------------------------------------
+# The question. You will be asked it, by strangers, within ninety seconds of
+# arriving, and the answer places you on a map more precisely than an address
+# would. Walk into somebody slowly and there is a one-in-six chance they turn
+# round and ask - and whatever you say, they say OH and walk off.
+HS_CHANCE = 6               # 1 in N barged pedestrians ask
+HS_COOLDOWN = FPS * 12      # steps before anybody asks again
+HS_QUESTION = "WHERE'D YOU GO TO HIGH SCHOOL?"
+HS_ANSWERS = ("SLUH", "CBC", "MEHLVILLE", "KIRKWOOD", "VASHON", "ROSATI")
+HS_REPLIES = ("OH.", "OH, OKAY.", "HUH.", "OH, YOU KNOW MY COUSIN.",
+              "MY BROTHER WENT THERE.")
+
+# --- Street names -------------------------------------------------------
+# The grid was already here; it just had no names on it, and a St. Louis
+# street grid without Gravois or Kingshighway on it is any city's street grid.
+# Roads run every 8 tiles (range(4, W, 8)), so these are keyed by that line.
+# Names run north to south and west to east, roughly where they really are.
+STREET_ROWS = {
+    12: "DELMAR", 20: "PAGE", 28: "LINDELL", 36: "OLIVE", 44: "MARKET",
+    52: "CHOUTEAU", 60: "ARSENAL", 68: "GRAVOIS", 76: "CHIPPEWA",
+    84: "MERAMEC", 92: "LOUGHBORO",
+}
+STREET_COLS = {
+    4: "SKINKER", 12: "HAMPTON", 20: "KINGSHWY", 28: "VANDEVNTR",
+    36: "GRAND", 44: "JEFFERSON", 52: "TUCKER", 60: "BROADWAY",
+    68: "MEMORIAL", 76: "WHARF", 84: "LEONOR K",
+}
+
+# --- Potholes -------------------------------------------------------------
+# City of St. Louis. One of them has had a cone in it for years, and it is the
+# same cone in the same hole every session, because that is also true.
+POTHOLE_COUNT = 34
+POTHOLE_DAMAGE = 7.0
+POTHOLE_RADIUS = 22
+
 # --- The bank under the Arch ---------------------------------------------
 # Cash you are carrying is not yours yet. Drive or walk under the span of the
 # Gateway Arch and it banks. Die and every unbanked dollar hits the pavement
@@ -353,6 +388,10 @@ CALLOUT_STRINGS = (
     # St. Louis grub
     "PORK STEAK", "T-RAVS", "GOOEY BUTTER", "CONCRETE", "PROVEL",
     "TALLBOY", "+42HP", "PORK STEAK 20",
+    # St. Louis
+    "CITY OF ST LOUIS", HS_QUESTION, "CROSSED DELMAR",
+    ) + tuple(STREET_ROWS.values()) + tuple(STREET_COLS.values()) + tuple(
+        HS_ANSWERS) + tuple(HS_REPLIES) + (
     # the bank under the Arch
     "BANKED $1200", "GOT IT BACK", "$50000 TO THE ARCH JOB",
     "THE ARCH JOB IS OPEN", "DROPPED $900 - GO GET IT",
@@ -2068,6 +2107,74 @@ def cars_rail_sprite(kind):
     cars__put_r(grid, L - 3, top + 2, L - 2, bot - 2, cars_HEADLIGHT)
     if kind == 'trolley':
         cars__put_r(grid, L // 2, 0, L // 2, top, (40, 40, 44))   # trolley pole
+    cars__outline_shade(grid)
+    return _scale_frames([cars__grid_to_surface(grid)], SPRITE_SCALE_CAR)[0]
+
+
+def cars_clydesdale_sprite():
+    """The Budweiser hitch: eight horses, two abreast, and a red beer wagon
+    with a Dalmatian on the seat.
+
+    It runs on a fixed line through Soulard like the light rail does, at a
+    walk, and it is exactly as wide as the lane. You cannot make it move. You
+    cannot go round it. Honking does nothing, because it is eight horses.
+    """
+    L, H = 118, 26
+    grid = [[None] * L for _ in range(H)]
+    hide = (108, 64, 38)
+    hide_dk = (74, 42, 24)
+    hide_lt = (138, 90, 56)
+    sock = (236, 230, 218)
+    mane = (52, 34, 22)
+    tack = (38, 32, 36)
+    wagon = (152, 40, 38)
+    wagon_dk = (108, 26, 26)
+    gold = (200, 162, 62)
+    cream = (228, 220, 198)
+
+    def horse(hx, hy):
+        # barrel, with a lit top line and a shadowed belly
+        cars__put_r(grid, hx, hy + 2, hx + 11, hy + 6, hide)
+        cars__put_r(grid, hx + 1, hy + 2, hx + 10, hy + 2, hide_lt)
+        cars__put_r(grid, hx, hy + 6, hx + 11, hy + 6, hide_dk)
+        cars__put_r(grid, hx, hy + 3, hx + 1, hy + 5, hide_dk)       # haunch
+        # neck rising forward, then the head
+        cars__put_r(grid, hx + 11, hy + 1, hx + 13, hy + 5, hide)
+        cars__put_r(grid, hx + 12, hy + 1, hx + 13, hy + 2, hide_lt)
+        cars__put_r(grid, hx + 14, hy + 1, hx + 16, hy + 3, hide)    # head
+        grid[hy + 2][hx + 16] = hide_dk                              # muzzle
+        cars__put_r(grid, hx + 11, hy, hx + 13, hy, mane)            # mane
+        grid[hy][hx + 1] = mane                                      # tail root
+        cars__put_r(grid, hx - 1, hy + 1, hx - 1, hy + 4, mane)      # tail
+        # four legs, and the feathered white feet Clydesdales are known for
+        for lx in (hx + 2, hx + 4, hx + 8, hx + 10):
+            grid[hy + 7][lx] = hide_dk
+            grid[hy + 8][lx] = sock
+        cars__put_r(grid, hx + 4, hy + 1, hx + 9, hy + 1, tack)      # harness
+
+    for pair in range(4):
+        hx = 32 + pair * 21
+        horse(hx, 0)
+        horse(hx, 13)
+
+    # the wagon: red, gold-trimmed, cream side panel, tall cartwheels
+    cars__put_r(grid, 2, 4, 28, H - 5, wagon)
+    cars__put_r(grid, 2, 4, 28, 5, wagon_dk)
+    cars__put_r(grid, 4, 8, 25, H - 9, cream)
+    cars__put_r(grid, 4, 8, 25, 8, gold)
+    cars__put_r(grid, 4, H - 9, 25, H - 9, gold)
+    cars__put_r(grid, 2, H - 6, 28, H - 5, wagon_dk)
+    for wx in (6, 23):
+        cars__put_r(grid, wx, 3, wx + 1, H - 4, (54, 46, 42))
+        cars__put_r(grid, wx, 3, wx + 1, 3, (86, 76, 68))
+    cars__put_r(grid, 26, 9, 28, 13, (58, 52, 56))        # the driver
+    cars__put_r(grid, 26, 14, 28, 16, cream)              # and the Dalmatian
+    grid[15][27] = (34, 32, 34)
+    grid[16][26] = (34, 32, 34)
+    # traces from the wagon to the lead pair
+    cars__put_r(grid, 29, 5, 31, 5, tack)
+    cars__put_r(grid, 29, H - 7, 31, H - 7, tack)
+
     cars__outline_shade(grid)
     return _scale_frames([cars__grid_to_surface(grid)], SPRITE_SCALE_CAR)[0]
 
@@ -8316,16 +8423,20 @@ class RailVehicle:
 
 
 def build_rail_vehicles():
-    """A couple of MetroLink trains on a downtown-latitude line, plus a Loop
-    trolley up on the Delmar row."""
+    """MetroLink on a downtown-latitude line, a Loop trolley up on the Delmar
+    row, and the Clydesdales walking a Soulard street at the pace of eight
+    horses, which is the pace of eight horses."""
     ml = cars_rail_sprite('metrolink')
     tr = cars_rail_sprite('trolley')
+    cl = cars_clydesdale_sprite()
     row_dt = 44 * TILE_SIZE + TILE_SIZE // 2       # E-W road line through downtown
     row_loop = 12 * TILE_SIZE + TILE_SIZE // 2     # E-W road line at the Delmar Loop
+    row_soulard = 60 * TILE_SIZE + TILE_SIZE // 2  # E-W road line through Soulard
     return [
         RailVehicle(ml, row_dt, 3.1, x=-500),
         RailVehicle(ml, row_dt, -3.1, x=MAP_WIDTH + 1400),
         RailVehicle(tr, row_loop, 1.9, x=0.0),
+        RailVehicle(cl, row_soulard, 0.55, x=MAP_WIDTH * 0.4),
     ]
 
 
@@ -8668,6 +8779,8 @@ class Game:
         self.foot_police = []        # beat cops; the unit that can arrest you
         self.crime_pos = None        # where the offence that raised this star was
         self.crime_frame = -10 ** 9
+        self.hs_cooldown = 0         # steps before anybody asks you again
+        self.hs_asked = 0            # how many times you have answered it
         self.peak_star = 0           # highest star reached this life
         self.chase_steps = 0         # steps spent at 1+ stars this life
         self.longest_chase = 0
@@ -8710,6 +8823,28 @@ class Game:
         # --- grub: the St. Louis power-up layer ---------------------------
         # key -> sim step the effect expires on. Absent means not running.
         self.grub_until = {}
+        # Potholes, placed deterministically on road tiles and weighted
+        # south and north, where they really are worse.
+        self.potholes = []
+        prng = random.Random(0xC171E5)
+        tries = 0
+        while len(self.potholes) < POTHOLE_COUNT and tries < 4000:
+            tries += 1
+            col = prng.randrange(4, MAP_TILES_W - 4)
+            row = prng.randrange(4, MAP_TILES_H - 4)
+            if tile_type_at(col, row) != TILE_ROAD:
+                continue
+            if hood_at(col, row) not in ('south', 'north', 'cherokee', 'hill'):
+                if prng.random() < 0.6:
+                    continue
+            self.potholes.append({
+                'x': col * TILE_SIZE + TILE_SIZE // 2 + prng.randrange(-14, 15),
+                'y': row * TILE_SIZE + TILE_SIZE // 2 + prng.randrange(-14, 15),
+                'seed': prng.randrange(1 << 30),
+                # exactly one of them has the cone, and it is always this one
+                'cone': len(self.potholes) == 7,
+                'hit': -10 ** 9})
+
         self.grub_pickups = []
         for _ in range(GRUB_PICKUP_COUNT):
             gx, gy = random_open_spawn()
@@ -9531,6 +9666,27 @@ class Game:
                             car.rect.centery + back[1] + side[1] * sgn),
                            'skid', 0.34)
 
+    def check_potholes(self):
+        """City of St. Louis."""
+        car = self.driving
+        if car is None or abs(car.velocity) < 3.0:
+            return
+        for hole in self.potholes:
+            if self.frame - hole['hit'] < FPS:
+                continue
+            if math.hypot(car.rect.centerx - hole['x'],
+                          car.rect.centery - hole['y']) > POTHOLE_RADIUS:
+                continue
+            hole['hit'] = self.frame
+            car.damage(POTHOLE_DAMAGE)
+            car.velocity *= 0.88
+            self.kick(3.2)
+            self.spawn_burst(car.rect.center, 4, ('debris',), 1.6)
+            self.play_impact(car.rect.center, 4.5, gap=20)
+            self.add_callout("CITY OF ST LOUIS", hud_HUD_GREY_DIM,
+                             ttl=FPS, scale=1, tag='pothole')
+            return
+
     def check_roadkill_risk(self):
         """On foot, a car doing real speed that hits you can put you down.
 
@@ -10091,6 +10247,7 @@ class Game:
             rv.update()
 
         self.handle_collisions()
+        self.check_potholes()
         if not self.driving:
             self.check_roadkill_risk()
         self.update_bullets()
@@ -10099,6 +10256,8 @@ class Game:
         self.update_bank()
         self.update_dropped_cash()
         self.lay_skid_marks()
+        if self.hs_cooldown > 0:
+            self.hs_cooldown -= 1
         if self.attack_cd > 0:
             self.attack_cd -= 1
         if self.punch_timer > 0:
@@ -10330,7 +10489,29 @@ class Game:
                 push = pygame.Vector2(1, 0)
             ped.knock = push.normalize() * 2.4
             if ped.mood == 'calm':
+                if self.maybe_ask_high_school(ped):
+                    continue
                 ped._flee((push.x, push.y), random.randint(40, 70))
+
+    def maybe_ask_high_school(self, ped):
+        """The question. Answered for you, because there is no right answer."""
+        if self.hs_cooldown > 0 or self.wanted_level > 0:
+            return False
+        if random.randrange(HS_CHANCE):
+            return False
+        self.hs_cooldown = HS_COOLDOWN
+        self.hs_asked += 1
+        answer = HS_ANSWERS[(self.hs_asked - 1) % len(HS_ANSWERS)]
+        # Say it three times and somebody finally knows your cousin.
+        reply = (HS_REPLIES[3] if self.hs_asked % 3 == 0
+                 else HS_REPLIES[self.hs_asked % len(HS_REPLIES)])
+        self.add_toast(HS_QUESTION)
+        self.add_toast(f"\"{answer}\"  ...  {reply}")
+        self.play_sound(f'yell{self.hs_asked % 4}', ped.rect.center,
+                        vol=0.35, gap=30)
+        ped.mood = 'gawk'
+        ped.mood_timer = FPS
+        return True
 
     def handle_collisions(self):
         if not self.driving:
@@ -11217,6 +11398,7 @@ class Game:
         self.draw_fx()
         self.draw_weapon_pickups()
         self.draw_grub_pickups()
+        self.draw_potholes()
         self.draw_dropped_cash()
         self.draw_foot_police()
         self.draw_frenzy_icon()
@@ -11447,6 +11629,30 @@ class Game:
             art = self._GRUB_ART.get(g['kind'])
             if art is not None:
                 art(self, x, y)
+
+    def draw_potholes(self):
+        """An irregular black hole with a ragged asphalt rim and a puddle."""
+        for hole in self.potholes:
+            sx, sy = self.camera.apply_pos((hole['x'], hole['y']))
+            if not (-30 < sx < SCREEN_WIDTH + 30 and -30 < sy < SCREEN_HEIGHT + 30):
+                continue
+            x, y = int(sx), int(sy)
+            n = hole['seed']
+            for i in range(6):
+                n = (n * 1103515245 + 12345) & 0x7fffffff
+                ox = ((n >> 4) % 17) - 8
+                oy = ((n >> 11) % 13) - 6
+                rad = 4 + ((n >> 18) % 4)
+                pygame.draw.circle(self.screen, (26, 24, 26), (x + ox, y + oy), rad)
+            pygame.draw.circle(self.screen, (16, 15, 17), (x, y), 6)
+            pygame.draw.circle(self.screen, (54, 62, 66), (x - 2, y + 1), 2)
+            if hole['cone']:
+                # The cone. It has been there for years. It will be there next
+                # year. Everyone knows about it. Nobody has moved it.
+                self.screen.fill((28, 26, 28), (x + 5, y - 1, 9, 3))
+                self.screen.fill((196, 96, 34), (x + 7, y - 9, 5, 9))
+                self.screen.fill((228, 226, 218), (x + 7, y - 6, 5, 2))
+                self.screen.fill((214, 118, 48), (x + 8, y - 12, 3, 4))
 
     def draw_dropped_cash(self):
         """A roll of notes where somebody died, blinking as it goes stale."""
@@ -11723,6 +11929,19 @@ class Game:
             pygame.draw.line(self.screen, hud_HUD_WHITE, (ppx, ppy),
                              (ppx + int(math.cos(self.driving.angle) * 10),
                               ppy + int(math.sin(self.driving.angle) * 10)), 2)
+
+        # Street names on the arterials. Cheapest authenticity per byte on
+        # the whole map: the grid was already correct, it just had no names.
+        for row, name in STREET_ROWS.items():
+            _, ly2 = to_map(0, row * TILE_SIZE + TILE_SIZE // 2)
+            hud_text(self.screen, name, mx + 3, ly2 - 3, (172, 168, 150), True, 1)
+        for col, name in STREET_COLS.items():
+            lx2, _ = to_map(col * TILE_SIZE + TILE_SIZE // 2, 0)
+            w = hud_text_width(name, 1)
+            if lx2 - w // 2 < mx or lx2 + w // 2 > mx + mv:
+                continue
+            hud_text(self.screen, name, lx2 - w // 2, my + mv - 9,
+                     (172, 168, 150), True, 1)
 
         lx, ly = mx + mv + 18, my
         for i, (_a, _b, _c, _d, _kind, name, color) in enumerate(LANDMARKS, 1):
