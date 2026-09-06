@@ -5528,6 +5528,11 @@ lm_LANDMARK_ART = {
     "Tower Grove Park": "tower_grove",
     "Ted Drewes": "ted_drewes",
     "Ted Drewes on Grand": "ted_drewes",
+    "Compton Hill Water Tower": "water_tower",
+    "Bevo Mill": "bevo",
+    "Old Courthouse": "courthouse",
+    "Union Station": "union_station",
+    "City Museum": "city_museum",
 }
 
 #: natural footprint of each landmark in tiles, derived from main.LANDMARKS.
@@ -5548,6 +5553,11 @@ lm__GROUND = {
     "delmar_loop": (100, 96, 92),
     "tower_grove": (68, 84, 56),
     "grand_center": (98, 94, 90),
+    "water_tower": (68, 84, 56),
+    "bevo": (68, 84, 56),
+    "courthouse": (100, 96, 92),
+    "union_station": (100, 96, 92),
+    "city_museum": (100, 96, 92),
 }
 
 #: label position as a fraction of the footprint, chosen to sit on calm art
@@ -5562,6 +5572,11 @@ lm__LABEL_AT = {
     "delmar_loop": (0.50, 0.06),
     "tower_grove": (0.50, 0.93),
     "grand_center": (0.50, 0.93),
+    "water_tower": (0.50, 0.95),
+    "bevo": (0.50, 0.06),
+    "courthouse": (0.50, 0.95),
+    "union_station": (0.50, 0.97),
+    "city_museum": (0.50, 0.95),
 }
 
 lm__CACHE = {}
@@ -6597,6 +6612,314 @@ def lm__bake_forest_park(w, h):
 # --------------------------------------------------------------------------
 # 5. CENTRAL WEST END
 # --------------------------------------------------------------------------
+def lm__bake_water_tower(w, h):
+    """The Compton Hill Water Tower.
+
+    St. Louis has three of these still standing, which is more than the rest
+    of the country put together, and you will be told so. Buff limestone
+    shaft, conical copper roof gone green, and - the thing that actually makes
+    it work as a landmark - a shadow longer than any building's, so you can
+    pick it out from blocks away.
+    """
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_GRASS, (lm_GRASS_DK, lm_GRASS_LT), 401, 7, 5)
+    cx, cy = w * 0.5, h * 0.42
+    r = max(6, int(min(w, h) * 0.13))
+
+    # the lawn it stands in, and the low iron fence round that
+    pygame.draw.circle(s, lm__shade(lm_GRASS, 1.06), (int(cx), int(cy)),
+                       int(r * 2.6))
+    pygame.draw.circle(s, lm_GRASS_DK, (int(cx), int(cy)), int(r * 2.6), 1)
+    for a in lm__lin(0, math.pi * 2, 34):
+        pygame.draw.circle(s, (52, 50, 48),
+                           (int(cx + math.cos(a) * r * 2.6),
+                            int(cy + math.sin(a) * r * 2.6)), 1)
+    # a gravel apron at the base only
+    pygame.draw.circle(s, lm_GRAVEL, (int(cx), int(cy)), int(r * 1.45))
+    pygame.draw.circle(s, lm_GRAVEL_DK, (int(cx), int(cy)), int(r * 1.45), 1)
+
+    # the long shadow, thrown south-east, longer than any building's
+    lm__alpha_poly(s, [(cx - r * 0.8, cy + r * 0.2), (cx + r * 0.8, cy - r * 0.3),
+                       (cx + r * 4.6, cy + r * 3.6), (cx + r * 2.4, cy + r * 4.2)],
+                   (10, 12, 10, 110))
+
+    # the shaft, then the roof pulled north-west so it reads as height
+    pygame.draw.circle(s, lm_LIMESTONE_DK, (int(cx), int(cy)), r)
+    pygame.draw.circle(s, lm_LIMESTONE, (int(cx - r * 0.10), int(cy - r * 0.10)),
+                       int(r * 0.94))
+    pygame.draw.circle(s, lm_OUTLINE, (int(cx), int(cy)), r, 1)
+    for a in lm__lin(0, math.pi * 2, 12):        # the stone piers round it
+        pygame.draw.circle(s, lm_LIMESTONE_DK,
+                           (int(cx + math.cos(a) * r * 0.86),
+                            int(cy + math.sin(a) * r * 0.86)), max(1, r // 8))
+    pygame.draw.circle(s, lm_VERDIGRIS_DK, (int(cx - r * 0.18), int(cy - r * 0.26)),
+                       int(r * 0.62))
+    pygame.draw.circle(s, lm_VERDIGRIS, (int(cx - r * 0.28), int(cy - r * 0.38)),
+                       int(r * 0.40))
+    pygame.draw.circle(s, (226, 220, 200), (int(cx - r * 0.32), int(cy - r * 0.46)),
+                       max(1, r // 7))
+
+    # a ring of park trees, kept well inside the frame
+    for i in range(12):
+        a = i * (math.tau / 12) + 0.3
+        n = lm__noise(i, 3, 402)
+        rad = r * 3.4 + (n % 3) * 4
+        px, py = cx + math.cos(a) * rad, cy + math.sin(a) * rad
+        if 10 < px < w - 10 and 10 < py < h - 10:
+            lm__tree(s, px, py, 8, 403 + i)
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
+def lm__bake_bevo(w, h):
+    """The Bevo Mill: an octagonal Bavarian roadhouse with four turning sails.
+
+    "Meet me by the windmill" is a real sentence in this city. The sails are
+    baked at a fixed angle - a rotating landmark is a whole system - but they
+    are long and dark against the roof, which is enough to read.
+    """
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_GRASS, (lm_GRASS_DK, lm_GRASS_LT), 411, 7, 5)
+    cx, cy = w * 0.5, h * 0.5
+    r = int(min(w, h) * 0.17)
+
+    lm__r(s, lm_ASPHALT, w * 0.06, h * 0.66, w * 0.88, h * 0.22)      # the lot
+    lm__mottle_rect(s, (int(w * 0.06), int(h * 0.66), int(w * 0.88), int(h * 0.22)),
+                    (lm_ASPHALT_LT, lm_ASPHALT_DK), 412, 6, 5)
+
+    # half-timbered wing to the south-east
+    lm__block(s, cx + r * 0.6, cy + r * 0.3, r * 2.4, r * 1.5, (168, 92, 62), 3, 4)
+    lm__r(s, (206, 190, 164), cx + r * 0.8, cy + r * 0.55, r * 2.0, r * 0.9)
+    for bx in range(int(cx + r * 0.9), int(cx + r * 2.7), 6):
+        lm__r(s, (86, 62, 48), bx, cy + r * 0.55, 2, int(r * 0.9))
+
+    # the octagon: stucco drum under a steep red tile cone
+    pts = [(cx + math.cos(a) * r, cy + math.sin(a) * r)
+           for a in lm__lin(0, math.pi * 2, 8)]
+    lm__poly(s, lm_SHADOW, [(x + 3, y + 4) for (x, y) in pts])
+    lm__poly(s, (206, 190, 164), pts)
+    lm__poly(s, lm_OUTLINE, pts, 1)
+    inner = [(cx + (x - cx) * 0.72, cy + (y - cy) * 0.72) for (x, y) in pts]
+    lm__poly(s, lm_TERRACOTTA, inner)
+    lm__poly(s, lm__shade(lm_TERRACOTTA, 0.78), inner, 1)
+    pygame.draw.circle(s, (188, 150, 70), (int(cx), int(cy)), 3)   # the eagle vane
+
+    # four sails, latticed, at a fixed 45 degrees
+    for k in range(4):
+        a = k * (math.pi / 2) + math.pi / 4
+        ex, ey = cx + math.cos(a) * r * 2.5, cy + math.sin(a) * r * 2.5
+        lm__line(s, (58, 44, 34), (cx, cy), (ex, ey), 3)
+        px, py = -math.sin(a), math.cos(a)
+        for t in (0.45, 0.62, 0.79, 0.96):
+            mx2, my2 = cx + math.cos(a) * r * 2.5 * t, cy + math.sin(a) * r * 2.5 * t
+            lm__line(s, (86, 66, 50), (mx2 - px * 4, my2 - py * 4),
+                     (mx2 + px * 4, my2 + py * 4), 1)
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
+def lm__bake_courthouse(w, h):
+    """The Old Courthouse: a cross-plan block under a cast-iron dome gone
+    verdigris. Dred Scott was tried here, and the Arch stands on its axis."""
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    421, 8, 5)
+    cx, cy = w * 0.5, h * 0.5
+    arm_l, arm_w = min(w, h) * 0.44, min(w, h) * 0.24
+
+    for i in range(10):                       # plaza trees round the edge
+        n = lm__noise(i, 1, 422)
+        lm__tree(s, 12 + (n % max(1, int(w - 24))), 12 + ((n >> 6) % max(1, int(h - 24))),
+                 8, 423 + i)
+
+    # the four porticoed wings
+    lm__r(s, lm_SHADOW, cx - arm_w / 2 + 4, cy - arm_l + 5, arm_w, arm_l * 2)
+    lm__r(s, lm_SHADOW, cx - arm_l + 4, cy - arm_w / 2 + 5, arm_l * 2, arm_w)
+    for rect in ((cx - arm_w / 2, cy - arm_l, arm_w, arm_l * 2),
+                 (cx - arm_l, cy - arm_w / 2, arm_l * 2, arm_w)):
+        lm__r(s, lm_LIMESTONE, *rect)
+        pygame.draw.rect(s, lm_LIMESTONE_DK,
+                         (int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])), 1)
+    # pediments: a band of column shadows on each face
+    for (bx, by, bw2, bh2, vert) in (
+            (cx - arm_w / 2, cy - arm_l, arm_w, 7, False),
+            (cx - arm_w / 2, cy + arm_l - 7, arm_w, 7, False),
+            (cx - arm_l, cy - arm_w / 2, 7, arm_w, True),
+            (cx + arm_l - 7, cy - arm_w / 2, 7, arm_w, True)):
+        lm__r(s, lm_LIMESTONE_DK, bx, by, bw2, bh2)
+        if vert:
+            for k in range(3):
+                lm__r(s, lm_SHADOW, bx + 2, by + 4 + k * 6, 4, 3)
+        else:
+            for k in range(3):
+                lm__r(s, lm_SHADOW, bx + 4 + k * 6, by + 2, 3, 4)
+
+    # the dome: concentric rings out to verdigris, ribs, and a gold finial
+    dr = int(min(w, h) * 0.19)
+    for i, col in enumerate((lm_VERDIGRIS_DK, lm_VERDIGRIS,
+                             _blend(lm_VERDIGRIS, (255, 255, 255), 0.22))):
+        pygame.draw.circle(s, col, (int(cx), int(cy)), int(dr * (1.0 - i * 0.22)))
+    for a in lm__lin(0, math.pi * 2, 8):
+        lm__line(s, lm_VERDIGRIS_DK, (cx, cy),
+                 (cx + math.cos(a) * dr, cy + math.sin(a) * dr), 1)
+    pygame.draw.circle(s, lm_OUTLINE, (int(cx), int(cy)), dr, 1)
+    pygame.draw.circle(s, (206, 172, 74), (int(cx), int(cy)), 3)
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
+def lm__bake_union_station(w, h):
+    """Union Station: limestone headhouse and clock tower across the north,
+    the great train shed behind it, and the fountain plaza to the south."""
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    431, 8, 5)
+
+    # --- the shed: ribs over dark glass, rails and two parked cars ---------
+    shed = pygame.Rect(int(w * 0.06), int(h * 0.30), int(w * 0.88), int(h * 0.42))
+    lm__r(s, (38, 40, 46), shed.x, shed.y, shed.w, shed.h)
+    # the barrel-vault ribs: light steel over dark glazing, alternating, so
+    # the shed reads as a roof rather than as a dark rectangle
+    rib = max(3, shed.h // 13)
+    for i in range(0, shed.h - 2, rib * 2):
+        lm__r(s, (104, 110, 118), shed.x + 2, shed.y + 2 + i, shed.w - 4, rib)
+        lm__r(s, (138, 144, 152), shed.x + 2, shed.y + 2 + i, shed.w - 4, 1)
+    for cx2 in range(shed.x + 6, shed.right - 6, max(8, shed.w // 12)):
+        lm__r(s, (58, 62, 70), cx2, shed.y + 2, 2, shed.h - 4)
+    for k, ry in enumerate((shed.y + shed.h * 0.34, shed.y + shed.h * 0.66)):
+        lm__r(s, (72, 74, 80), shed.x + 6, ry, shed.w - 12, 1)
+        lm__r(s, (72, 74, 80), shed.x + 6, ry + 4, shed.w - 12, 1)
+        car_x = shed.x + 14 + k * shed.w * 0.42
+        lm__r(s, (46, 82, 62), car_x, ry - 4, shed.w * 0.30, 9)
+        lm__r(s, (216, 208, 186), car_x + 2, ry - 2, shed.w * 0.30 - 4, 2)
+    pygame.draw.rect(s, lm_OUTLINE, shed, 1)
+
+    # --- the headhouse and its clock tower --------------------------------
+    head = pygame.Rect(int(w * 0.06), int(h * 0.06), int(w * 0.88), int(h * 0.24))
+    lm__r(s, lm_SHADOW, head.x + 4, head.y + 5, head.w, head.h)
+    lm__r(s, lm_LIMESTONE_DK, head.x, head.y, head.w, head.h)
+    lm__r(s, lm_LIMESTONE, head.x + 2, head.y + 2, head.w - 4, head.h - 6)
+    for wx in range(head.x + 8, head.right - 8, 11):
+        lm__r(s, (56, 60, 68), wx, head.y + 6, 5, head.h - 14)
+    # the great arched entry, dead centre, where the layout leaves the gate
+    ax = head.centerx
+    lm__r(s, (34, 32, 36), ax - 9, head.bottom - 12, 18, 12)
+    pygame.draw.arc(s, lm_LIMESTONE_DK,
+                    (int(ax - 11), int(head.bottom - 20), 22, 18), 0.0, math.pi, 2)
+    # tower at the west end
+    tw = pygame.Rect(head.x + 4, head.y - 6, 14, head.h + 10)
+    lm__r(s, lm_SHADOW, tw.x + 3, tw.y + 4, tw.w, tw.h)
+    lm__r(s, lm_LIMESTONE, tw.x, tw.y, tw.w, tw.h)
+    pygame.draw.rect(s, lm_LIMESTONE_DK, tw, 1)
+    pygame.draw.circle(s, (232, 226, 206), (tw.centerx, tw.y + 9), 5)
+    pygame.draw.circle(s, lm_OUTLINE, (tw.centerx, tw.y + 9), 5, 1)
+    lm__line(s, lm_OUTLINE, (tw.centerx, tw.y + 9), (tw.centerx, tw.y + 5), 1)
+    lm__line(s, lm_OUTLINE, (tw.centerx, tw.y + 9), (tw.centerx + 3, tw.y + 10), 1)
+    lm__r(s, lm_VERDIGRIS, tw.x + 1, tw.y - 5, tw.w - 2, 5)      # copper cap
+
+    # --- the plaza and the Meeting of the Waters --------------------------
+    fx, fy = w * 0.5, h * 0.85
+    basin = [(fx + math.cos(a) * w * 0.16, fy + math.sin(a) * h * 0.075)
+             for a in lm__lin(0, math.pi * 2, 26)]
+    lm__poly(s, lm_LIMESTONE, basin)
+    lm__poly(s, lm_LIMESTONE_DK, basin, 1)
+    inner = [(fx + (x - fx) * 0.86, fy + (y - fy) * 0.80) for (x, y) in basin]
+    lm__water_poly(s, inner, 432, lm_WATER_DK)
+    for i in range(7):                 # the bronze figures in the water
+        a = i * (math.tau / 7)
+        lm__r(s, lm_VERDIGRIS_DK, fx + math.cos(a) * w * 0.075 - 1,
+              fy + math.sin(a) * h * 0.035 - 2, 2, 4)
+    lm__r(s, (196, 216, 226), fx - 1, fy - 9, 2, 9)
+    pygame.draw.circle(s, (222, 236, 240), (int(fx), int(fy - 10)), 3)
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
+def lm__bake_city_museum(w, h):
+    """City Museum: a red-brick shoe factory with a school bus hanging off the
+    roof, a Ferris wheel beside it, and two aeroplanes wired into a tangle.
+
+    The roof IS the building - that is the entire point of the place - so
+    everything up there is sized as a fraction of the roof rather than in
+    fixed pixels, and the bus and the planes are drawn overhanging their own
+    edges.
+    """
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    441, 8, 5)
+    body = pygame.Rect(int(w * 0.10), int(h * 0.16), int(w * 0.80), int(h * 0.64))
+    lm__r(s, lm_SHADOW, body.x + 6, body.y + 7, body.w, body.h)
+    rf = lm__block(s, body.x, body.y, body.w, body.h, lm_BRICK, 6, 0)
+    lm__mottle_rect(s, (rf.x, rf.y, rf.w, rf.h), (lm_BRICK_DK, lm_BRICK_LT),
+                    442, 6, 3)
+    # a parapet, so the roof has an edge the furniture can hang over
+    pygame.draw.rect(s, lm_BRICK_DK, rf, 3)
+    pygame.draw.rect(s, lm_OUTLINE, rf, 1)
+    u = min(rf.w, rf.h) / 100.0          # one unit = 1% of the roof
+
+    # the Ferris wheel, north-west
+    wx, wy = rf.x + rf.w * 0.26, rf.y + rf.h * 0.30
+    wr = int(22 * u)
+    pygame.draw.circle(s, lm_SHADOW, (int(wx + 3), int(wy + 4)), wr)
+    pygame.draw.circle(s, (188, 184, 176), (int(wx), int(wy)), wr, max(2, int(3 * u)))
+    for a2 in lm__lin(0, math.pi * 2, 8):
+        lm__line(s, (150, 146, 140), (wx, wy),
+                 (wx + math.cos(a2) * wr, wy + math.sin(a2) * wr), max(1, int(2 * u)))
+        pygame.draw.circle(s, (206, 96, 74),
+                           (int(wx + math.cos(a2) * wr), int(wy + math.sin(a2) * wr)),
+                           max(2, int(4 * u)))
+    pygame.draw.circle(s, (120, 116, 112), (int(wx), int(wy)), max(2, int(5 * u)))
+
+    # two fuselages and the wire tangle wired between them
+    px, py = rf.x + rf.w * 0.60, rf.y + rf.h * 0.34
+    qx, qy = rf.x + rf.w * 0.44, rf.y + rf.h * 0.68
+    for (ax2, ay2, ln, wing) in ((px, py, 46 * u, 34 * u), (qx, qy, 38 * u, 28 * u)):
+        lm__r(s, lm_SHADOW, ax2 + 3, ay2 + 4, ln, 9 * u)
+        lm__r(s, (172, 176, 182), ax2, ay2, ln, 9 * u)
+        lm__r(s, (206, 210, 216), ax2, ay2, ln, 3 * u)
+        lm__r(s, (146, 150, 158), ax2 + ln * 0.28, ay2 - wing * 0.5, ln * 0.22, wing)
+        lm__r(s, (120, 124, 132), ax2 + ln * 0.90, ay2 - wing * 0.22, ln * 0.10,
+              wing * 0.44)
+    for i in range(18):
+        n = lm__noise(i, 2, 444)
+        lm__line(s, (168, 168, 176),
+                 (px + (n % int(max(2, 46 * u))), py + ((n >> 5) % 9)),
+                 (qx + ((n >> 9) % int(max(2, 38 * u))), qy + ((n >> 14) % 9)),
+                 1)
+
+    # the school bus, nose up, hanging off the north-east corner
+    bw, bh = 40 * u, 15 * u
+    bx, by = rf.right - bw * 0.55, rf.y - bh * 0.35
+    lm__r(s, lm_SHADOW, bx + 3, by + 4, bw, bh)
+    lm__r(s, (206, 166, 48), bx, by, bw, bh)
+    lm__r(s, (238, 208, 96), bx, by, bw, bh * 0.28)
+    for k in range(5):
+        lm__r(s, (66, 80, 96), bx + bw * (0.08 + k * 0.17), by + bh * 0.34,
+              bw * 0.12, bh * 0.34)
+    lm__r(s, (44, 40, 38), bx + bw * 0.90, by, bw * 0.10, bh)
+    pygame.draw.rect(s, lm_OUTLINE, (int(bx), int(by), int(bw), int(bh)), 1)
+
+    # the spiral slide, coming down the south face
+    sx2, sy2 = rf.centerx + rf.w * 0.14, rf.bottom - 10 * u
+    for i in range(30):
+        t = i / 29.0
+        a2 = t * math.pi * 3.4
+        lm__r(s, (206, 122, 60),
+              sx2 + math.cos(a2) * (20 * u - t * 13 * u),
+              sy2 + t * 26 * u + math.sin(a2) * (9 * u - t * 5 * u),
+              max(2, int(3 * u)), max(2, int(3 * u)))
+
+    # a queue at the door, because there always is one
+    for i in range(7):
+        n = lm__noise(i, 4, 445)
+        lm__r(s, ((72, 96, 120), (128, 72, 68), (86, 84, 96))[n % 3],
+              rf.centerx - rf.w * 0.24 + (i % 4) * 7 * u,
+              rf.bottom + 6 * u + (i // 4) * 7 * u,
+              max(2, int(4 * u)), max(3, int(5 * u)))
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
 def lm__bake_cwe(w, h):
     """Central West End: dense brick city.
 
@@ -7345,6 +7668,11 @@ lm__BAKERS = {
     "delmar_loop": lm__bake_delmar_loop,
     "tower_grove": lm__bake_tower_grove,
     "grand_center": lm__bake_grand_center,
+    "water_tower": lm__bake_water_tower,
+    "bevo": lm__bake_bevo,
+    "courthouse": lm__bake_courthouse,
+    "union_station": lm__bake_union_station,
+    "city_museum": lm__bake_city_museum,
 }
 
 

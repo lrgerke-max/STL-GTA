@@ -1077,6 +1077,19 @@ def test_the_police_station_is_not_inside_a_landmark():
         assert not r.collidepoint(col, row), f"station abuts {entry[5]}"
 
 
+def test_every_landmark_style_has_a_baker_a_ground_and_a_label():
+    """These four tables have to agree and nothing enforces it: registering a
+    style without a baker crashed 91 of 120 tests with a bare KeyError from
+    inside the draw path."""
+    for name, style in M.lm_LANDMARK_ART.items():
+        assert any(e[5] == name for e in M.LANDMARKS), f"{name} is not a landmark"
+        assert style in M.lm__BAKERS, f"{name} -> {style} has no baker"
+        assert style in M.lm__GROUND, f"{style} has no ground colour"
+        assert style in M.lm__LABEL_AT, f"{style} has no label anchor"
+    for name in M.LANDMARK_LAYOUT.values():
+        assert name in M._LM_SOLID, f"layout {name} has no collision function"
+
+
 def test_no_two_landmarks_overlap():
     """Landmarks are stamped in list order, so an overlap silently deletes
     whatever was underneath - Busch Stadium was found sitting on top of the
