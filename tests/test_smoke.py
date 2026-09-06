@@ -55,6 +55,16 @@ def reset(g):
     g.state = M.STATE_PLAYING
     g.busted_flash = 0
     g.wasted_flash = 0
+    g.death_timer = 0
+    g.death_kind = None
+    g.death_stats = None
+    g.cop_dispatch = 0
+    g.spotted = False
+    g.was_spotted = False
+    g.searching = False
+    g.hidden = False
+    g.hide_timer = 0
+    g.hurt_cd = 0
     # new feedback / reactivity / stakes state
     g.multiplier = 1
     g.mult_prog = 0.0
@@ -98,6 +108,28 @@ def teleport(g, pos):
 # ---------------------------------------------------------------------------
 # The loop runs at all
 # ---------------------------------------------------------------------------
+
+def dispatch_cops(g, star, limit=None):
+    """Pump update_police until the star's full quota of cruisers has arrived.
+
+    Cops are dispatched on a delay now (COP_RESPONSE_BY_STAR) rather than
+    materialising the same step the star lands, so every police test has to
+    wait for the call to go out.
+    """
+    g.wanted_level = star
+    want = M.COP_COUNT_BY_STAR[star]
+    limit = limit if limit is not None else M.FPS * 20
+    for _ in range(limit):
+        if len(g.police) >= want:
+            return g.police
+        g.update_police()
+        g.bust_meter = 0
+        if g.state == M.STATE_DEAD:      # cop parked on the spawn point
+            g.state = M.STATE_PLAYING
+            g.wanted_level = star
+    raise AssertionError(
+        f"only {len(g.police)}/{want} cruisers arrived for {star} stars")
+
 
 def test_headless_run_holds_invariants():
     g = game()
@@ -235,7 +267,7 @@ def test_wanted_level_is_whole_stars_and_matches_cop_count():
         g.wanted_bump(1, 'pedestrian')
     assert g.wanted_level == M.WANTED_MAX
     assert float(g.wanted_level).is_integer()
-    g.update_police()
+    dispatch_cops(g, M.WANTED_MAX)
     assert len(g.police) == M.COP_COUNT_BY_STAR[M.WANTED_MAX]
 
 
@@ -243,10 +275,8 @@ def test_cops_spawn_within_reach_of_the_player():
     """They used to all spawn at the downtown station regardless of where the
     player was, so on the far side of the map they never arrived at all."""
     g = game()
-    g.wanted_level = 3
-    g.police = []
     teleport(g, (20 * M.TILE_SIZE, 80 * M.TILE_SIZE))
-    g.update_police()
+    dispatch_cops(g, 3)
     assert g.police
     for cop in g.police:
         d = math.hypot(cop.rect.centerx - g.player_rect.centerx,
@@ -256,26 +286,23 @@ def test_cops_spawn_within_reach_of_the_player():
 
 def test_single_frame_of_contact_does_not_bust_you():
     g = game()
-    g.wanted_level = 1
-    g.police = []
-    g.update_police()
+    dispatch_cops(g, 1)
     g.police[0].rect.center = g.player_rect.center
     g.update_police()
-    assert g.busted_flash == 0, "one touch must not be an instant bust"
+    assert g.state == M.STATE_PLAYING, "one touch must not be an instant bust"
     assert g.bust_meter > 0
 
 
 def test_sustained_contact_does_bust_you():
     g = game()
-    g.wanted_level = 1
+    dispatch_cops(g, 1)
     g.cash = 1000
-    g.police = []
-    g.update_police()
     for _ in range(M.BUST_CONTACT_STEPS + 4):
         if g.police:
             g.police[0].rect.center = g.player_rect.center
         g.update_police()
-    assert g.busted_flash > 0
+    assert g.state == M.STATE_DEAD, "sustained contact should have taken you"
+    assert g.death_kind == 'busted'
     assert g.wanted_level == 0
     assert g.cash == 1000 - M.BAIL_COST
 
@@ -286,6 +313,7 @@ def test_bust_respawn_is_the_station_not_a_random_tile():
     g = game()
     g.wanted_level = 2
     g.busted()
+    g.finish_death()
     d = math.hypot(g.player_rect.centerx - g.police_station[0],
                    g.player_rect.centery - g.police_station[1])
     assert d < 10 * M.TILE_SIZE, f"woke up {d:.0f}px from the station"
@@ -295,16 +323,14 @@ def test_heat_does_not_decay_while_a_cop_is_on_you():
     """The old timer shed a star every six seconds regardless, so the optimal
     play against the police was to park and wait them out."""
     g = game()
-    g.wanted_level = 3
-    g.police = []
-    g.update_police()
+    dispatch_cops(g, 3)
     for _ in range(M.HEAT_GRACE + M.WANTED_DECAY_STEPS + 60):
         for cop in g.police:
             cop.rect.center = g.player_rect.center
         g.update_police()
         g.update_wanted_decay()
-        if g.busted_flash:              # taken; that is a different test
-            g.busted_flash = 0
+        if g.state == M.STATE_DEAD:     # taken; that is a different test
+            g.state = M.STATE_PLAYING
             g.wanted_level = 3
             g.bust_meter = 0
     assert g.wanted_level == 3, "stars fell while cops were sitting on the player"
@@ -573,6 +599,7 @@ def test_chaos_multiplier_climbs_then_wipes_on_death():
     high = g.multiplier
     g.busted()
     assert g.multiplier == 1, f"a bust must wipe the multiplier (was {high})"
+    assert g.state == M.STATE_DEAD, "a bust must enter the death state"
 
 
 def test_speed_decides_knocked_down_versus_splattered():
@@ -640,14 +667,12 @@ def test_a_totalled_car_explodes_and_the_pool_stays_stable():
 
 def test_exploding_cop_car_keeps_the_police_count_invariant():
     g = game()
-    g.wanted_level = 3
-    g.police = []
-    g.update_police()
+    dispatch_cops(g, 3)
     assert len(g.police) == M.COP_COUNT_BY_STAR[3]
     g.police[0].burn = 1
     g.update()                       # update_wrecks then update_police, same step
     assert g.check_invariants() is None, g.check_invariants()
-    assert len(g.police) == M.COP_COUNT_BY_STAR[3]
+    assert len(g.police) <= M.COP_COUNT_BY_STAR[3]
 
 
 def test_hitstop_freezes_exactly_one_step():
@@ -972,6 +997,237 @@ def test_the_stadium_has_exactly_one_way_in():
     hit_wall = any(M.GAME_MAP[ly + cy - k][lx + cx]['collidable']
                    for k in range(1, cy + 1))
     assert hit_wall, "the bowl should be a hard wall to the north"
+
+
+# ---------------------------------------------------------------------------
+# Death ritual: WASTED always ends the round and always ends under the Arch
+# ---------------------------------------------------------------------------
+
+def test_wasted_stops_the_game_instead_of_flashing_over_it():
+    """The reported bug: the screen said WASTED and you kept driving.
+
+    Dying is a state now. While it holds, input is ignored, the player does
+    not move, and the sim cannot hand control back early.
+    """
+    g = game()
+    car = _drive(g)
+    car.rect.center = (40 * M.TILE_SIZE, 40 * M.TILE_SIZE)
+    g.player_hp = 1.0
+    g.wasted("TEST")
+    assert g.state == M.STATE_DEAD
+    assert g.driving is None, "you do not stay behind the wheel of a wreck"
+
+    where = g.player_rect.center
+    g.player_dir = [1.0, 0.0]              # hold right on the stick
+    for _ in range(M.FPS):                 # a full second of trying to play
+        g.update()
+    assert g.state == M.STATE_DEAD, "the card must hold for its full run"
+    assert g.player_rect.center == where, "input reached a dead player"
+
+
+def test_wasted_always_respawns_under_the_arch():
+    g = game()
+    teleport(g, (12 * M.TILE_SIZE, 88 * M.TILE_SIZE))   # far south-west
+    g.player_hp = 1.0
+    g.wasted("TEST")
+    for _ in range(M.DEATH_HOLD_STEPS + 2):
+        g.update()
+    assert g.state == M.STATE_PLAYING, "the card should have cleared by now"
+
+    entry = next(e for e in M.LANDMARKS if e[5] == "Gateway Arch")
+    ax = (entry[0] + entry[2] / 2.0) * M.TILE_SIZE
+    ay = (entry[1] + entry[3] / 2.0) * M.TILE_SIZE
+    d = math.hypot(g.player_rect.centerx - ax, g.player_rect.centery - ay)
+    assert d < 8 * M.TILE_SIZE, f"woke up {d / M.TILE_SIZE:.1f} tiles from the Arch"
+    assert g.player_hp == M.PLAYER_MAX_HP
+    assert not M.is_blocked(g.player_rect), "respawned inside a leg footing"
+
+
+def test_death_wipes_the_heat_and_the_multiplier():
+    g = game()
+    g.wanted_level = 4
+    g.multiplier = 5
+    dispatch_cops(g, 4)
+    g.wasted("TEST")
+    assert g.wanted_level == 0
+    assert g.police == []
+    assert g.multiplier == 1
+    assert g.check_invariants() is None, g.check_invariants()
+
+
+def test_a_car_cannot_kill_you_in_three_frames():
+    """The 'instantly dead on foot' bug: roadkill damage applied every step a
+    car overlapped you, so a cruiser resting on you dealt ~44 HP a frame."""
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    car = M.Car(*g.player_rect.center)
+    car.velocity = 9.0
+    g.cars.append(car)
+    try:
+        survived = 0
+        for _ in range(M.FPS):             # one full second pinned under it
+            car.rect.center = g.player_rect.center
+            car.velocity = 9.0
+            g.check_roadkill_risk()
+            if g.state == M.STATE_DEAD:
+                break
+            survived += 1
+        assert survived > M.HURT_IMMUNE_STEPS - 4, (
+            f"only survived {survived} steps under one car")
+    finally:
+        if car in g.cars:
+            g.cars.remove(car)
+
+
+# ---------------------------------------------------------------------------
+# Police senses: line of sight, searching, and hiding
+# ---------------------------------------------------------------------------
+
+def test_a_building_blocks_line_of_sight():
+    """The whole hiding mechanic rests on this one function."""
+    road = next((col, row)
+                for row in range(4, M.MAP_TILES_H - 4)
+                for col in range(4, M.MAP_TILES_W - 4)
+                if M.tile_type_at(col, row) == M.TILE_ROAD
+                and M.tile_type_at(col + 1, row) == M.TILE_ROAD)
+    ox = road[0] * M.TILE_SIZE + M.TILE_SIZE // 2
+    oy = road[1] * M.TILE_SIZE + M.TILE_SIZE // 2
+    assert not M.sight_blocked(ox, oy, ox + M.TILE_SIZE, oy), (
+        "two points on the same open road must see each other")
+
+    # find any solid tile with open ground either side of it on the same row
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            if not M.GAME_MAP[row][col]['collidable']:
+                continue
+            if M.GAME_MAP[row][col - 2]['collidable']:
+                continue
+            if M.GAME_MAP[row][col + 2]['collidable']:
+                continue
+            ax = (col - 2) * M.TILE_SIZE + M.TILE_SIZE // 2
+            bx = (col + 2) * M.TILE_SIZE + M.TILE_SIZE // 2
+            y = row * M.TILE_SIZE + M.TILE_SIZE // 2
+            assert M.sight_blocked(ax, y, bx, y), (
+                f"wall at {col},{row} did not block sight")
+            return
+    raise AssertionError("no wall with open ground either side anywhere on the map")
+
+
+def test_a_cop_behind_a_wall_cannot_see_you():
+    g = game()
+    dispatch_cops(g, 3)
+    cop = g.police[0]
+    # put the cop on the player, then walk it to the far side of a wall
+    cop.rect.center = g.player_rect.center
+    cop.angle = 0.0
+    assert g.cop_can_see(cop, g.player_rect.center), "point blank must be seen"
+
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            if not M.GAME_MAP[row][col]['collidable']:
+                continue
+            if M.GAME_MAP[row][col - 2]['collidable'] or M.GAME_MAP[row][col + 2]['collidable']:
+                continue
+            y = row * M.TILE_SIZE + M.TILE_SIZE // 2
+            teleport(g, ((col - 2) * M.TILE_SIZE + M.TILE_SIZE // 2, y))
+            cop.rect.center = ((col + 2) * M.TILE_SIZE + M.TILE_SIZE // 2, y)
+            cop.angle = math.pi                       # looking straight at you
+            cop.sight_range = M.COP_SIGHT
+            assert not g.cop_can_see(cop, g.player_rect.center), (
+                "a cop saw straight through a building")
+            return
+    raise AssertionError("no suitable wall found")
+
+
+def test_losing_sight_puts_the_cops_into_a_search():
+    g = game()
+    dispatch_cops(g, 2)
+    for cop in g.police:
+        cop.rect.center = g.player_rect.center
+    g.update_police()
+    assert g.spotted, "a cop on top of you should have you in sight"
+
+    # shove every cruiser to the other end of the map
+    for cop in g.police:
+        cop.rect.center = (4 * M.TILE_SIZE, 4 * M.TILE_SIZE)
+    teleport(g, (90 * M.TILE_SIZE, 90 * M.TILE_SIZE))
+    g.bust_meter = 0
+    g.update_police()
+    assert not g.spotted, "they should have lost you"
+    assert g.searching, "losing you should start a search, not end the chase"
+    assert all(c.alert == 'search' for c in g.police)
+
+
+def test_heat_falls_faster_while_you_are_hidden():
+    """Standing still in cover, unseen, is the escape hatch a chase needs."""
+    g = game()
+    spot = None
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            x = col * M.TILE_SIZE + M.TILE_SIZE // 2
+            y = row * M.TILE_SIZE + M.TILE_SIZE // 2
+            if M.in_cover(x, y) and M.WALK_REACHABLE[row][col]:
+                spot = (x, y)
+                break
+        if spot:
+            break
+    assert spot, "the city has nowhere to hide at all"
+
+    def shed_time(hidden):
+        reset(g)
+        teleport(g, spot)
+        g.wanted_level = 1
+        g.police = []
+        g.player_dir = [0, 0]
+        for step in range(M.FPS * 60):
+            g.hidden = hidden
+            g.update_wanted_decay()
+            if g.wanted_level == 0:
+                return step
+        return None
+
+    out_in_the_open = shed_time(False)
+    in_a_gangway = shed_time(True)
+    assert out_in_the_open and in_a_gangway
+    assert in_a_gangway < out_in_the_open * 0.6, (
+        f"hiding shed a star in {in_a_gangway} steps vs {out_in_the_open} walking")
+
+
+def test_hiding_needs_cover_and_stillness():
+    g = game()
+    # middle of a road tile: no cover, so no hiding however still you stand
+    road = None
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            if M.tile_type_at(col, row) == M.TILE_ROAD:
+                road = (col * M.TILE_SIZE + M.TILE_SIZE // 2,
+                        row * M.TILE_SIZE + M.TILE_SIZE // 2)
+                break
+        if road:
+            break
+    teleport(g, road)
+    g.spotted = False
+    g.player_dir = [0, 0]
+    for _ in range(M.HIDE_ARM_STEPS * 3):
+        g.update_hiding()
+    assert not g.hidden, "you cannot hide in the middle of Market Street"
+
+
+def test_one_star_is_slower_than_five():
+    """Escalation: a beat cop should be losable, the full department not."""
+    assert M.COP_SPEED_BY_STAR[1] < M.COP_SPEED_BY_STAR[5]
+    assert M.COP_SIGHT_BY_STAR[1] < M.COP_SIGHT_BY_STAR[5]
+    assert M.COP_RESPONSE_BY_STAR[1] > M.COP_RESPONSE_BY_STAR[5]
+    assert M.COP_SPEED_BY_STAR[1] > M.PLAYER_SPEED, "a cruiser still outruns a jogger"
+
+
+def test_a_fresh_star_does_not_conjure_a_cop_on_top_of_you():
+    g = game()
+    g.wanted_level = 1
+    g.police = []
+    g.cop_dispatch = M.COP_RESPONSE_BY_STAR[1]
+    g.update_police()
+    assert not g.police, "the call has to go out before a cruiser arrives"
 
 
 def _run_all():

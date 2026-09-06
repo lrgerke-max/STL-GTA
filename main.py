@@ -121,11 +121,19 @@ MAX_FRAME_TIME = 0.25       # a stall longer than this is discarded, not caught 
 # --- Game states ---
 STATE_PLAYING = 0
 STATE_PAUSED = 1
+STATE_DEAD = 2              # the WASTED / BUSTED ritual, before you respawn
+
+# --- Death / respawn ------------------------------------------------------
+# Dying used to be a two-second red flash that you played straight through:
+# wasted() teleported you a few tiles sideways and handed control straight
+# back, so the screen said WASTED while you were still driving. Death is now
+# its own state - input is dead, the sim idles, the banner holds - and you
+# always come back under the Gateway Arch.
+DEATH_HOLD_STEPS = FPS * 3          # how long the WASTED / BUSTED card holds
+DEATH_FADE_STEPS = FPS              # of that, the tail spent fading to black
 
 # --- Wanted level / police ------------------------------------------------
 WANTED_MAX = 5
-# Cops on the street per star. Index == wanted level.
-COP_COUNT_BY_STAR = (0, 1, 2, 3, 5, 6)
 # Per-offence re-arm delay in sim steps, so one long scrape is one offence.
 INFRACTION_COOLDOWN = {
     'pedestrian': FPS * 1,
@@ -135,13 +143,49 @@ INFRACTION_COOLDOWN = {
 }
 COP_SPAWN_MIN = 420         # px: cops arrive from off-screen, not from downtown
 COP_SPAWN_MAX = 900
-COP_MAX_SPEED = 9.9         # a shade faster than the player so a chase has teeth
-COP_SIGHT = 340             # px: inside this, a cop is "on you" and heat holds
 BUST_CONTACT_STEPS = 42     # ~0.7s of sustained contact before you get busted
 BUST_RELIEF = 2             # bust meter bleed-off per step once you break away
 HEAT_GRACE = FPS * 5        # steps clean before the wanted level starts to fall
 WANTED_DECAY_STEPS = FPS * 8   # steps per star shed after that
 BAIL_COST = 250             # cash the desk sergeant takes off you
+
+# --- Police senses: the chase is now a game of being seen ----------------
+# Cops used to be handed the player's exact position every step forever, so
+# there was no such thing as hiding: a wall between you and a cruiser only
+# slowed it down. A cop now has to have *line of sight* to know where you are.
+# Break it and it drives to where it last saw you, hunts around, and gives up.
+COP_SIGHT = 340             # px: base cone/vision radius, scaled per star
+COP_SIGHT_FOV = 1.35        # radians, half-angle of a cruiser's forward cone
+COP_SIGHT_CLOSE = 90        # px: this close they hear you regardless of facing
+COP_SEARCH_STEPS = FPS * 11  # how long a cop hunts your last known position
+COP_SEARCH_WANDER = 150     # px it will cast around that point while searching
+COP_GIVEUP_DESPAWN = FPS * 4  # extra steps out of sight before it drops off
+
+# Per-star escalation. A single star should be a beat cop you can lose in an
+# alley; five stars should be the whole department. Index == wanted level.
+COP_COUNT_BY_STAR = (0, 1, 2, 3, 5, 6)
+COP_SPEED_BY_STAR = (0.0, 8.4, 9.0, 9.6, 10.2, 10.8)
+COP_SIGHT_BY_STAR = (0.0, 0.70, 0.85, 1.00, 1.15, 1.30)   # x COP_SIGHT
+# Steps before the *first* cruiser of a fresh star actually turns up. One star
+# used to conjure a cruiser on top of you inside a second.
+COP_RESPONSE_BY_STAR = (0, FPS * 3, FPS * 2, FPS * 1, FPS // 2, 0)
+
+# --- Hiding ---------------------------------------------------------------
+# Standing still, out of sight, off the street. Do it and the heat drains
+# several times faster - the "duck into a gangway and hold your breath" beat
+# that every good chase in the series has.
+HIDE_STILL_SPEED = 1.2      # px/step below which you count as holding still
+HIDE_ARM_STEPS = FPS * 1    # steps of stillness+cover before HIDDEN latches
+HIDE_DECAY_SCALE = 3.0      # how much faster stars shed while hidden
+
+# --- On-foot damage -------------------------------------------------------
+# A car sitting on top of you used to apply its full damage *every step*: a
+# cruiser at 9.9 dealt 44 HP a step, so the player died in three frames with
+# no chance to react. One hit now costs one hit, then you get thrown clear and
+# briefly cannot be hit again.
+HURT_IMMUNE_STEPS = 38      # ~0.6s of i-frames after a car hits you on foot
+ROADKILL_DAMAGE = 3.4       # HP per px/step of closing speed
+COP_RAMMING_STAR = 4        # below this, cops brake for you instead of mowing
 
 # --- Jobs -----------------------------------------------------------------
 # The delivery loop: cash comes from finishing runs, score comes from chaos.
@@ -200,6 +244,10 @@ CALLOUT_STRINGS = (
     "DELIVERED!", "BUSTED!", "WASTED", "LOST 'EM", "NEW TURF",
     "MULTIPLIER LOST", "MULTIPLIER X8", "KILL FRENZY!", "FRENZY OVER",
     "FRENZY DONE", "JACKED!", "12 LEFT", "YOU MONSTER",
+    # chase senses + the death card
+    "SPOTTED", "SEARCHING", "HIDDEN", "BAIL $250", "WRECK TOTALLED",
+    "RUN DOWN ON THE STREET", "SCORE 0", "CASH $0", "RUNS 0   STREAK 0",
+    "COMING TO UNDER THE ARCH", "RELEASED FROM THE STATION",
 )
 
 # --- Tile types ---
@@ -774,6 +822,55 @@ def is_blocked(rect):
                 tile_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 if rect.colliderect(tile_rect):
                     return True
+    return False
+
+
+def sight_blocked(ax, ay, bx, by):
+    """True when a building stands between two world points.
+
+    A cheap DDA walk of the tile grid: step along the segment at half a tile
+    and stop at the first collidable tile. This is what turns the police from
+    omniscient trackers into something you can actually hide from, so it runs
+    once per cop per step and has to stay cheap - no allocation, no sqrt in
+    the loop beyond the single length.
+    """
+    dx, dy = bx - ax, by - ay
+    dist = math.hypot(dx, dy)
+    if dist < 1.0:
+        return False
+    steps = int(dist / (TILE_SIZE * 0.5)) + 1
+    sx, sy = dx / steps, dy / steps
+    x, y = ax, ay
+    for _ in range(steps):
+        x += sx
+        y += sy
+        col, row = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+        if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
+            return True
+        if GAME_MAP[row][col]['collidable']:
+            return True
+    return False
+
+
+def in_cover(x, y):
+    """True when this point is somewhere you could plausibly duck out of view.
+
+    Not the middle of a four-lane street. Anything walkable that is *not* road
+    and has a solid tile within one tile of it: a gangway between two flats,
+    an alley behind a block, the treeline of a park, under the Arch's span.
+    """
+    col, row = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+    if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
+        return False
+    here = GAME_MAP[row][col]
+    if here['collidable'] or here['type'] == TILE_ROAD:
+        return False
+    for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, -1), (1, -1), (-1, 1)):
+        c2, r2 = col + dc, row + dr
+        if 0 <= c2 < MAP_TILES_W and 0 <= r2 < MAP_TILES_H:
+            t = GAME_MAP[r2][c2]
+            if t['collidable'] or t['type'] == TILE_PARK:
+                return True
     return False
 
 
@@ -6716,6 +6813,16 @@ class Camera:
         self.shake_ox = 0.0
         self.shake_oy = 0.0
 
+    def snap_to(self, rect):
+        """Cut straight to a rect with no lead and no easing.
+
+        Used when the player is teleported (respawn, load): easing across half
+        a mile of city would otherwise smear the whole map past the camera.
+        """
+        self.lead_x = 0.0
+        self.lead_y = 0.0
+        self.center_on(rect)
+
     def center_on(self, rect, lead=(0.0, 0.0)):
         self.lead_x += (lead[0] - self.lead_x) * 0.08
         self.lead_y += (lead[1] - self.lead_y) * 0.08
@@ -6772,6 +6879,12 @@ class Car:
         self.pinned = 0          # consecutive steps making no headway
         self.reverse_timer = 0   # steps left of a back-out manoeuvre
         self.reverse_side = 1
+        # --- police senses (see update_police) --------------------------
+        self.alert = 'chase'     # 'chase' (I see you) | 'search' (I did)
+        self.last_seen = None    # world point where the player was last seen
+        self.search_timer = 0    # steps left before this cop gives up
+        self.lost_timer = 0      # consecutive steps with no line of sight
+        self.sight_range = COP_SIGHT
         self.stall = 0           # steps stopped in traffic; feeds the jam breaker
         # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
         # counting down) then explodes. Trucks soak more, the scooter is paper.
@@ -6885,7 +6998,7 @@ class Car:
             return False
         return not is_blocked(probe)
 
-    def chase_ai(self, target_pos):
+    def chase_ai(self, target_pos, brake_at=34):
         """Pursue target_pos using three forward whiskers.
 
         The previous version aimed the nose straight at the player and held the
@@ -6899,7 +7012,11 @@ class Car:
         dx, dy = tx - self.rect.centerx, ty - self.rect.centery
         dist = math.hypot(dx, dy)
         diff = (math.atan2(dy, dx) - self.angle + math.pi) % math.tau - math.pi
-        self.max_speed = COP_MAX_SPEED
+        # max_speed is set per star by update_police (COP_SPEED_BY_STAR), so a
+        # one-star beat cop is genuinely outrunnable and a five-star unit is
+        # not. Fall back to the base figure for a cop driven outside a chase.
+        if self.max_speed <= 0:
+            self.max_speed = COP_SPEED_BY_STAR[WANTED_MAX]
 
         # --- back out of a pin -------------------------------------------
         if self.reverse_timer > 0:
@@ -6932,8 +7049,10 @@ class Car:
                 steer = 1.6 if diff >= 0 else -1.6
 
         self.input_steer = max(-1.0, min(1.0, steer))
-        if dist <= 34:
-            self.input_throttle = 0.0
+        if dist <= brake_at:
+            # Arrest, not manslaughter: below COP_RAMMING_STAR the cruiser
+            # stops short of a player on foot and holds them instead.
+            self.input_throttle = -0.4 if abs(self.velocity) > 1.2 else 0.0
         else:
             self.input_throttle = 1.0 if ahead else 0.5
         self.physics_step()
@@ -7318,6 +7437,22 @@ class Game:
         self.wasted_flash = 0
         self.running = True
 
+        # --- death ritual --------------------------------------------------
+        # Death is a state, not a decorative flash. See enter_death().
+        self.death_timer = 0
+        self.death_kind = None       # 'wasted' | 'busted'
+        self.death_note = ""         # the line under the big word
+        self.death_stats = None      # snapshot of the run you just ended
+
+        # --- police senses / hiding ---------------------------------------
+        self.spotted = False         # a cop has line of sight on you *now*
+        self.was_spotted = False     # for the edge-triggered "Spotted!" toast
+        self.searching = False       # cops are hunting your last known spot
+        self.hidden = False          # still, in cover, unseen: heat drains fast
+        self.hide_timer = 0
+        self.cop_dispatch = 0        # steps until the next cruiser is sent
+        self.hurt_cd = 0             # i-frames after a car hits you on foot
+
         # --- chaos multiplier + combo ----------------------------------
         self.multiplier = 1
         self.mult_prog = 0.0
@@ -7440,6 +7575,27 @@ class Game:
 
     def active_rect(self):
         return self.driving.rect if self.driving else self.player_rect
+
+    def arch_respawn_point(self):
+        """Under the span of the Gateway Arch: where every life starts.
+
+        The Arch's collision shape is two leg footings with open ground
+        between them (_lm_solid_arch), so the centre of its footprint is
+        walkable and unmistakable - you come to on the riverfront lawn with
+        the legs either side of you, which is the one place on this map that
+        can only be St. Louis.
+        """
+        for entry in LANDMARKS:
+            if entry[5] != "Gateway Arch":
+                continue
+            lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
+            cx = (lx + lw / 2.0) * TILE_SIZE
+            cy = (ly + lh / 2.0) * TILE_SIZE
+            spot = free_point_near(int(cx), int(cy), PLAYER_SIZE, PLAYER_SIZE,
+                                   max_rings=12)
+            if spot is not None:
+                return spot
+        return self.police_station
 
     # ---------------- feedback: score / pops / callouts ----------------
     def add_score(self, base, world_pos=None, mult=True):
@@ -7877,47 +8033,116 @@ class Game:
         if is_player:
             self.wasted()
 
-    def wasted(self):
-        """Killed - lose the multiplier and the cargo, wake up on the pavement.
-        Mirrors busted() so the police-count invariant stays trivial."""
-        self.add_toast("WASTED - wreck totalled")
+    def wasted(self, note="WRECK TOTALLED"):
+        """Killed. Hold the card, then wake up under the Arch.
+
+        This used to hand control straight back after moving you a few tiles
+        sideways, so the screen said WASTED over a game you were still
+        playing. Death now owns the next three seconds.
+        """
+        if self.state == STATE_DEAD:
+            return
         self.wasted_flash = FPS * 2
+        if self.driving is not None:
+            self.driving.driver = None
+            self.driving = None                  # it is a wreck; do not hand it back
+        if self.job is not None and self.job.collected:
+            self.fail_job("Wreck - cargo lost")
+        self.enter_death('wasted', note)
+
+    def enter_death(self, kind, note):
+        """Shared ritual for both ways of losing. Freeze, show, respawn.
+
+        Everything that has to be true the instant you die is done here, so
+        the police-count invariant and the multiplier can never be observed
+        half-torn-down: the sim keeps running during the hold, it just runs
+        with the player parked and the wanted level already at zero.
+        """
+        self.state = STATE_DEAD
+        self.death_kind = kind
+        self.death_note = note
+        self.death_timer = DEATH_HOLD_STEPS
+        self.death_stats = {
+            'score': self.score,
+            'cash': self.cash,
+            'jobs': self.jobs_done,
+            'streak': self.streak,
+        }
         self.reset_multiplier()
         self.wanted_level = 0
         self.police = []
         self.bust_meter = 0
         self.heat_timer = 0
-        if self.driving is not None:
-            self.driving.driver = None
-            self.driving = None                  # it is a wreck; do not hand it back
-        pr = self.player_rect
-        spot = (free_point_near(pr.centerx, pr.centery, PLAYER_SIZE, PLAYER_SIZE, max_rings=10)
-                or free_point_near(self.police_station[0], self.police_station[1],
-                                   PLAYER_SIZE, PLAYER_SIZE, max_rings=10)
-                or random_open_spawn())
-        self.player_rect.center = spot
+        self.wanted_decay_timer = 0
+        self.cop_dispatch = 0
+        self.spotted = False
+        self.was_spotted = False
+        self.searching = False
+        self.hidden = False
+        self.hide_timer = 0
+        self.player_dir = [0, 0]
+        self.combo = 0
+        self.combo_timer = 0
+
+    def finish_death(self):
+        """The card is done: put the player back on the map and hand over."""
+        if self.death_kind == 'busted':
+            spot = free_point_near(self.police_station[0], self.police_station[1],
+                                   PLAYER_SIZE, PLAYER_SIZE, max_rings=8)
+        else:
+            spot = self.arch_respawn_point()
+        self.player_rect.center = spot if spot is not None else random_open_spawn()
+        self.player_fx = float(self.player_rect.centerx)
+        self.player_fy = float(self.player_rect.centery)
         self.player_hp = PLAYER_MAX_HP
-        if self.job is not None and self.job.collected:
-            self.fail_job("Wreck - cargo lost")
+        self.hurt_cd = HURT_IMMUNE_STEPS
+        self.player_dir = [0, 0]
+        self.camera.snap_to(self.player_rect)
+        self.state = STATE_PLAYING
+        self.death_kind = None
+        self.death_timer = 0
+        if self.job is None and self.job_cooldown <= 0:
+            self.job = Job.generate()
 
     def check_roadkill_risk(self):
-        """On foot, a car doing real speed that hits you can put you down."""
+        """On foot, a car doing real speed that hits you can put you down.
+
+        The old version applied the full hit *every step* the car overlapped
+        you, so a cruiser resting against you dealt ~44 HP a frame and killed
+        you in three - that is the "instantly dead on foot" bug. One contact
+        is now one hit: you take it, you get thrown clear, and you are briefly
+        untouchable while you get up.
+        """
+        if self.hurt_cd > 0:
+            self.hurt_cd -= 1
+            return
         pr = self.player_rect
         for car in list(self.cars) + list(self.police):
-            if abs(car.velocity) > 4.0 and car.rect.colliderect(pr.inflate(2, 2)):
-                self.player_hp -= abs(car.velocity) * 4.5
-                kb = pygame.Vector2(pr.centerx - car.rect.centerx,
-                                    pr.centery - car.rect.centery)
-                if kb.length() > 0:
-                    kb = kb.normalize() * 6
-                    mv = pr.move(int(kb.x), int(kb.y))
-                    if not is_blocked(mv):
-                        self.player_rect.topleft = mv.topleft
-                self.kick(2.4)
-                self.spawn_burst(pr.center, 5, ('debris',), 2.2)
-                if self.player_hp <= 0:
-                    self.wasted()
-                return
+            speed = abs(car.velocity)
+            if speed <= 4.0 or not car.rect.colliderect(pr.inflate(2, 2)):
+                continue
+            self.player_hp -= speed * ROADKILL_DAMAGE
+            self.hurt_cd = HURT_IMMUNE_STEPS
+            kb = pygame.Vector2(pr.centerx - car.rect.centerx,
+                                pr.centery - car.rect.centery)
+            if kb.length() == 0:
+                kb = pygame.Vector2(math.cos(car.angle), math.sin(car.angle))
+            kb = kb.normalize() * (8 + speed)
+            # Shove along the contact normal, giving up a step at a time, so a
+            # player pinned against a wall still ends up somewhere standable.
+            for frac in (1.0, 0.66, 0.33):
+                mv = pr.move(int(kb.x * frac), int(kb.y * frac))
+                if not is_blocked(mv):
+                    self.player_rect.topleft = mv.topleft
+                    self.player_fx = float(self.player_rect.centerx)
+                    self.player_fy = float(self.player_rect.centery)
+                    break
+            self.kick(2.4)
+            self.spawn_burst(pr.center, 5, ('debris',), 2.2)
+            if self.player_hp <= 0:
+                self.player_hp = 0.0
+                self.wasted("RUN DOWN ON THE STREET")
+            return
 
     # ---------------- kill frenzy ----------------
     def spawn_frenzy_icon(self):
@@ -8146,8 +8371,8 @@ class Game:
                 self.open_gamepad()
 
         if self.state != STATE_PLAYING or self.show_map:
-            # Paused or reading the map: hold everything still rather than
-            # letting the last throttle value keep the car rolling behind it.
+            # Paused, dead, or reading the map: hold everything still rather
+            # than letting the last throttle value keep the car rolling on.
             if self.driving:
                 self.driving.input_throttle = 0.0
                 self.driving.input_steer = 0.0
@@ -8213,6 +8438,9 @@ class Game:
             self.toggle_pause()
             return
 
+        if self.state == STATE_DEAD:
+            return              # the card holds; you do not get to act
+
         if self.state == STATE_PAUSED:
             if key == pygame.K_q:
                 self.running = False
@@ -8236,6 +8464,8 @@ class Game:
             self.show_debug = not self.show_debug
 
     def toggle_pause(self):
+        if self.state == STATE_DEAD:
+            return              # you cannot pause your way out of a WASTED
         self.state = STATE_PLAYING if self.state == STATE_PAUSED else STATE_PAUSED
 
     def toggle_fullscreen(self):
@@ -8353,6 +8583,9 @@ class Game:
         if self.freeze > 0:
             self.freeze -= 1
             return
+        if self.state == STATE_DEAD:
+            self.update_death()
+            return
         if self.driving:
             # Scraping a wall used to raise your wanted level. Bouncing off a
             # kerb is not a crime; only the offences in handle_collisions are.
@@ -8429,6 +8662,32 @@ class Game:
             self.busted_flash -= 1
         if self.wasted_flash > 0:
             self.wasted_flash -= 1
+
+    def update_death(self):
+        """The three seconds you are not playing.
+
+        The world keeps breathing behind the card - traffic rolls, particles
+        settle, the wreck you are lying next to finishes burning - but nothing
+        can hurt you and nothing you do reaches the game.
+        """
+        self.death_timer -= 1
+        for car in self.cars:
+            if car.driver is None and not car.parked:
+                traffic_drive(car, self.cars)
+        for rv in self.rail:
+            rv.update()
+        self.update_wrecks()
+        self.update_fx()
+        self.callouts = [c for c in self.callouts
+                         if self.frame - c['born'] < c['ttl']]
+        self.pops = [p for p in self.pops if self.frame - p['born'] < 46]
+        self.toasts = [t for t in self.toasts if pygame.time.get_ticks() < t.expires]
+        if self.busted_flash > 0:
+            self.busted_flash -= 1
+        if self.wasted_flash > 0:
+            self.wasted_flash -= 1
+        if self.death_timer <= 0:
+            self.finish_death()
 
     # ---------------- jobs ----------------
     def update_job(self):
@@ -8647,46 +8906,143 @@ class Game:
                 return spot
         return self.police_station
 
+    def cop_can_see(self, cop, target):
+        """Can this cruiser actually see the player right now?
+
+        Three gates, cheapest first: range, then a forward cone (you can slip
+        in behind a cop that has driven past you), then a wall check. Anything
+        very close counts regardless of facing - they can hear you.
+        """
+        dx = target[0] - cop.rect.centerx
+        dy = target[1] - cop.rect.centery
+        dist = math.hypot(dx, dy)
+        if dist > cop.sight_range:
+            return False
+        if dist > COP_SIGHT_CLOSE:
+            bearing = (math.atan2(dy, dx) - cop.angle + math.pi) % math.tau - math.pi
+            if abs(bearing) > COP_SIGHT_FOV:
+                return False
+        return not sight_blocked(cop.rect.centerx, cop.rect.centery,
+                                 target[0], target[1])
+
+    def update_hiding(self):
+        """Latch the HIDDEN state: still, in cover, and nobody looking at you.
+
+        This is the mechanic the chase was missing. Sprinting down the middle
+        of Market Street does not lose anybody; ducking into a gangway off The
+        Hill and standing dead still for a second does.
+        """
+        if self.spotted or self.driving is not None:
+            self.hide_timer = 0
+            self.hidden = False
+            return
+        moving = math.hypot(self.player_dir[0], self.player_dir[1]) * PLAYER_SPEED
+        if moving > HIDE_STILL_SPEED or not in_cover(self.player_rect.centerx,
+                                                    self.player_rect.centery):
+            self.hide_timer = 0
+            self.hidden = False
+            return
+        self.hide_timer += 1
+        if self.hide_timer >= HIDE_ARM_STEPS and not self.hidden:
+            self.hidden = True
+            if self.wanted_level > 0:
+                self.add_callout("HIDDEN", hud_HUD_GOLD, scale=1)
+
     def update_police(self):
-        target_count = COP_COUNT_BY_STAR[min(self.wanted_level, WANTED_MAX)]
-        active_c = self.active_rect().center
-        while len(self.police) < target_count:
-            sx, sy = self.cop_spawn_point()
-            cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
-            cop.driver = 'police'
-            cop.max_speed = COP_MAX_SPEED
-            # Cops used to spawn with Car.__init__'s random heading *and* a
-            # random civilian body, so a patrol car could arrive as a blue
-            # school bus pointed the wrong way. Now: a cruiser, facing you.
-            cop.angle = math.atan2(active_c[1] - sy, active_c[0] - sx)
-            self.police.append(cop)
+        star = min(self.wanted_level, WANTED_MAX)
+        target_count = COP_COUNT_BY_STAR[star]
+        active = self.active_rect()
+        active_c = active.center
+
+        # Dispatch delay: a fresh star no longer materialises a cruiser on top
+        # of you. At one star the call has to go out first.
+        if len(self.police) < target_count:
+            if self.cop_dispatch > 0:
+                self.cop_dispatch -= 1
+            else:
+                sx, sy = self.cop_spawn_point()
+                cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
+                cop.driver = 'police'
+                # Cops used to spawn with Car.__init__'s random heading *and*
+                # a random civilian body, so a patrol car could arrive as a
+                # blue school bus pointed the wrong way. Now: a cruiser,
+                # facing you, already looking where you actually are.
+                cop.angle = math.atan2(active_c[1] - sy, active_c[0] - sx)
+                cop.last_seen = active_c
+                cop.search_timer = COP_SEARCH_STEPS
+                self.police.append(cop)
+                self.cop_dispatch = COP_RESPONSE_BY_STAR[star]
         while len(self.police) > target_count:
             self.police.pop()
 
-        active = self.active_rect()
         touching = False
-        cop_near = False
+        seen = False
+        searching = False
         for cop in self.police:
-            cop.chase_ai(active.center)
-            d = math.hypot(cop.rect.centerx - active.centerx,
-                           cop.rect.centery - active.centery)
-            if d < COP_SIGHT:
-                cop_near = True
+            cop.max_speed = COP_SPEED_BY_STAR[star]
+            cop.sight_range = COP_SIGHT * COP_SIGHT_BY_STAR[star]
+            if self.cop_can_see(cop, active_c):
+                cop.alert = 'chase'
+                cop.last_seen = active_c
+                cop.search_timer = COP_SEARCH_STEPS
+                cop.lost_timer = 0
+                seen = True
+            else:
+                cop.lost_timer += 1
+                cop.search_timer -= 1
+                if cop.alert == 'chase':
+                    cop.alert = 'search'
+                if cop.search_timer <= 0 or cop.last_seen is None:
+                    # Given up on that spot. Cast around it rather than
+                    # beelining somewhere it has no reason to go.
+                    cop.last_seen = self.cop_search_point(cop)
+                    cop.search_timer = COP_SEARCH_STEPS // 2
+                searching = True
+
+            aim = cop.last_seen or active_c
+            # Below COP_RAMMING_STAR a cruiser is trying to arrest you, not
+            # kill you: it eases off well short of a pedestrian.
+            brake_at = 34 if (star >= COP_RAMMING_STAR or self.driving) else 52
+            cop.chase_ai(aim, brake_at=brake_at)
             if cop.rect.colliderect(active.inflate(4, 4)):
                 touching = True
+
+        self.spotted = seen
+        self.searching = searching and not seen
+        self.update_hiding()
 
         # A single frame of contact used to bust you instantly. Now the cops
         # have to hold you for ~0.7s, so shaking one off in a scrape is a real
         # skill rather than a coin flip.
-        if touching and self.busted_flash <= 0:
+        if touching and self.state == STATE_PLAYING:
             self.bust_meter += 1
             if self.bust_meter >= BUST_CONTACT_STEPS:
                 self.busted()
         else:
             self.bust_meter = max(0, self.bust_meter - BUST_RELIEF)
 
-        if cop_near:
+        # Heat only holds while somebody can actually *see* you. Sitting on the
+        # far side of a brick two-flat from a cruiser is not being caught.
+        if seen:
             self.heat_timer = 0
+            if not self.was_spotted and self.wanted_level > 0:
+                self.add_toast("Spotted!")
+        self.was_spotted = seen
+
+    def cop_search_point(self, cop):
+        """Somewhere plausible for a cop that has lost you to go and look."""
+        base = cop.last_seen or cop.rect.center
+        for _ in range(12):
+            ang = random.uniform(0, math.tau)
+            dist = random.uniform(COP_SEARCH_WANDER * 0.4, COP_SEARCH_WANDER)
+            x = base[0] + math.cos(ang) * dist
+            y = base[1] + math.sin(ang) * dist
+            col, row = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+            if not (2 <= col < MAP_TILES_W - 2 and 2 <= row < MAP_TILES_H - 2):
+                continue
+            if tile_type_at(col, row) == TILE_ROAD:
+                return (x, y)
+        return base
 
     def busted(self):
         """Booked and released at the station, minus bail.
@@ -8695,25 +9051,19 @@ class Game:
         map, which meant every bust also destroyed your sense of where you
         were. You now come out of the station you were taken to.
         """
+        if self.state == STATE_DEAD:
+            return
         bail = min(self.cash, BAIL_COST)
         self.cash -= bail
-        self.add_toast(f"BUSTED! Bail ${bail}")
-        self.reset_multiplier()
         self.busted_flash = FPS * 2
-        self.wanted_level = 0
-        self.police = []
-        self.bust_meter = 0
-        self.heat_timer = 0
         if self.driving:
             self.driving.driver = None
             self.driving.parked = True
             traffic_hand_back(self.driving)
             self.driving = None
-        spot = free_point_near(self.police_station[0], self.police_station[1],
-                               PLAYER_SIZE, PLAYER_SIZE, max_rings=8)
-        self.player_rect.center = spot if spot is not None else random_open_spawn()
         if self.job is not None and self.job.collected:
             self.fail_job("Cargo impounded")
+        self.enter_death('busted', f"BAIL ${bail}")
 
     def update_wanted_decay(self):
         """Stars only fall once you are genuinely clear.
@@ -8728,10 +9078,14 @@ class Game:
             self.heat_timer = 0
             self.wanted_decay_timer = 0
             return
+        # Hiding is worth something concrete: cover skips most of the grace
+        # period and then sheds stars several times faster than walking away.
+        gain = HIDE_DECAY_SCALE if self.hidden else 1.0
+        grace = HEAT_GRACE // 3 if self.hidden else HEAT_GRACE
         self.heat_timer += 1
-        if self.heat_timer < HEAT_GRACE:
+        if self.heat_timer < grace:
             return
-        self.wanted_decay_timer += 1
+        self.wanted_decay_timer += gain
         if self.wanted_decay_timer >= WANTED_DECAY_STEPS:
             self.wanted_decay_timer = 0
             self.wanted_level = max(0, self.wanted_level - 1)
@@ -9201,15 +9555,8 @@ class Game:
             self.screen.blit(fl, (0, 0))
         self.draw_hud()
         self.draw_callouts()
-        if self.busted_flash > FPS or self.wasted_flash > FPS:
-            wrecked = self.wasted_flash > FPS
-            flash_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            flash_surf.fill((255, 0, 0, 60))
-            self.screen.blit(flash_surf, (0, 0))
-            word = "WASTED" if wrecked else "BUSTED!"
-            bw = hud_text_width(word, 3)
-            hud_text(self.screen, word, (SCREEN_WIDTH - bw) // 2,
-                     SCREEN_HEIGHT // 2 - 10, hud_HUD_RED, True, 3)
+        if self.state == STATE_DEAD:
+            self.draw_death_card()
 
         if self.show_debug:
             self.draw_debug()
@@ -9220,6 +9567,63 @@ class Game:
 
         self.postfx.present(self.screen, self.window)
         pygame.display.flip()
+
+    # ---------------- the death card ----------------
+    def draw_death_card(self):
+        """WASTED / BUSTED, held for three seconds over a darkening city.
+
+        The old version was a two-second red tint you played straight through.
+        This is a round ending: the world dims, the word lands, the run's
+        numbers are read back to you, and the last line tells you where you
+        are about to wake up.
+        """
+        done = 1.0 - max(0.0, self.death_timer / float(DEATH_HOLD_STEPS))
+        wrecked = self.death_kind == 'wasted'
+        # Red slam on impact, easing into a black-out over the last second.
+        fade = 0.0
+        if self.death_timer < DEATH_FADE_STEPS:
+            fade = 1.0 - self.death_timer / float(DEATH_FADE_STEPS)
+        tint = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        red = int(90 * max(0.0, 1.0 - done * 1.6))
+        tint.fill((110 + red, 12, 16, int(70 + 150 * fade)))
+        self.screen.blit(tint, (0, 0))
+
+        word = "WASTED" if wrecked else "BUSTED!"
+        color = hud_HUD_RED if wrecked else hud_HUD_GOLD
+        # The word punches in over the first ~0.2s, then holds.
+        scale = 3 if done > 0.07 else 2
+        bw = hud_text_width(word, scale)
+        top = SCREEN_HEIGHT // 2 - 34
+        hud_text(self.screen, word, (SCREEN_WIDTH - bw) // 2, top, color, True, scale)
+
+        note = self.death_note or ""
+        if note:
+            nw = hud_text_width(note, 1)
+            hud_text(self.screen, note, (SCREEN_WIDTH - nw) // 2,
+                     top + hud_text_height(word, scale) + 6,
+                     hud_HUD_WHITE, True, 1)
+
+        # The run's numbers, read back once it has landed.
+        if done > 0.30 and self.death_stats:
+            st = self.death_stats
+            lines = [
+                f"SCORE {st['score']}",
+                f"CASH ${int(st['cash'])}",
+                f"RUNS {st['jobs']}   STREAK {st['streak']}",
+            ]
+            y = top + hud_text_height(word, scale) + 24
+            for ln in lines:
+                lw = hud_text_width(ln, 1)
+                hud_text(self.screen, ln, (SCREEN_WIDTH - lw) // 2, y,
+                         hud_HUD_WHITE, True, 1)
+                y += hud_text_height(ln, 1) + 3
+
+        if done > 0.55:
+            where = ("COMING TO UNDER THE ARCH" if wrecked
+                     else "RELEASED FROM THE STATION")
+            ww = hud_text_width(where, 1)
+            hud_text(self.screen, where, (SCREEN_WIDTH - ww) // 2,
+                     SCREEN_HEIGHT - 34, hud_HUD_GOLD, True, 1)
 
     # ---------------- feedback rendering ----------------
     _DECAL_COLORS = {
@@ -9528,6 +9932,32 @@ class Game:
         hud_text(self.screen, hint, (SCREEN_WIDTH - hud_text_width(hint, 1)) // 2,
                  panel.bottom - 13, hud_HUD_GREY_DIM, True, 1)
 
+    # Chase state, read straight off the police senses. Without this the
+    # line-of-sight rules are invisible and the player never learns that
+    # ducking into a gangway is a move - so it sits right under the stars.
+    _CHASE_STATES = (
+        ('spotted', "SPOTTED", hud_HUD_RED),
+        ('searching', "SEARCHING", hud_HUD_GOLD),
+        ('hidden', "HIDDEN", hud_HUD_GREEN),
+    )
+
+    def draw_chase_state(self, right, y, ticks):
+        if self.wanted_level <= 0 and not self.hidden:
+            return
+        if self.spotted:
+            key, label, color = self._CHASE_STATES[0]
+        elif self.hidden:
+            key, label, color = self._CHASE_STATES[2]
+        elif self.searching:
+            key, label, color = self._CHASE_STATES[1]
+        else:
+            return
+        # SPOTTED blinks; the two good states hold steady so relief reads.
+        if key == 'spotted' and (ticks // 220) % 2 == 0:
+            color = _blend(color, (255, 220, 200), 0.55)
+        w = hud_text_width(label, 1)
+        hud_text(self.screen, label, right - w, y, color, True, 1)
+
     def draw_debug(self):
         """F3 readout. Frame budget, sim steps and world state in one place -
         previously there was no way to tell a 60fps run from a 20fps one."""
@@ -9537,6 +9967,8 @@ class Game:
             f"TILE {active.centerx // TILE_SIZE},{active.centery // TILE_SIZE}",
             f"CARS {len(self.cars)}  COPS {len(self.police)}  PEDS {len(self.pedestrians)}",
             f"WANTED {self.wanted_level}  HEAT {self.heat_timer}  BUST {self.bust_meter}",
+            f"SEEN {int(self.spotted)}  HUNT {int(self.searching)}  "
+            f"HIDE {int(self.hidden)}  DISP {self.cop_dispatch}",
             f"STATE {'DRIVE' if self.driving else 'FOOT'}  FRAME {self.frame}",
         )
         w = max(hud_text_width(s, 1) for s in lines) + 12
@@ -9574,6 +10006,7 @@ class Game:
 
         star_w = hud_draw_stars(self.screen, self.wanted_level,
                                 right - STAR_BLOCK_W, 56, ticks)[0]
+        self.draw_chase_state(right, 56 + 12, ticks)
 
         # radar, aligned to the same right edge as the gauge above it
         rx, ry = right - RADAR_SIZE, 74
@@ -9798,9 +10231,16 @@ class Game:
             return f"player left the map at {p.center}"
         if not 0 <= self.wanted_level <= WANTED_MAX:
             return f"wanted level out of range: {self.wanted_level}"
-        if len(self.police) != COP_COUNT_BY_STAR[self.wanted_level]:
-            return (f"police count {len(self.police)} != "
-                    f"{COP_COUNT_BY_STAR[self.wanted_level]} for {self.wanted_level} stars")
+        # Cops are dispatched on a delay now (COP_RESPONSE_BY_STAR), so the
+        # count climbs *toward* the star's quota rather than matching it the
+        # same step. The invariant that still has to hold absolutely is that
+        # it never exceeds the quota, and that zero stars means zero cops.
+        quota = COP_COUNT_BY_STAR[self.wanted_level]
+        if len(self.police) > quota:
+            return (f"police count {len(self.police)} exceeds "
+                    f"{quota} for {self.wanted_level} stars")
+        if self.wanted_level == 0 and self.police:
+            return f"{len(self.police)} cops on the street at zero stars"
         if self.cash < 0:
             return f"negative cash: {self.cash}"
         if self.score < 0:
