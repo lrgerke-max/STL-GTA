@@ -1728,6 +1728,90 @@ def test_a_nudge_in_a_parking_bay_is_not_a_police_matter():
     g.driving = None
 
 
+# ---------------------------------------------------------------------------
+# Audio: synthesised at boot, and silent on a machine with no mixer
+# ---------------------------------------------------------------------------
+
+def test_the_audio_bank_synthesises_without_numpy():
+    """The whole point of the approach: array('h') + Sound(buffer=...), never
+    pygame.sndarray, which hard-imports numpy - a 15MB binary dependency on a
+    project whose requirements.txt is one line."""
+    import array
+    samples = [math.sin(i * 0.05) for i in range(400)]
+    buf = M.snd__buf(samples, 0.8)
+    assert isinstance(buf, array.array)
+    assert buf.typecode == 'h'
+    assert len(buf) == len(samples) * 2, "stereo interleave"
+    assert max(buf) > 0 and min(buf) < 0, "the waveform is not silent"
+    assert max(buf) <= 32767 and min(buf) >= -32768, "clipped to 16 bit"
+
+
+def test_every_engine_loop_is_a_whole_number_of_cycles():
+    """Sound.play(loops=-1) repeats the whole buffer, so a loop that is not a
+    whole number of cycles clicks once per lap."""
+    for period in M.snd_ENGINE_PERIODS:
+        n = period * M.snd_ENGINE_CYCLES
+        assert n % period == 0
+        wave = M.snd__make_engine(period)
+        assert len(wave) == n
+        assert max(wave) > 0.05, "an engine note that makes no sound"
+
+
+def test_engine_buckets_climb_with_speed_and_stay_in_range():
+    n = len(M.snd_ENGINE_PERIODS)
+    assert M.snd_engine_bucket(0.0) == 0
+    assert M.snd_engine_bucket(1.0) == n - 1
+    assert M.snd_engine_bucket(2.5) == n - 1, "clamped above"
+    assert M.snd_engine_bucket(-1.0) == 0, "clamped below"
+    prev = -1
+    for k in range(0, 11):
+        b = M.snd_engine_bucket(k / 10.0)
+        assert b >= prev, "buckets must not go down as you speed up"
+        prev = b
+    # and higher bucket == shorter period == higher note
+    assert M.snd_ENGINE_PERIODS[-1] < M.snd_ENGINE_PERIODS[0]
+
+
+def test_panning_is_equal_power_and_falls_off_with_distance():
+    cam = (1000, 1000)
+    near = M.snd_pan_volume((1000, 1000), cam, 1.0)
+    far = M.snd_pan_volume((1000, 1560), cam, 1.0)
+    assert sum(near) > sum(far) > 0, "distance should quieten it"
+    assert M.snd_pan_volume((1000, 4000), cam, 1.0) == (0.0, 0.0)
+    left_side = M.snd_pan_volume((700, 1000), cam, 1.0)
+    right_side = M.snd_pan_volume((1300, 1000), cam, 1.0)
+    assert left_side[0] > left_side[1], "a sound to the west is louder left"
+    assert right_side[1] > right_side[0], "and to the east, louder right"
+
+
+def test_sound_calls_are_harmless_with_no_mixer():
+    """CI runs on the dummy audio driver. Nothing in the game may care."""
+    g = game()
+    assert not M.snd__enabled, "the headless test game must be silent"
+    g.play_sound('boom', (100, 100))
+    g.play_impact((100, 100), 9.0)
+    g.update_audio()
+    M.snd_duck(10)
+    M.snd_loop(M.snd_CH_ENGINE_A, 'engine0', 0.5)
+    M.snd_stop(M.snd_CH_ENGINE_A)
+    assert g.check_invariants() is None
+
+
+def test_rate_limiting_stops_a_wall_scrape_becoming_a_drone():
+    M.snd__last_played.clear()
+    M.snd_set_frame(0)
+    first = M.snd_play('impact0', gap=8)
+    M.snd_set_frame(3)
+    M.snd_play('impact0', gap=8)
+    # with no mixer both return None; what matters is the bookkeeping
+    assert M.snd__last_played.get('impact0') == 0, (
+        "a rate-limited key must not re-arm inside its gap")
+    M.snd_set_frame(20)
+    M.snd_play('impact0', gap=8)
+    assert M.snd__last_played.get('impact0') == 20
+    M.snd__last_played.clear()
+
+
 def _run_all():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

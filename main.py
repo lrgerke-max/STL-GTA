@@ -7210,6 +7210,489 @@ def lm_draw_landmark(surface, name, rect, camera_clip):
     finally:
         surface.set_clip(old)
 
+# ==========================================================
+# Baked audio: snd
+# ==========================================================
+"""Procedurally synthesised sound. No samples, no numpy, no assets.
+
+The rest of this project bakes every pixel it draws; the audio does the same
+thing with waveforms. Everything here is written into `array('h')` buffers and
+handed to `pygame.mixer.Sound(buffer=...)`, which needs nothing but the
+standard library - deliberately NOT `pygame.sndarray`, which hard-imports
+numpy. A full bank of ~40 sounds bakes in about a tenth of a second at boot,
+against the second the sprite bake already costs.
+
+Channel map. The reserved channels below are never stolen by a fire-and-forget
+Sound.play(), because an engine note or a siren that gets cut out from under
+you is far more noticeable than a missing bin-lid clatter:
+
+    0-1   engine A / B   crossfade pair, looping
+    2     tyres          screech loop, volume-driven, never re-triggered
+    3     siren          the nearest cop only
+    4-5   radio          crossfade pair, looping
+    6     ambient        river / cicadas / brewery, crossfaded by district
+    7     UI             pickups, chimes, level-ups
+    8+    SFX pool       impacts, gunshots, yells, explosions
+"""
+import array as _array
+
+snd_SR = 22050
+snd_CH_ENGINE_A = 0
+snd_CH_ENGINE_B = 1
+snd_CH_TYRES = 2
+snd_CH_SIREN = 3
+snd_CH_RADIO_A = 4
+snd_CH_RADIO_B = 5
+snd_CH_AMBIENT = 6
+snd_CH_UI = 7
+snd_RESERVED = 8
+snd_CHANNELS = 24
+
+# Engine loops are baked at these fundamental *periods in whole samples*, not
+# at frequencies. Sound.play(loops=-1) repeats the whole buffer, so a loop that
+# is not a whole number of cycles clicks once per lap; deriving the frequency
+# from an integer period makes every loop seamless by construction.
+snd_ENGINE_PERIODS = (245, 220, 196, 175, 156, 139, 124, 110, 98, 87, 78, 70)
+snd_ENGINE_CYCLES = 4
+
+snd__bank = {}
+snd__ready = False
+snd__enabled = False
+snd__rng = random.Random(0xA0D10)   # deterministic: the bank is identical every boot
+snd__last_played = {}               # key -> frame, for rate limiting
+snd__frame = 0
+snd__master = 0.85
+snd__duck_until = 0                 # frame the radio comes back up on
+
+
+# --------------------------------------------------------------------------
+# primitives
+# --------------------------------------------------------------------------
+def snd__saw(ph):
+    return ph * 2.0 - 1.0
+
+
+def snd__sqr(ph):
+    return 1.0 if ph < 0.5 else -1.0
+
+
+def snd__tri(ph):
+    return 4.0 * abs(ph - 0.5) - 1.0
+
+
+def snd__env(i, n, k=3.0):
+    """Exponential decay from 1 to 0 over n samples."""
+    if n <= 0:
+        return 0.0
+    return max(0.0, 1.0 - i / float(n)) ** k
+
+
+def snd__buf(samples, gain=1.0):
+    """Interleave a mono float list into a clipped stereo 16-bit buffer."""
+    out = _array.array('h', bytes(4 * len(samples)))
+    for i, v in enumerate(samples):
+        s = int(max(-1.0, min(1.0, v * gain)) * 30000)
+        out[i * 2] = s
+        out[i * 2 + 1] = s
+    return out
+
+
+def snd__sound(samples, gain=1.0):
+    try:
+        return pygame.mixer.Sound(buffer=snd__buf(samples, gain))
+    except (pygame.error, ValueError):
+        return None
+
+
+def snd__noise():
+    return snd__rng.uniform(-1.0, 1.0)
+
+
+# --------------------------------------------------------------------------
+# the bank
+# --------------------------------------------------------------------------
+def snd__make_engine(period, load=False):
+    """One engine loop: stacked saws plus a square sub and combustion grit.
+
+    The saw at the fundamental is the exhaust note, the octave above is the
+    rasp, the square an octave below is the lump you feel rather than hear,
+    and the noise is what stops it sounding like a test tone.
+    """
+    n = period * snd_ENGINE_CYCLES
+    out = []
+    y = 0.0
+    for i in range(n):
+        ph = (i / float(period)) % 1.0
+        v = (snd__saw(ph) * 0.45
+             + snd__saw((ph * 2.0 + 0.3) % 1.0) * 0.22
+             + snd__sqr((ph * 0.5) % 1.0) * 0.18
+             + snd__noise() * (0.09 if load else 0.06))
+        y = y + (v - y) * 0.25          # one-pole lowpass; takes the fizz off
+        out.append(y)
+    return out
+
+
+def snd__make_screech():
+    """Band-limited noise with a rubber judder on it."""
+    n = int(snd_SR * 0.40)
+    out = []
+    lo = lo2 = sub = 0.0
+    for i in range(n):
+        x = snd__noise()
+        lo = lo + (x - lo) * 0.35
+        lo2 = lo2 + (lo - lo2) * 0.35
+        sub = sub + (lo2 - sub) * 0.06
+        band = lo2 - sub                          # crude bandpass ~1.2-2.5kHz
+        am = 0.72 + 0.28 * math.sin(i * math.tau * 30.0 / snd_SR)
+        out.append(band * am)
+    return out
+
+
+def snd__make_impact(severity):
+    """Noise burst that darkens as it decays, a low thump, and some metal.
+
+    The sweeping lowpass is the whole trick: a noise burst at a fixed
+    brightness reads as hiss, and the same burst getting darker as it dies
+    reads as something heavy hitting something else.
+    """
+    n = int(snd_SR * (0.18 + 0.04 * severity))
+    thump_f = 90.0 - 12.0 * severity
+    partials = ((900.0, 0.10), (1400.0, 0.07), (2100.0, 0.05))
+    out = []
+    y = 0.0
+    for i in range(n):
+        e = snd__env(i, n, 3.0)
+        a = 0.90 - 0.70 * (i / float(n))          # sweep the filter closed
+        y = y + (snd__noise() - y) * a
+        v = y * e * (0.35 + 0.16 * severity)
+        v += math.sin(i * math.tau * thump_f / snd_SR) * snd__env(i, n, 5.0) * 0.45
+        if i < n * 0.35:
+            for f, amp in partials:
+                v += math.sin(i * math.tau * f / snd_SR) * snd__env(i, int(n * 0.35), 4.0) * amp
+        out.append(v)
+    return out
+
+
+def snd__make_scrape():
+    n = int(snd_SR * 0.30)
+    out = []
+    y = 0.0
+    for i in range(n):
+        y = y + (snd__noise() - y) * 0.5
+        ring = math.sin(i * math.tau * 1800.0 / snd_SR) * 0.10
+        out.append((y * 0.35 + ring) * (0.6 + 0.4 * math.sin(i * 0.004)))
+    return out
+
+
+def snd__make_punch(connect):
+    n = int(snd_SR * (0.11 if connect else 0.07))
+    out = []
+    y = 0.0
+    for i in range(n):
+        e = snd__env(i, n, 3.5)
+        y = y + (snd__noise() - y) * (0.22 if connect else 0.75)
+        v = y * e * (0.55 if connect else 0.22)
+        if connect:
+            v += math.sin(i * math.tau * 110.0 / snd_SR) * snd__env(i, n, 4.0) * 0.5
+        out.append(v)
+    return out
+
+
+def snd__make_gunshot():
+    """With the downtown slapback - the canyon slap between buildings is what
+    a gunshot actually sounds like on Washington Avenue."""
+    n = int(snd_SR * 0.30)
+    dry = []
+    y = 0.0
+    for i in range(n):
+        e = snd__env(i, int(snd_SR * 0.14), 4.0)
+        y = y + (snd__noise() - y) * max(0.12, 0.95 - 3.0 * (i / float(n)))
+        v = y * e * 0.8
+        v += math.sin(i * math.tau * 180.0 / snd_SR) * snd__env(i, int(snd_SR * 0.09), 5.0) * 0.4
+        dry.append(v)
+    d1 = int(snd_SR * 0.055)
+    d2 = int(snd_SR * 0.110)
+    out = list(dry)
+    for i in range(n):
+        if i >= d1:
+            out[i] += dry[i - d1] * 0.30
+        if i >= d2:
+            out[i] += dry[i - d2] * 0.12
+    return out
+
+
+def snd__make_explosion():
+    n = int(snd_SR * 0.90)
+    out = []
+    y = 0.0
+    phase = 0.0
+    for i in range(n):
+        t = i / float(n)
+        # (1) the chest hit: a sine sweeping 90 -> 35 Hz
+        f = 90.0 - 55.0 * min(1.0, i / (snd_SR * 0.35))
+        phase += math.tau * f / snd_SR
+        v = math.sin(phase) * snd__env(i, int(snd_SR * 0.45), 2.0) * 0.75
+        # (2) broadband noise that darkens as it decays - the layer that sells it
+        a = max(0.15, 0.9 - 0.75 * t)
+        y = y + (snd__noise() - y) * a
+        atk = min(1.0, i / (snd_SR * 0.06))
+        v += y * atk * snd__env(i, n, 2.2) * 0.55
+        out.append(v)
+    # (3) debris ticks scattered through the tail
+    for _ in range(9):
+        at = snd__rng.randint(int(snd_SR * 0.25), n - 400)
+        amp = snd__rng.uniform(0.10, 0.26)
+        for k in range(300):
+            out[at + k] += snd__noise() * snd__env(k, 300, 4.0) * amp
+    return out
+
+
+def snd__make_siren(kind, pitch=1.0):
+    """Two genuinely different sirens, because this city genuinely has two
+    police forces and they do not sound the same.
+
+    'yelp' is the city: a fast electronic sweep, aggressive and modern.
+    'wail' is the county: an old mechanical rise and fall, slower and sadder.
+    """
+    if kind == 'yelp':
+        period = 0.25
+        f0, f1 = 700.0 * pitch, 1500.0 * pitch
+    else:
+        period = 2.40
+        f0, f1 = 500.0 * pitch, 1300.0 * pitch
+    n = int(snd_SR * period * 2)
+    out = []
+    phase = 0.0
+    for i in range(n):
+        t = (i / float(n)) * 2.0
+        k = t if t < 1.0 else 2.0 - t          # up then down
+        if kind == 'yelp':
+            k = (i % int(snd_SR * period)) / float(int(snd_SR * period))
+        f = f0 + (f1 - f0) * k
+        phase += math.tau * f / snd_SR
+        v = snd__tri(((phase / math.tau) % 1.0)) * 0.42
+        if kind == 'wail':
+            v += math.sin(phase * 3.0) * 0.15   # the mechanical rasp
+        out.append(v)
+    return out
+
+
+def snd__make_yell(seed, contour):
+    """A pitched buzz through a couple of resonances - no words, but the
+    prosody carries it. Two of these get local cadences: a flat two-syllable
+    fall, and the rising two-syllable question everybody here asks you."""
+    rng = random.Random(seed)
+    base = rng.uniform(150.0, 250.0)
+    n = int(snd_SR * 0.34)
+    out = []
+    phase = 0.0
+    y = 0.0
+    for i in range(n):
+        t = i / float(n)
+        if contour == 'fall':                   # "HOO-sier"
+            k = 1.10 - 0.35 * t
+            amp = 1.0 if t < 0.45 else (0.85 if t < 0.55 else 1.0)
+        elif contour == 'question':             # "where'd you go to...?"
+            k = 0.92 + 0.42 * t
+            amp = 1.0 if t < 0.40 else (0.7 if t < 0.52 else 1.0)
+        else:
+            k = 1.0 + 0.25 * math.sin(t * 4.0)
+            amp = 1.0
+        phase += math.tau * base * k / snd_SR
+        v = snd__saw((phase / math.tau) % 1.0)
+        y = y + (v - y) * 0.30                  # vowel-ish resonance
+        env = min(1.0, t * 8.0) * snd__env(i, n, 1.6)
+        out.append(y * env * amp * 0.55)
+    return out
+
+
+def snd__make_chime(notes, hold=0.18):
+    """Triangle arpeggio with a detuned second voice."""
+    per = int(snd_SR * hold)
+    out = [0.0] * (per * len(notes))
+    for k, f in enumerate(notes):
+        for i in range(per):
+            e = min(1.0, i / 60.0) * snd__env(i, per, 3.0)
+            ph = (i * f / snd_SR) % 1.0
+            ph2 = (i * f * 1.003 / snd_SR) % 1.0
+            out[k * per + i] += (snd__tri(ph) * 0.5 + snd__tri(ph2) * 0.3) * e * 0.5
+    return out
+
+
+def snd__make_train_horn():
+    """The real grade-crossing signal, and the single most St. Louis sound
+    available: three notes a minor third apart, which is exactly why a train
+    horn sounds like a train horn and not like a trumpet."""
+    n = int(snd_SR * 2.2)
+    out = []
+    y = 0.0
+    for i in range(n):
+        env = min(1.0, i / (snd_SR * 0.20)) * (
+            1.0 if i < n * 0.65 else snd__env(i - int(n * 0.65), int(n * 0.35), 1.6))
+        v = 0.0
+        for f, a in ((311.0, 0.40), (370.0, 0.34), (466.0, 0.26)):
+            v += snd__saw((i * f / snd_SR) % 1.0) * a
+        y = y + (v - y) * 0.18
+        out.append(y * env * 0.55)
+    return out
+
+
+def snd__make_cicadas():
+    n = int(snd_SR * 1.0)
+    out = []
+    y = lo = 0.0
+    for i in range(n):
+        y = y + (snd__noise() - y) * 0.45
+        lo = lo + (y - lo) * 0.10
+        band = y - lo
+        am = 0.5 + 0.5 * math.sin(i * math.tau * 12.0 / snd_SR)
+        out.append(band * am * 0.22)
+    return out
+
+
+def snd_bake():
+    """Bake the whole bank. Safe to call twice; a no-op without a mixer."""
+    global snd__ready, snd__enabled
+    if snd__ready:
+        return
+    snd__ready = True
+    if pygame.mixer.get_init() is None:
+        snd__enabled = False
+        return
+    try:
+        pygame.mixer.set_num_channels(snd_CHANNELS)
+        pygame.mixer.set_reserved(snd_RESERVED)
+    except pygame.error:
+        snd__enabled = False
+        return
+
+    b = snd__bank
+    for i, period in enumerate(snd_ENGINE_PERIODS):
+        b[f'engine{i}'] = snd__sound(snd__make_engine(period), 0.9)
+        b[f'engineload{i}'] = snd__sound(snd__make_engine(period, load=True), 0.9)
+    b['screech'] = snd__sound(snd__make_screech(), 0.8)
+    b['scrape'] = snd__sound(snd__make_scrape(), 0.7)
+    for sev in range(3):
+        b[f'impact{sev}'] = snd__sound(snd__make_impact(sev), 0.85)
+    b['punch'] = snd__sound(snd__make_punch(True), 0.8)
+    b['whiff'] = snd__sound(snd__make_punch(False), 0.6)
+    b['gun'] = snd__sound(snd__make_gunshot(), 0.8)
+    b['boom'] = snd__sound(snd__make_explosion(), 1.0)
+    for p, tag in ((0.94, 'lo'), (1.0, 'mid'), (1.06, 'hi')):
+        b[f'yelp{tag}'] = snd__sound(snd__make_siren('yelp', p), 0.55)
+        b[f'wail{tag}'] = snd__sound(snd__make_siren('wail', p), 0.55)
+    for i, contour in enumerate(('fall', 'question', 'flat', 'flat')):
+        b[f'yell{i}'] = snd__sound(snd__make_yell(1000 + i, contour), 0.7)
+    b['pickup'] = snd__sound(snd__make_chime((659.3, 987.8)), 0.6)
+    b['weapon'] = snd__sound(snd__make_chime((659.3, 830.6, 987.8)), 0.6)
+    b['frenzy'] = snd__sound(snd__make_chime((659.3, 830.6, 987.8, 1318.5)), 0.75)
+    b['cash'] = snd__sound(snd__make_chime((987.8, 1318.5), 0.13), 0.6)
+    b['bad'] = snd__sound(snd__make_chime((330.0, 233.1), 0.22), 0.6)
+    b['horn'] = snd__sound(snd__make_train_horn(), 0.7)
+    b['cicadas'] = snd__sound(snd__make_cicadas(), 0.5)
+    snd__enabled = any(v is not None for v in b.values())
+
+
+# --------------------------------------------------------------------------
+# playback
+# --------------------------------------------------------------------------
+def snd_set_frame(frame):
+    global snd__frame
+    snd__frame = frame
+
+
+def snd_pan_volume(world_pos, cam_pos, vol=1.0, reach=620.0):
+    """Equal-power pan plus distance rolloff, as (left, right)."""
+    dx = world_pos[0] - cam_pos[0]
+    dy = world_pos[1] - cam_pos[1]
+    d = math.hypot(dx, dy)
+    v = vol * snd__master * max(0.0, 1.0 - d / reach) ** 1.5
+    if v <= 0.0:
+        return (0.0, 0.0)
+    pan = max(-1.0, min(1.0, dx / (SCREEN_WIDTH * 0.5)))
+    return (v * math.sqrt((1.0 - pan) * 0.5), v * math.sqrt((1.0 + pan) * 0.5))
+
+
+def snd_rate_ok(key, gap):
+    """True if this key may fire again, and arm it if so.
+
+    Without this a wall scrape fires every single step - the collision path
+    runs at 60Hz - and the city becomes a wall of noise.
+    """
+    last = snd__last_played.get(key, -10 ** 9)
+    if snd__frame - last < gap:
+        return False
+    snd__last_played[key] = snd__frame
+    return True
+
+
+def snd_play(key, world_pos=None, cam_pos=None, vol=1.0, gap=0, reach=620.0):
+    """Fire and forget on the SFX pool.
+
+    `gap` rate-limits a key to one hit every N frames. Without it a wall
+    scrape fires every single step and the city becomes a wall of noise.
+    """
+    if gap and not snd_rate_ok(key, gap):
+        return None
+    if not snd__enabled:
+        return None
+    sound = snd__bank.get(key)
+    if sound is None:
+        return None
+    ch = pygame.mixer.find_channel(True)
+    if ch is None:
+        return None
+    ch.play(sound)
+    if world_pos is not None and cam_pos is not None:
+        left, right = snd_pan_volume(world_pos, cam_pos, vol, reach)
+        if left <= 0.0 and right <= 0.0:
+            ch.stop()
+            return None
+        ch.set_volume(left, right)
+    else:
+        ch.set_volume(vol * snd__master)
+    return ch
+
+
+def snd_loop(channel, key, vol, left=None, right=None):
+    """Hold a looping sound on a reserved channel, restarting only if it is
+    not already the thing playing there."""
+    if not snd__enabled:
+        return
+    sound = snd__bank.get(key)
+    ch = pygame.mixer.Channel(channel)
+    if sound is None:
+        ch.stop()
+        return
+    if ch.get_sound() is not sound:
+        ch.play(sound, loops=-1)
+    if left is None:
+        ch.set_volume(vol * snd__master)
+    else:
+        ch.set_volume(left, right)
+
+
+def snd_stop(channel):
+    if not snd__enabled:
+        return
+    pygame.mixer.Channel(channel).stop()
+
+
+def snd_duck(frames=24):
+    """Drop the ambient bed for a moment so an explosion feels enormous."""
+    global snd__duck_until
+    snd__duck_until = max(snd__duck_until, snd__frame + frames)
+
+
+def snd_ducking():
+    return 0.35 if snd__frame < snd__duck_until else 1.0
+
+
+def snd_engine_bucket(speed_frac):
+    n = len(snd_ENGINE_PERIODS)
+    return max(0, min(n - 1, int(speed_frac * (n - 1) + 0.5)))
+
+
 # ============================================================
 # Camera
 # ============================================================
@@ -7946,6 +8429,14 @@ class Toast:
 # ============================================================
 class Game:
     def __init__(self, start_fullscreen=True):
+        # pre_init has to run before pygame.init() opens the audio device.
+        # 22050 is plenty for this material and halves both the bake time and
+        # the memory; a 512-sample buffer is 23ms of latency, which keeps a
+        # punch feeling connected to the button - 1024 is audibly late.
+        try:
+            pygame.mixer.pre_init(snd_SR, -16, 2, 512)
+        except pygame.error:
+            pass
         pygame.init()
         pygame.font.init()
         # Headless (CI / smoke tests) runs on the dummy SDL driver: keep the
@@ -7980,6 +8471,10 @@ class Game:
         props_bake()
         roofs_bake()
         hud_bake()
+        # Audio is baked the same way as the art: waveforms into buffers, once,
+        # at boot. Silent and harmless when there is no mixer (CI, dummy driver).
+        if not self._headless:
+            snd_bake()
         self.postfx = fx_PostFX(SCREEN_WIDTH, SCREEN_HEIGHT, SCALE_FACTOR)
         self.frame = 0
         self.radar_base = None
@@ -8241,6 +8736,7 @@ class Game:
         self.banked += amount
         self.cash -= amount
         self.add_callout(f"BANKED ${amount}", hud_HUD_GREEN, scale=2)
+        self.play_sound('cash', vol=0.8)
         self.add_pop(here, f"${amount}", hud_HUD_GREEN)
         left = max(0, ARCH_JOB_TARGET - self.banked)
         if left:
@@ -8265,6 +8761,7 @@ class Game:
                 self.cash += d['amount']
                 self.add_pop((d['x'], d['y']), f"+${d['amount']}", hud_HUD_GREEN)
                 self.add_callout("GOT IT BACK", hud_HUD_GREEN, scale=1)
+                self.play_sound('cash', vol=0.7)
                 continue
             keep.append(d)
         self.dropped = keep
@@ -8355,6 +8852,19 @@ class Game:
             self.callouts.pop(0)
 
     # ---------------- feedback: impact juice ----------------
+    def play_sound(self, key, world_pos=None, vol=1.0, gap=0, reach=620.0):
+        """Every sound the game makes goes through here, so the camera is the
+        listener and one call site can never forget to pan."""
+        if not snd__enabled:
+            return
+        snd_play(key, world_pos, self.active_rect().center, vol, gap, reach)
+
+    def play_impact(self, world_pos, speed, gap=6):
+        """Three severities of crunch, picked by how hard it landed."""
+        sev = 0 if speed < 4.0 else (1 if speed < 7.0 else 2)
+        self.play_sound(f'impact{sev}', world_pos,
+                        vol=0.45 + 0.18 * sev, gap=gap)
+
     def kick(self, amp, freeze=0, flash=0):
         """One call for 'something just hit': camera shake + optional hitstop
         + optional white flash. All render-side or a whole-step skip, so the
@@ -8469,6 +8979,7 @@ class Game:
     def throw_punch(self):
         self.attack_cd = PUNCH_COOLDOWN
         self.punch_timer = 8
+        self.play_sound('whiff', self.player_rect.center, vol=0.5)
         ang = self.aim_angle()
         px, py = self.player_rect.center
         tip = (px + math.cos(ang) * PUNCH_RANGE * 0.8,
@@ -8496,6 +9007,7 @@ class Game:
                 if not self._in_arc(car.rect.center, ang, PUNCH_RANGE + 6):
                     continue
                 car.damage(PUNCH_DAMAGE)
+                self.play_sound('punch', car.rect.center, vol=0.6)
                 self.spawn_burst(car.rect.center, 4, ('spark', 'glass'), 2.0)
                 self.kick(1.6)
                 if car in self.police:
@@ -8503,6 +9015,7 @@ class Game:
                 break
 
     def fire_pistol(self):
+        self.play_sound('gun', self.player_rect.center, vol=0.7)
         self.attack_cd = SHOOT_COOLDOWN
         self.ammo -= 1
         ang = self.aim_angle()
@@ -8557,6 +9070,7 @@ class Game:
                 if car is self.driving or not car.rect.colliderect(hit):
                     continue
                 car.damage(BULLET_DAMAGE)
+                self.play_impact(car.rect.center, 5.0, gap=3)
                 self.spawn_burst(hit.center, 4, ('spark', 'glass'), 2.2)
                 if car in self.police:
                     self.wanted_bump(1, 'cop')
@@ -8578,6 +9092,7 @@ class Game:
                 w['taken'] = self.frame
                 self.weapon = 'pistol'
                 self.ammo = min(99, self.ammo + PISTOL_AMMO)
+                self.play_sound('weapon', vol=0.7)
                 self.add_callout("PISTOL", hud_HUD_GOLD, ttl=FPS, scale=1)
                 self.add_pop((w['x'], w['y']), f"+{PISTOL_AMMO}", hud_HUD_GOLD)
 
@@ -8597,6 +9112,7 @@ class Game:
             self.grub_until[kind] = self.frame + secs * FPS
         self.add_callout(label, hud_col, ttl=FPS, scale=1)
         self.add_pop(world_pos, f"+{int(GRUB_HEAL)}HP", hud_col)
+        self.play_sound('pickup', vol=0.7)
         self.kick(1.0)
         self.spawn_burst(world_pos, 6, ('spark',), 1.4)
 
@@ -8762,6 +9278,10 @@ class Game:
         pos = car.rect.center
         self.spawn_burst(pos, 28, ('spark', 'spark', 'smoke', 'debris'), 4.6)
         self.add_decal(pos, 'scorch', 1.5)
+        # Duck the ambient bed under it; that is most of why an explosion
+        # feels enormous rather than just loud.
+        self.play_sound('boom', pos, vol=1.0, gap=4, reach=900.0)
+        snd_duck(30)
         self.kick(7.5, freeze=2, flash=5)
         self.add_score(60, pos, mult=True)
         for ped in self.pedestrians:
@@ -8817,6 +9337,8 @@ class Game:
         half-torn-down: the sim keeps running during the hold, it just runs
         with the player parked and the wanted level already at zero.
         """
+        self.play_sound('bad', vol=0.9)
+        snd_duck(FPS)
         self.state = STATE_DEAD
         self.death_kind = kind
         self.death_note = note
@@ -9386,6 +9908,8 @@ class Game:
             pre_speed = abs(self.driving.velocity)
             hit = self.driving.physics_step()
             if hit and pre_speed > 3.0:
+                # gap: a wall scrape fires every single step otherwise
+                self.play_impact(self.driving.rect.center, pre_speed, gap=8)
                 self.kick(min(6.0, pre_speed * 0.7), freeze=1 if pre_speed > 6.5 else 0)
                 self.spawn_burst(self.driving.rect.center, int(2 + pre_speed),
                                  ('spark', 'spark', 'debris'), pre_speed * 0.5)
@@ -9459,6 +9983,80 @@ class Game:
             self.busted_flash -= 1
         if self.wasted_flash > 0:
             self.wasted_flash -= 1
+        self.update_audio()
+
+    def update_audio(self):
+        """Drive the looping buses: engine, tyres, sirens, ambient bed.
+
+        Everything here is a *held* sound whose volume and pitch bucket change
+        - never a re-trigger. Restarting an engine loop every step is the
+        classic way to turn a car into a machine gun.
+        """
+        if not snd__enabled:
+            return
+        snd_set_frame(self.frame)
+        cam = self.active_rect().center
+
+        # --- engine ------------------------------------------------------
+        car = self.driving
+        if car is not None:
+            frac = min(1.0, abs(car.velocity) / max(1.0, car.base_max_speed))
+            bucket = snd_engine_bucket(frac)
+            vol = (0.13 + 0.34 * frac) * snd__master
+            snd_loop(snd_CH_ENGINE_A, f'engine{bucket}', vol)
+            if car.input_throttle > 0:
+                # A second loop a bucket up, quieter. The beating between the
+                # two is what makes an engine sound like it is working rather
+                # than droning.
+                up = min(len(snd_ENGINE_PERIODS) - 1, bucket + 1)
+                snd_loop(snd_CH_ENGINE_B, f'engineload{up}', vol * 0.55)
+            else:
+                snd_stop(snd_CH_ENGINE_B)
+            # --- tyres: one channel, volume-driven, never re-triggered ----
+            slip = abs(car.steer_angle) / max(0.001, car.max_steer * 2.2) * frac
+            if slip > 0.45:
+                snd_loop(snd_CH_TYRES, 'screech',
+                         min(0.45, (slip - 0.45) * 1.4) * snd__master)
+            else:
+                snd_stop(snd_CH_TYRES)
+        else:
+            snd_stop(snd_CH_ENGINE_A)
+            snd_stop(snd_CH_ENGINE_B)
+            snd_stop(snd_CH_TYRES)
+
+        # --- sirens: the nearest unit only -------------------------------
+        # City yelp against county wail. St. Louis genuinely has two police
+        # forces and they genuinely do not sound the same, so the escalation
+        # is audible before it is visible - which also solves not being able
+        # to tell which car in traffic is a cop.
+        nearest, best = None, 1e9
+        for cop in self.police:
+            d = math.hypot(cop.rect.centerx - cam[0], cop.rect.centery - cam[1])
+            if d < best:
+                nearest, best = cop, d
+        if nearest is not None and best < 700:
+            county = self.wanted_level <= 2
+            closing = -nearest.velocity if nearest.velocity else 0.0
+            tag = 'hi' if closing < -3 else ('lo' if closing > 3 else 'mid')
+            key = ('wail' if county else 'yelp') + tag
+            left, right = snd_pan_volume(nearest.rect.center, cam, 0.55, 760.0)
+            snd_loop(snd_CH_SIREN, key, 0.0, left, right)
+        else:
+            snd_stop(snd_CH_SIREN)
+
+        # --- the ambient bed --------------------------------------------
+        # A train horn on the river and cicadas in the parks. If this game
+        # ships one ambient sound it should be the horn.
+        duck = snd_ducking()
+        col = int(cam[0]) // TILE_SIZE
+        row = int(cam[1]) // TILE_SIZE
+        near_river = col >= river_bank(row) - 12
+        if near_river and self.frame % (FPS * 26) == 0:
+            snd_play('horn', vol=0.5 * duck)
+        if tile_type_at(col, row) == TILE_PARK:
+            snd_loop(snd_CH_AMBIENT, 'cicadas', 0.22 * duck * snd__master)
+        else:
+            snd_stop(snd_CH_AMBIENT)
 
     def update_death(self):
         """The three seconds you are not playing.
@@ -9483,6 +10081,11 @@ class Game:
             self.busted_flash -= 1
         if self.wasted_flash > 0:
             self.wasted_flash -= 1
+        if snd__enabled:
+            snd_stop(snd_CH_ENGINE_A)
+            snd_stop(snd_CH_ENGINE_B)
+            snd_stop(snd_CH_TYRES)
+            snd_stop(snd_CH_SIREN)
         if self.death_timer <= 0:
             self.finish_death()
 
@@ -9603,6 +10206,9 @@ class Game:
                 kb = kb.normalize() * mag if kb.length() > 0 else radial * mag
                 if speed >= SPLAT_SPEED:
                     # Hit at real speed: they do not get back up.
+                    self.play_impact(ped.rect.center, speed, gap=3)
+                    self.play_sound(f'yell{self.frame % 4}', ped.rect.center,
+                                    vol=0.55, gap=10)
                     self.kick(1.3 + min(3.0, speed * 0.28))
                     self.splatter_ped(ped, kb)
                     continue
@@ -9653,6 +10259,7 @@ class Game:
                     self.kick(min(5.0, speed * 0.55), freeze=1 if speed > 7.5 else 0)
                     self.spawn_burst(car.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
+                    self.play_impact(car.rect.center, speed)
                     self.driving.damage(speed * 0.7 * self.grub_self_ram())
                     car.damage(speed * 1.6 * self.grub_ram_scale())
         for cop in self.police:
@@ -9663,6 +10270,7 @@ class Game:
                     self.kick(min(5.0, speed * 0.55))
                     self.spawn_burst(cop.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
+                    self.play_impact(cop.rect.center, speed)
                     self.driving.damage(speed * 0.6 * self.grub_self_ram())
                     cop.damage(speed * 1.3 * self.grub_ram_scale())
 
