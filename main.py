@@ -5704,14 +5704,123 @@ def lm__bake_brewery(w, h):
 # --------------------------------------------------------------------------
 # 4. FOREST PARK
 # --------------------------------------------------------------------------
-def lm__bake_forest_park(w, h):
-    """Forest Park, 1326 acres.
+def lm__fp_basin(s, w, h, bcx, bcy, bw2, bh2):
+    """The Emerson Grand Basin: coping, jets, plumes and the cascades.
 
-    Research: the Emerson Grand Basin (long formal basin with fountains) at
-    the foot of Art Hill, the Cass Gilbert Palace of Fine Arts (Saint Louis
-    Art Museum) crowning the hill; Post-Dispatch Lake and connected lagoons
-    with wooded islands north/east; 36 holes of golf with bunkers on the
-    west; The Muny's fan of open-air seating; wooded edges and a ring road.
+    The old version was one flat blue ellipse with eight 3px dots on it, so
+    the single most photographed thing in Forest Park read as a pond. It now
+    gets a limestone coping ring, a proper centre jet with a plume, a ring of
+    smaller jets, and the stepped cascades climbing north toward Art Hill.
+    """
+    ring = []
+    for a in lm__lin(0, math.pi * 2, 42):
+        ring.append((bcx + math.cos(a) * bw2, bcy + math.sin(a) * bh2))
+    # cast shadow, then the stone coping, then the water inside it
+    lm__poly(s, lm_SHADOW, [(px, py + 4) for (px, py) in ring])
+    lm__poly(s, lm_LIMESTONE, ring)
+    lm__poly(s, lm_LIMESTONE_DK, ring, 2)
+    inner = [(bcx + (px - bcx) * 0.90, bcy + (py - bcy) * 0.80) for (px, py) in ring]
+    lm__water_poly(s, inner, 103, lm_WATER_DK)
+
+    # jets: a tall centre plume flanked by a row either side
+    def jet(jx, jy, size):
+        pygame.draw.circle(s, lm_WATER_LT, (int(jx), int(jy)), size + 3, 1)
+        lm__r(s, (196, 216, 226), jx - 1, jy - size * 2, 2, size * 2)
+        pygame.draw.circle(s, (214, 228, 234), (int(jx), int(jy - size * 2)), size)
+        pygame.draw.circle(s, (238, 246, 248), (int(jx), int(jy - size * 2 - 1)),
+                           max(1, size // 2))
+
+    jet(bcx, bcy, 6)
+    span = bw2 * 0.72
+    for i in range(-3, 4):
+        if i == 0:
+            continue
+        jet(bcx + i * span / 3.0, bcy + (2 if i % 2 else -2), 3)
+
+    # the cascades: stepped basins stepping up the hill to the north
+    casc_top = bcy - bh2 - 6
+    for i in range(5):
+        cw = bw2 * (0.40 - i * 0.055)
+        cy = casc_top - i * 15
+        lm__r(s, lm_SHADOW, bcx - cw, cy - 8, cw * 2, 12)
+        lm__r(s, lm_LIMESTONE, bcx - cw, cy - 10, cw * 2, 12)
+        lm__r(s, lm_WATER_LT, bcx - cw + 3, cy - 8, cw * 2 - 6, 6)
+        lm__r(s, lm_WATER, bcx - cw + 3, cy - 5, cw * 2 - 6, 3)
+        pygame.draw.rect(s, lm_LIMESTONE_DK,
+                         (int(bcx - cw), int(cy - 10), int(cw * 2), 12), 1)
+
+    # pergola pavilions flanking the basin, the pair everyone walks between
+    for side in (-1, 1):
+        px = bcx + side * (bw2 + 26)
+        lm__r(s, lm_SHADOW, px - 12, bcy - 16, 26, 36)
+        lm__r(s, lm_LIMESTONE, px - 14, bcy - 18, 26, 36)
+        pygame.draw.rect(s, lm_LIMESTONE_DK, (int(px - 14), int(bcy - 18), 26, 36), 1)
+        for cy2 in range(int(bcy - 14), int(bcy + 14), 8):
+            lm__r(s, lm_LIMESTONE_DK, px - 11, cy2, 4, 5)
+            lm__r(s, lm_LIMESTONE_DK, px + 4, cy2, 4, 5)
+
+
+def lm__fp_apotheosis(s, x, y):
+    """The Apotheosis of St. Louis: the king on his horse at the head of Art
+    Hill, sword raised. Deliberately oversized for its plan footprint - at
+    true scale it is four pixels, and this is the one silhouette everyone who
+    has ever sledded that hill will recognise."""
+    lm__r(s, lm_SHADOW, x - 14, y - 6, 34, 30)              # plinth shadow
+    lm__r(s, lm_LIMESTONE_DK, x - 18, y - 10, 34, 30)       # plinth
+    lm__r(s, lm_LIMESTONE, x - 16, y - 8, 30, 26)
+    pygame.draw.rect(s, lm_OUTLINE, (int(x - 18), int(y - 10), 34, 30), 1)
+    lm__r(s, lm_LIMESTONE_DK, x - 21, y + 18, 40, 5)        # base course
+    # horse in plan: a long body with a raised head, in weathered bronze
+    lm__r(s, lm_VERDIGRIS_DK, x - 10, y - 2, 20, 13)
+    lm__r(s, lm_VERDIGRIS, x - 9, y - 3, 17, 11)
+    lm__r(s, lm_VERDIGRIS_DK, x - 3, y - 12, 7, 11)         # neck
+    lm__r(s, lm_VERDIGRIS, x - 2, y - 11, 5, 9)
+    lm__r(s, lm_VERDIGRIS_DK, x - 2, y - 17, 5, 6)          # head
+    lm__r(s, lm_VERDIGRIS, x - 2, y - 1, 5, 5)              # rider
+    lm__r(s, (196, 224, 206), x + 4, y - 14, 2, 14)         # the raised sword
+    pygame.draw.rect(s, lm_OUTLINE, (int(x - 10), int(y - 2), 20, 13), 1)
+
+
+def lm__fp_jewel_box(s, x, y):
+    """The Jewel Box: a stepped glasshouse of five descending glazed tiers.
+    Nothing else in the park looks anything like it from above."""
+    lm__r(s, lm_SHADOW, x - 26, y - 14, 60, 36)
+    for i, (iw, ih) in enumerate(((34, 30), (26, 24), (18, 18))):
+        gx, gy = x - iw / 2, y - ih / 2
+        lm__r(s, (150, 176, 178), gx, gy, iw, ih)
+        pygame.draw.rect(s, lm_STEEL_LO, (int(gx), int(gy), int(iw), int(ih)), 1)
+        for mx in range(int(gx) + 4, int(gx + iw) - 1, 5):    # glazing bars
+            lm__r(s, (108, 138, 142), mx, gy + 1, 1, ih - 2)
+        lm__r(s, (196, 214, 214), gx + 2, gy + 2, iw - 4, 2)  # highlight
+    lm__r(s, lm_LIMESTONE, x - 5, y + 15, 10, 6)              # entry porch
+
+
+def lm__fp_flight_cage(s, x, y):
+    """The 1904 World's Fair Flight Cage at the Zoo: a vast wire-mesh barrel
+    vault. Reads as a lattice dome ringed by aviary paths."""
+    pygame.draw.circle(s, lm_SHADOW, (int(x + 3), int(y + 4)), 30)
+    pygame.draw.circle(s, (86, 104, 78), (int(x), int(y)), 30)
+    pygame.draw.circle(s, lm_STEEL_LO, (int(x), int(y)), 30, 2)
+    for a in lm__lin(0, math.pi * 2, 14):                     # meridian wires
+        lm__line(s, lm_STEEL, (x, y), (x + math.cos(a) * 29, y + math.sin(a) * 29), 1)
+    for rr in (11, 20, 27):                                   # hoop wires
+        pygame.draw.circle(s, lm_STEEL, (int(x), int(y)), rr, 1)
+    pygame.draw.circle(s, (60, 82, 58), (int(x), int(y)), 8)  # planting inside
+    pygame.draw.circle(s, lm_WATER_DK, (int(x - 5), int(y + 4)), 4)
+
+
+def lm__bake_forest_park(w, h):
+    """Forest Park, 1326 acres - bigger than Central Park, and St. Louis will
+    tell you so unprompted.
+
+    Research, roughly north-up as the park actually sits: the Emerson Grand
+    Basin with its cascades at the foot of Art Hill; the Cass Gilbert Palace
+    of Fine Arts (Saint Louis Art Museum) crowning the hill with the
+    Apotheosis of St. Louis out front; Post-Dispatch Lake and the Boathouse
+    east; the Muny's fan of open-air seating north-east; the Saint Louis Zoo
+    and its 1904 Flight Cage south-west of the museum; the Jewel Box down in
+    the south-east; the World's Fair Pavilion on Government Hill; golf on the
+    west; a wooded rim and the ring road all the way round.
     """
     s = lm__new(w, h)
     lm__fill_mottle(s, w, h, lm_GRASS, (lm_GRASS_DK, lm_GRASS_LT), 101, 8, 5)
@@ -5726,104 +5835,171 @@ def lm__bake_forest_park(w, h):
     pygame.draw.ellipse(s, lm_GRASS, ring.inflate(-26, -26))
     _fill_inside = ring.inflate(-26, -26)
     lm__mottle_rect(s, (_fill_inside.x, _fill_inside.y, _fill_inside.w, _fill_inside.h),
-                 (lm_GRASS_DK, lm_GRASS_LT), 102, 8, 6)
+                    (lm_GRASS_DK, lm_GRASS_LT), 102, 8, 6)
 
-    # ---- Grand Basin + Art Hill + Art Museum --------------------------------
-    bcx, bcy = w * 0.42, h * 0.545
-    bw2, bh2 = w * 0.20, h * 0.055
-    basin = []
-    for a in lm__lin(0, math.pi * 2, 30):
-        basin.append((bcx + math.cos(a) * bw2, bcy + math.sin(a) * bh2))
-    lm__poly(s, lm_CONCRETE, [(px, py + 3) for (px, py) in basin])
-    lm__poly(s, lm_CONCRETE_LT, basin)
-    inner = [(bcx + (px - bcx) * 0.90, bcy + (py - bcy) * 0.78) for (px, py) in basin]
-    lm__water_poly(s, inner, 103, lm_WATER_DK)
-    for i in range(8):
-        fx = bcx - bw2 * 0.80 + i * (bw2 * 1.60 / 7.0)
-        pygame.draw.circle(s, (140, 168, 184), (int(fx), int(bcy)), 3)
-        pygame.draw.circle(s, lm_WATER_LT, (int(fx), int(bcy)), 5, 1)
+    # ---- Art Hill: terraced turf climbing north from the basin -------------
+    bcx, bcy = w * 0.42, h * 0.565
+    bw2, bh2 = w * 0.185, h * 0.050
+    hill_top = bcy - bh2 - 210
+    # Broad contour bands, each a stop lighter than the last, so the slope
+    # reads as a slope from above. This is the hill the whole city sleds.
+    for i in range(9):
+        f = 1.22 - i * 0.085
+        band = pygame.Rect(int(bcx - bw2 * f), int(hill_top + (8 - i) * 24 - 30),
+                           int(bw2 * 2 * f), 60)
+        pygame.draw.ellipse(s, lm__shade(lm_GRASS, 1.00 + i * 0.045), band)
+        pygame.draw.ellipse(s, lm__shade(lm_GRASS_DK, 1.00 + i * 0.03), band, 1)
 
-    # Art Hill: broad contour bands of open turf climbing to the museum
-    for i in range(6):
-        f = 1.10 - i * 0.13
-        band = pygame.Rect(int(bcx - bw2 * f), int(bcy - bh2 - 16 - i * 22),
-                           int(bw2 * 2 * f), 46)
-        pygame.draw.ellipse(s, lm__shade(lm_GRASS_LT, 1.01 + i * 0.035), band)
-    mus_w, mus_h = min(int(bw2 * 0.95), 240), 78
-    mx, my = int(bcx - mus_w / 2), int(bcy - bh2 - 176)
-    lm__r(s, lm_CONCRETE_DK, mx - 12, my - 8, mus_w + 24, mus_h + 22)
-    pygame.draw.rect(s, lm_GRASS_DK, (mx - 12, my - 8, mus_w + 24, mus_h + 22), 1)
-    # wings either side of a taller central hall
-    lm__block(s, mx, my + 8, mus_w * 0.30, mus_h - 8, lm_LIMESTONE_DK, 4, 7)
-    lm__block(s, mx + mus_w * 0.70, my + 8, mus_w * 0.30, mus_h - 8, lm_LIMESTONE_DK, 4, 7)
-    rf = lm__block(s, mx + mus_w * 0.28, my, mus_w * 0.44, mus_h, lm_LIMESTONE, 5, 9)
-    lm__r(s, lm__shade(lm_LIMESTONE, 0.84), rf.x + 5, rf.y + 5, rf.w - 10, rf.h - 24)
-    pygame.draw.rect(s, lm_OUTLINE, (rf.x + 5, rf.y + 5, rf.w - 10, rf.h - 24), 1)
-    lm__r(s, lm_LIMESTONE_DK, rf.x + 3, rf.bottom - 19, rf.w - 6, 16)
-    for px in range(int(rf.x + 6), int(rf.right - 8), 9):     # portico columns
-        lm__r(s, lm_LIMESTONE, px, rf.bottom - 17, 5, 12)
-        lm__r(s, lm_SHADOW, px + 5, rf.bottom - 15, 3, 12)
-    pygame.draw.rect(s, lm_OUTLINE, (int(rf.x + 3), int(rf.bottom - 19),
-                                  int(rf.w - 6), 16), 1)
-    # the grand stair and allee down the hill to the basin
-    lm__thick_path(s, [(bcx, my + mus_h + 8), (bcx, bcy - bh2 - 6)], 11,
-                lm_GRAVEL, lm_GRAVEL_DK)
-    for yy in range(int(my + mus_h + 10), int(bcy - bh2 - 8), 9):
-        lm__r(s, lm_GRAVEL_DK, bcx - 5, yy, 11, 2)
+    # ---- Saint Louis Art Museum: Cass Gilbert, limestone, pedimented -------
+    mus_w = max(120, min(int(bw2 * 1.35), 300))
+    mus_h = 96
+    mx, my = int(bcx - mus_w / 2), int(hill_top - 96)
+    lm__r(s, lm_SHADOW, mx - 8, my + 6, mus_w + 20, mus_h + 20)
+    lm__r(s, lm_CONCRETE_DK, mx - 14, my - 10, mus_w + 28, mus_h + 26)   # terrace
+    pygame.draw.rect(s, lm_LIMESTONE_DK, (mx - 14, my - 10, mus_w + 28, mus_h + 26), 2)
+    # long wings either side of a taller central hall
+    lm__block(s, mx, my + 14, mus_w * 0.31, mus_h - 14, lm_LIMESTONE_DK, 4, 6)
+    lm__block(s, mx + mus_w * 0.69, my + 14, mus_w * 0.31, mus_h - 14,
+              lm_LIMESTONE_DK, 4, 6)
+    rf = lm__block(s, mx + mus_w * 0.28, my, mus_w * 0.44, mus_h, lm_LIMESTONE, 5, 8)
+    lm__r(s, lm__shade(lm_LIMESTONE, 0.86), rf.x + 6, rf.y + 6, rf.w - 12, rf.h - 30)
+    pygame.draw.rect(s, lm_OUTLINE, (rf.x + 6, rf.y + 6, rf.w - 12, rf.h - 30), 1)
+    # the pediment and the three great arches of the south portico
+    lm__r(s, lm_LIMESTONE_DK, rf.x + 2, rf.bottom - 24, rf.w - 4, 20)
+    for k in range(3):
+        ax = rf.x + 6 + k * (rf.w - 12) / 3.0
+        aw = (rf.w - 12) / 3.0 - 5
+        lm__r(s, lm_SHADOW, ax, rf.bottom - 21, aw, 15)
+        pygame.draw.arc(s, lm_LIMESTONE,
+                        (int(ax), int(rf.bottom - 26), int(aw), 20),
+                        0.0, math.pi, 2)
+    pygame.draw.rect(s, lm_OUTLINE, (rf.x + 2, rf.bottom - 24, rf.w - 4, 20), 1)
 
-    # ---- Post-Dispatch Lake, lagoons and channels ---------------------------
-    lake = lm__blob(w * 0.695, h * 0.61, w * 0.115, h * 0.115, 104, 26, 0.10)
+    # the grand allee and stair running down the hill to the basin
+    lm__thick_path(s, [(bcx, rf.bottom + 40), (bcx, bcy - bh2 - 86)], 15,
+                   lm_GRAVEL, lm_GRAVEL_DK)
+    for yy in range(int(rf.bottom + 42), int(bcy - bh2 - 88), 8):
+        lm__r(s, lm_GRAVEL_DK, bcx - 7, yy, 15, 2)
+    # the king on his horse, on the terrace at the head of the stair
+    lm__fp_apotheosis(s, bcx, rf.bottom + 26)
+
+    # ---- the Grand Basin ---------------------------------------------------
+    lm__fp_basin(s, w, h, bcx, bcy, bw2, bh2)
+
+    # ---- Post-Dispatch Lake, the Boathouse, lagoons ------------------------
+    lake = lm__blob(w * 0.755, h * 0.615, w * 0.112, h * 0.112, 104, 26, 0.10)
     lm__poly(s, lm_GRAVEL_DK, [(px + 2, py + 2) for (px, py) in lake])
     lm__water_poly(s, lake, 105, lm_WATER_DK)
-    isl = lm__blob(w * 0.705, h * 0.595, w * 0.030, h * 0.032, 106, 14, 0.16)
+    isl = lm__blob(w * 0.765, h * 0.600, w * 0.030, h * 0.032, 106, 14, 0.16)
     lm__poly(s, lm_GRASS_DK, isl)
     lm__poly(s, lm_OUTLINE, isl, 1)
     for k in range(4):
-        lm__tree(s, w * 0.705 + (k % 2) * 14 - 7, h * 0.595 + (k // 2) * 13 - 6, 7, 107 + k)
-    lag = lm__blob(w * 0.20, h * 0.745, w * 0.075, h * 0.055, 108, 22, 0.12)
+        lm__tree(s, w * 0.765 + (k % 2) * 14 - 7, h * 0.600 + (k // 2) * 13 - 6, 7, 107 + k)
+    # the Boathouse and its dock of hire boats on the west shore
+    bhx, bhy = w * 0.672, h * 0.628
+    lm__r(s, lm_SHADOW, bhx - 20, bhy - 10, 46, 26)
+    lm__block(s, bhx - 24, bhy - 14, 46, 26, (118, 82, 60), 4, 0)
+    lm__r(s, lm_TAR_LT, bhx + 22, bhy - 4, 16, 4)                  # the dock
+    for k in range(4):
+        lm__r(s, (188, 176, 150), bhx + 26 + (k % 2) * 9, bhy + 2 + k * 5, 8, 3)
+    lag = lm__blob(w * 0.125, h * 0.690, w * 0.068, h * 0.050, 108, 22, 0.12)
     lm__water_poly(s, lag, 109, lm_WATER_DK)
-    lag2 = lm__blob(w * 0.545, h * 0.800, w * 0.055, h * 0.042, 110, 20, 0.12)
+    lag2 = lm__blob(w * 0.560, h * 0.815, w * 0.055, h * 0.042, 110, 20, 0.12)
     lm__water_poly(s, lag2, 111, lm_WATER_DK)
-    lm__thick_path(s, [(w * 0.545, h * 0.775), (w * 0.60, h * 0.72),
-                    (w * 0.625, h * 0.675)], 9, lm_WATER, lm_WATER_DK)
+    lm__thick_path(s, [(w * 0.560, h * 0.790), (w * 0.615, h * 0.735),
+                       (w * 0.640, h * 0.690)], 9, lm_WATER, lm_WATER_DK)
 
     # ---- golf: fairways, bunkers, greens ------------------------------------
-    for i, (fx, fy, frx, fry) in enumerate(((0.165, 0.26, 0.085, 0.055),
-                                            (0.30, 0.185, 0.070, 0.042),
-                                            (0.155, 0.44, 0.065, 0.045))):
+    for i, (fx, fy, frx, fry) in enumerate(((0.150, 0.235, 0.080, 0.050),
+                                            (0.285, 0.165, 0.066, 0.040),
+                                            (0.140, 0.410, 0.062, 0.042))):
         fair = lm__blob(w * fx, h * fy, w * frx, h * fry, 112 + i, 18, 0.20)
-        lm__poly(s, lm__shade(lm_GRASS_LT, 1.06), fair)
+        lm__poly(s, lm__shade(lm_GRASS_LT, 1.08), fair)
         lm__poly(s, lm_GRASS_DK, fair, 1)
         gx2, gy2 = w * fx + w * frx * 0.55, h * fy - h * fry * 0.35
-        pygame.draw.circle(s, (96, 118, 66), (int(gx2), int(gy2)), 13)
+        pygame.draw.circle(s, (104, 128, 70), (int(gx2), int(gy2)), 13)
         pygame.draw.circle(s, lm_GRASS_DK, (int(gx2), int(gy2)), 13, 1)
         lm__line(s, (210, 206, 196), (gx2, gy2), (gx2, gy2 - 7), 1)
         lm__r(s, (168, 62, 58), gx2, gy2 - 7, 4, 3)
         bunk = lm__blob(w * fx - w * frx * 0.45, h * fy + h * fry * 0.45, 15, 9,
-                     115 + i, 12, 0.28)
+                        115 + i, 12, 0.28)
         lm__poly(s, lm_SAND, bunk)
         lm__poly(s, lm__shade(lm_SAND, 0.72), bunk, 1)
 
-    # ---- The Muny: fan of open-air seating ----------------------------------
-    mcx, mcy = w * 0.795, h * 0.235
-    lm__r(s, lm_SHADOW, mcx - 40, mcy - 26, 84, 30)
-    lm__r(s, lm_CONCRETE_DK, mcx - 44, mcy - 30, 84, 26)
-    pygame.draw.rect(s, lm_OUTLINE, (int(mcx - 44), int(mcy - 30), 84, 26), 1)
-    for i in range(7):
-        rr = 22 + i * 9
+    # ---- The Muny: fan of open-air seating, stage house at its back --------
+    mcx, mcy = w * 0.800, h * 0.220
+    lm__r(s, lm_SHADOW, mcx - 44, mcy - 34, 92, 34)
+    lm__block(s, mcx - 48, mcy - 38, 92, 32, lm_CONCRETE_DK, 4, 0)
+    lm__r(s, lm_TAR, mcx - 40, mcy - 32, 76, 8)                    # fly tower
+    for i in range(9):
+        rr = 22 + i * 10
         pts = [(mcx + math.cos(a) * rr, mcy + math.sin(a) * rr * 0.92)
-               for a in lm__lin(math.radians(18), math.radians(162), 12)]
-        lm__thick_path(s, pts, 5, lm_SEAT_RED if i % 2 else lm_SEAT_RED_DK)
-    pygame.draw.circle(s, lm_CONCRETE, (int(mcx), int(mcy)), 16)
-    pygame.draw.circle(s, lm_OUTLINE, (int(mcx), int(mcy)), 16, 1)
+               for a in lm__lin(math.radians(16), math.radians(164), 14)]
+        lm__thick_path(s, pts, 6, lm_SEAT_RED if i % 2 else lm_SEAT_RED_DK)
+    pygame.draw.circle(s, lm_CONCRETE, (int(mcx), int(mcy)), 17)   # the stage
+    pygame.draw.circle(s, lm_OUTLINE, (int(mcx), int(mcy)), 17, 1)
+    # the two famous oaks that used to stand in the middle of the seating
+    lm__tree(s, mcx - 30, mcy + 34, 10, 190)
+    lm__tree(s, mcx + 30, mcy + 34, 10, 191)
+
+    # ---- Saint Louis Zoo, south-west of the hill ---------------------------
+    zcx, zcy = w * 0.315, h * 0.795
+    zoo = pygame.Rect(int(zcx - w * 0.105), int(zcy - h * 0.075),
+                      int(w * 0.210), int(h * 0.150))
+    lm__r(s, lm__shade(lm_GRASS, 1.05), zoo.x, zoo.y, zoo.w, zoo.h)
+    pygame.draw.rect(s, lm_GRAVEL_DK, zoo, 2)
+    # enclosures: a grid of paddocks with pools and shelters
+    for i in range(6):
+        n = lm__noise(i, 3, 193)
+        ex = zoo.x + 12 + (i % 3) * (zoo.w - 76) / 3.0
+        ey = zoo.y + 12 + (i // 3) * (zoo.h - 30) / 2.0
+        ew, eh = (zoo.w - 88) / 3.0, (zoo.h - 40) / 2.0
+        lm__r(s, lm__shade((132, 116, 88), 1.0 + (n % 3) * 0.07), ex, ey, ew, eh)
+        pygame.draw.rect(s, lm_GRAVEL_DK, (int(ex), int(ey), int(ew), int(eh)), 1)
+        pygame.draw.circle(s, lm_WATER_DK,
+                           (int(ex + ew * 0.30), int(ey + eh * 0.62)),
+                           max(3, int(min(ew, eh) * 0.16)))
+        lm__r(s, lm_TAR_LT, ex + ew * 0.60, ey + eh * 0.20, ew * 0.26, eh * 0.26)
+        lm__tree(s, ex + ew * 0.82, ey + eh * 0.80, 6, 194 + i)
+    lm__fp_flight_cage(s, zoo.right - 46, zoo.centery)
+    # the zoo entrance and its sculpture group, on the north side facing the
+    # basin - the animals-on-a-plinth group everybody has a photo in front of
+    lm__r(s, lm_LIMESTONE, zoo.centerx - 26, zoo.top - 8, 52, 12)
+    pygame.draw.rect(s, lm_LIMESTONE_DK, (zoo.centerx - 26, zoo.top - 8, 52, 12), 1)
+    lm__r(s, lm_LIMESTONE_DK, zoo.centerx - 9, zoo.top - 20, 18, 12)
+    pygame.draw.circle(s, lm_LIMESTONE, (int(zoo.centerx - 4), int(zoo.top - 18)), 4)
+    pygame.draw.circle(s, lm_LIMESTONE, (int(zoo.centerx + 4), int(zoo.top - 15)), 3)
+
+    # ---- the Jewel Box and the World's Fair Pavilion -----------------------
+    lm__fp_jewel_box(s, w * 0.525, h * 0.800)
+    wfx, wfy = w * 0.610, h * 0.300
+    lm__r(s, lm_SHADOW, wfx - 28, wfy - 12, 62, 30)
+    lm__block(s, wfx - 32, wfy - 16, 62, 28, lm_TERRACOTTA, 4, 0)
+    for cx2 in range(int(wfx - 28), int(wfx + 26), 8):             # colonnade
+        lm__r(s, lm_LIMESTONE, cx2, wfy + 10, 4, 7)
+    lm__r(s, lm_LIMESTONE_DK, wfx - 32, wfy + 16, 62, 3)
 
     # ---- paths -------------------------------------------------------------
-    lm__thick_path(s, lm__bowed(w * 0.10, w * 0.90, h * 0.32, h * 0.09), 6, lm_GRAVEL, lm_GRAVEL_DK)
-    lm__thick_path(s, lm__bowed(w * 0.12, w * 0.88, h * 0.80, -h * 0.10), 6, lm_GRAVEL, lm_GRAVEL_DK)
-    lm__thick_path(s, [(w * 0.42, h * 0.62), (w * 0.46, h * 0.72), (w * 0.58, h * 0.76),
-                    (w * 0.66, h * 0.72)], 6, lm_GRAVEL, lm_GRAVEL_DK)
+    lm__thick_path(s, lm__bowed(w * 0.10, w * 0.90, h * 0.32, h * 0.09), 6,
+                   lm_GRAVEL, lm_GRAVEL_DK)
+    lm__thick_path(s, lm__bowed(w * 0.12, w * 0.88, h * 0.84, -h * 0.10), 6,
+                   lm_GRAVEL, lm_GRAVEL_DK)
+    lm__thick_path(s, [(bcx, h * 0.640), (w * 0.44, h * 0.720),
+                       (w * 0.525, h * 0.755), (w * 0.62, h * 0.735),
+                       (w * 0.68, h * 0.700)], 6, lm_GRAVEL, lm_GRAVEL_DK)
+    # the walk from the basin down to the zoo gate
+    lm__thick_path(s, [(bcx - w * 0.06, h * 0.625), (w * 0.34, h * 0.700),
+                       (w * 0.315, h * 0.716)], 6, lm_GRAVEL, lm_GRAVEL_DK)
 
     # ---- woods -------------------------------------------------------------
+    keep_clear = (
+        (zoo.centerx, zoo.centery, max(zoo.w, zoo.h) * 0.70),
+        (w * 0.525, h * 0.800, 66),
+        (wfx, wfy, 74),
+        (w * 0.755, h * 0.615, w * 0.15),
+        (mcx, mcy, 112),
+        (w * 0.125, h * 0.690, w * 0.10),
+    )
     for r in range(4, int(h / 34) - 1):
         for c in range(3, int(w / 34) - 1):
             n = lm__noise(c, r, 120)
@@ -5832,11 +6008,9 @@ def lm__bake_forest_park(w, h):
             px = c * 34 + (n % 13)
             py = r * 34 + ((n >> 4) % 13)
             # keep the hero features readable
-            if abs(px - bcx) < bw2 + 40 and -300 < (py - bcy) < 190:
+            if abs(px - bcx) < bw2 + 44 and -330 < (py - bcy) < 200:
                 continue
-            if math.hypot(px - w * 0.685, py - h * 0.60) < w * 0.14:
-                continue
-            if math.hypot(px - mcx, py - mcy) < 90:
+            if any(math.hypot(px - kx, py - ky) < kr for (kx, ky, kr) in keep_clear):
                 continue
             lm__tree(s, px, py, 8 + (n >> 9) % 3, 121)
     # dense wooded rim, two ragged rows deep
@@ -5848,14 +6022,14 @@ def lm__bake_forest_park(w, h):
             j = lm__noise(i, d, 126)
             lm__tree(s, 10 + t * (w - 20) + (j % 9) - 4, 11 + d * 17 + ((j >> 5) % 9), 9, 122)
             lm__tree(s, 10 + t * (w - 20) + ((j >> 9) % 9) - 4,
-                  h - 12 - d * 17 - ((j >> 14) % 9), 9, 123)
+                     h - 12 - d * 17 - ((j >> 14) % 9), 9, 123)
     for i in range(n_v):
         t = i / float(n_v - 1)
         for d in range(2):
             j = lm__noise(i, d, 127)
             lm__tree(s, 11 + d * 17 + (j % 9), 10 + t * (h - 20) + ((j >> 5) % 9) - 4, 9, 124)
             lm__tree(s, w - 12 - d * 17 - ((j >> 9) % 9),
-                  10 + t * (h - 20) + ((j >> 14) % 9) - 4, 9, 125)
+                     10 + t * (h - 20) + ((j >> 14) % 9) - 4, 9, 125)
 
     pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
     return s
