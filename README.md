@@ -32,7 +32,8 @@ pip install -r requirements.txt && python main.py
 - **Cars that actually hit each other**: ramming transfers momentum — the struck car gets shoved down the contact normal, yaws away from an off-centre hit, and a parked car knocked at the kerb coasts before it stops. Traffic used to absorb a full-speed broadside without twitching.
 - **Impact juice**: wall slams and collisions land — screen shake, a frame of hitstop on the big ones, a spray of sparks / glass / smoke, a white flash. Floating `+N` / `$N` numbers rise off whatever you just did; big moments get a centre-screen ALL-CAPS callout.
 - **WASTED**: cars (yours, traffic, cop) have health. Enough hits and one smokes, catches fire, then explodes — a blast that scatters the crowd and can chain to the next car. Total your ride and you lose the cargo and the multiplier and wake up on the pavement.
-- **Steal Any Car**: walk up to traffic or a parked car and press `E` to jack it.
+- **Steal Any Car**: walk up to traffic or a parked car and press `E` to jack it — and it matters which one, because every variant now has its own top speed. The Vespa is 60% faster than the refuse truck.
+- **Handbrake turns**: `LSHIFT` (or gamepad `LB`) locks the back wheels. The car carries momentum sideways through a turn now, so you can stab the brake, let the back step out, rotate while keeping your speed, and power out — instead of braking to a quarter of top speed at every single intersection. Slides leave rubber on the road.
 - **Wanted System**: whole-star wanted levels 0–5. Running someone down or shunting traffic at speed earns stars; scraping a kerb does not. Cops spawn *off-screen near you* rather than across the map, chase with whisker-based obstacle avoidance, and have to hold sustained contact (watch the BUSTING bar) before you are taken. Stars only decay once you are genuinely clear of them — parking and waiting no longer works.
 - **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag, run on a **fixed 60 Hz timestep** so the game plays identically at 30, 60 or 240 fps.
 - **Scrolling camera** (it leads the car in its direction of travel so you can see where you're going) **+ HUD radar + a full-screen city map** on `M` / `TAB`, across the full 100×100-tile map, with `F5` / `F9` JSON save/load, an in-game pause / controls screen, and an `F3` debug overlay.
@@ -84,6 +85,7 @@ any time.
 | `S` / `↓` | Move backward / Brake |
 | `A` / `←` | Move left / Steer left |
 | `D` / `→` | Move right / Steer right |
+| `LSHIFT` | **Handbrake** — locks the back wheels so the car rotates on its momentum |
 | `E` | Enter or exit a vehicle |
 | `SPACE` / `F` | Punch, or fire the pistol if you're carrying one |
 | `M` / `TAB` | Full-city map (freezes the sim while it's up) |

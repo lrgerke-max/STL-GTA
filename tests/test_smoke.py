@@ -611,6 +611,18 @@ def test_a_car_slides_along_a_wall_instead_of_dead_stopping():
 # Bring-it-to-life systems: feedback, reactivity, stakes
 # ---------------------------------------------------------------------------
 
+def _open_road_point():
+    """Centre of a road tile with road either side - somewhere a car can
+    actually accelerate without immediately hitting geometry."""
+    for row in range(6, M.MAP_TILES_H - 6):
+        for col in range(6, M.MAP_TILES_W - 6):
+            if all(M.tile_type_at(col + d, row) == M.TILE_ROAD
+                   for d in (-1, 0, 1)):
+                return (col * M.TILE_SIZE + M.TILE_SIZE // 2,
+                        row * M.TILE_SIZE + M.TILE_SIZE // 2)
+    raise AssertionError("no open road anywhere on the map")
+
+
 def _drive(g, variant='sedan'):
     # not appended to g.cars: the driving car is tracked by g.driving, and
     # leaking it into the ambient pool drifts counts across the shared Game.
@@ -1810,6 +1822,120 @@ def test_rate_limiting_stops_a_wall_scrape_becoming_a_drone():
     M.snd_play('impact0', gap=8)
     assert M.snd__last_played.get('impact0') == 20
     M.snd__last_played.clear()
+
+
+# ---------------------------------------------------------------------------
+# Handling: grip, the handbrake, and not burying the car in a wall
+# ---------------------------------------------------------------------------
+
+def test_a_car_carries_momentum_sideways_through_a_turn():
+    """The old model moved the car exactly along its heading every step - no
+    slip angle, no lateral momentum. That is a tank, not a car."""
+    g = game()
+    car = _drive(g)
+    car.rect.center = _open_road_point()
+    car.angle = 0.0
+    car.velocity = 8.0
+    car.vlat = 0.0
+    car._prev_angle = 0.0
+    car.input_steer = 1.0
+    car.input_throttle = 1.0
+    for _ in range(8):
+        car.physics_step()
+    assert car.slip > 0.05, "turning hard at speed produced no slide at all"
+    g.driving = None
+
+
+def test_the_handbrake_lets_the_back_come_round():
+    def slide(handbrake):
+        g = game()
+        car = _drive(g)
+        car.rect.center = _open_road_point()
+        car.angle = 0.0
+        car._prev_angle = 0.0
+        car.velocity = 9.0
+        car.vlat = 0.0
+        car.input_steer = 1.0
+        car.input_throttle = 1.0
+        car.input_handbrake = handbrake
+        peak = 0.0
+        for _ in range(14):
+            car.physics_step()
+            peak = max(peak, car.slip)
+        g.driving = None
+        return peak
+
+    assert slide(True) > slide(False) * 1.15, (
+        "the handbrake has to actually loosen the back end")
+    assert M.LAT_RETAIN_HANDBRAKE > M.LAT_RETAIN
+
+
+def test_grip_pulls_the_car_back_into_line():
+    """A slide has to end on its own, or the car is a hovercraft."""
+    g = game()
+    car = _drive(g)
+    car.rect.center = _open_road_point()
+    car.angle = 0.0
+    car._prev_angle = 0.0
+    car.velocity = 6.0
+    car.vlat = 5.0
+    car.input_steer = 0.0
+    car.input_throttle = 0.0
+    car.input_handbrake = False
+    for _ in range(45):
+        car.physics_step()
+    assert car.vlat == 0.0, f"still sliding sideways at {car.vlat}"
+    g.driving = None
+
+
+def test_traffic_does_not_get_a_handbrake():
+    """input_handbrake is only honoured for the player; ambient traffic
+    sliding around corners would look like the whole city is drunk."""
+    g = game()
+    car = next(c for c in g.cars if c.driver is None)
+    car.driver = None
+    car.input_handbrake = True
+    car.angle = 0.0
+    car._prev_angle = 0.0
+    car.velocity = 6.0
+    car.vlat = 4.0
+    car.input_steer = 0.0
+    car.input_throttle = 0.0
+    before = car.vlat
+    car.physics_step()
+    assert car.vlat < before * M.LAT_RETAIN_HANDBRAKE, (
+        "ambient traffic got the handbrake's loose back end")
+
+
+def test_a_wedged_car_can_always_get_out():
+    """A head-on sets velocity *= -0.18, so a car that ends a step actually
+    inside geometry can never drive or reverse out - both just bounce. 265 of
+    these were measured in one ten-minute session."""
+    g = game()
+    wall = None
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            if M.GAME_MAP[row][col]['collidable']:
+                wall = (col, row)
+                break
+        if wall:
+            break
+    car = M.Car(wall[0] * M.TILE_SIZE + M.TILE_SIZE // 2,
+                wall[1] * M.TILE_SIZE + M.TILE_SIZE // 2)
+    assert M.is_blocked(car.rect), "the test needs the car actually buried"
+    car.unwedge()
+    assert not M.is_blocked(car.rect), "the car is still stuck in the wall"
+
+
+def test_which_car_you_steal_actually_matters():
+    """Every vehicle used to top out at exactly 9.5 under the player - the
+    bus, the refuse truck and the Vespa were the same car."""
+    tops = {}
+    for variant in ('sedan', 'bus', 'garbage_truck', 'vespa', 'box_truck'):
+        tops[variant] = M.Car(2000, 2000, variant=variant).base_max_speed
+    assert tops['vespa'] > tops['sedan'] > tops['box_truck'] > tops['bus']
+    assert tops['bus'] > tops['garbage_truck']
+    assert tops['vespa'] / tops['garbage_truck'] > 1.4, tops
 
 
 def _run_all():

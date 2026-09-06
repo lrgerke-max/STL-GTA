@@ -504,13 +504,35 @@ CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 
 VEHICLE_DEFAULT_W = 34
 VEHICLE_DEFAULT_H = 18
 
+# --- Handling: grip, and the handbrake ------------------------------------
+# The car used to move *exactly* along its heading every step - no slip angle,
+# no lateral momentum, no oversteer. That is a tank, not a car, and it made
+# the one manoeuvre the whole series is built around impossible to express:
+# stab the handbrake, let the back step out, rotate while carrying your
+# momentum, power out of the corner.
+#
+# Measured on the old model: a 90-degree turn from one 64px street into
+# another needs a ~40px radius, which capped corner-entry speed at 2.6 px/step
+# against a top speed of 9.5. You shed 73% of your speed at every single
+# intersection, and that mandatory near-stop is what read as "driving a truck
+# through mud" - not the acceleration, which is fine.
+# How much sideways velocity SURVIVES each step. Higher means less grip, so
+# the handbrake figure is the larger one: locking the back wheels is what lets
+# the slide persist long enough to rotate the car.
+LAT_RETAIN = 0.84           # tyres bite: a slide washes out in ~7 steps
+LAT_RETAIN_HANDBRAKE = 0.965   # back end loose: it keeps going where it was
+HANDBRAKE_STEER = 1.7       # steering authority multiplier while it is held
+HANDBRAKE_DRAG = 0.955      # forward speed bleed while it is held
+SLIP_SCREECH = 1.1          # px/step of lateral travel before the tyres howl
+SKID_MIN_SLIP = 1.6         # ... and before they leave a mark on the road
+
 # Per-variant handling + collider size. Anything absent uses the car defaults
 # (34x18, max_steer 0.045, speed_factor 1.0). speed_factor scales traffic pace.
 VEHICLE_TUNING = {
-    'garbage_truck': dict(w=42, h=18, acceleration=0.15, max_steer=0.034, speed_factor=0.66),
-    'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.72),
-    'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.85),
-    'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.08),
+    'garbage_truck': dict(w=42, h=18, acceleration=0.15, max_steer=0.034, speed_factor=0.72),
+    'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.78),
+    'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.86),
+    'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.15),
 }
 
 # (variant, colour) -> ([sprite] * 24, [shadow] * 24), filled by bake_car_sprites().
@@ -7929,18 +7951,21 @@ class Camera:
         self.center_on(rect)
 
     def center_on(self, rect, lead=(0.0, 0.0)):
-        self.lead_x += (lead[0] - self.lead_x) * 0.08
-        self.lead_y += (lead[1] - self.lead_y) * 0.08
+        self.lead_x += (lead[0] - self.lead_x) * 0.11
+        self.lead_y += (lead[1] - self.lead_y) * 0.11
         self.x = int(rect.centerx + self.lead_x) - SCREEN_WIDTH // 2
         self.y = int(rect.centery + self.lead_y) - SCREEN_HEIGHT // 2
         self.x = max(0, min(MAP_WIDTH - SCREEN_WIDTH, self.x))
         self.y = max(0, min(MAP_HEIGHT - SCREEN_HEIGHT, self.y))
 
     def apply(self, rect):
-        return rect.move(-self.x + int(self.shake_ox), -self.y + int(self.shake_oy))
+        # round(), not int(). Truncation biases every shake offset toward zero,
+        # which is why a maxed-out screen shake read as a 1-2px hum.
+        return rect.move(-self.x + round(self.shake_ox), -self.y + round(self.shake_oy))
 
     def apply_pos(self, pos):
-        return (pos[0] - self.x + int(self.shake_ox), pos[1] - self.y + int(self.shake_oy))
+        return (pos[0] - self.x + round(self.shake_ox),
+                pos[1] - self.y + round(self.shake_oy))
 
     def visible_tile_range(self):
         start_col = max(0, self.x // TILE_SIZE - 1)
@@ -7967,11 +7992,16 @@ class Car:
         self.angle = random.uniform(0, math.tau)
         self.velocity = 0.0
         self.steer_angle = 0.0
-        self.max_speed = 9.5
+        # Every vehicle used to top out at exactly 9.5 under the player -
+        # the bus, the refuse truck, the Vespa and the sedan were the same
+        # car, and only the time taken to reach it differed. speed_factor was
+        # applied by the AI paths and never to you, so which car you stole
+        # made no difference at all. It does now.
+        self.max_speed = 9.5 * tune.get('speed_factor', 1.0)
         # The ceiling this car came with. Power-ups and the police AI both
         # write max_speed, so anything that raises it needs a baseline it can
         # restore rather than compounding on itself every step.
-        self.base_max_speed = 9.5
+        self.base_max_speed = self.max_speed
         self.acceleration = tune.get('acceleration', 0.28)
         self.brake_force = 0.5
         self.drag = 0.965
@@ -7981,6 +8011,11 @@ class Car:
         self.speed_factor = tune.get('speed_factor', 1.0)
         self.input_throttle = 0.0
         self.input_steer = 0.0
+        self.input_handbrake = False
+        # Lateral velocity, in the car's own frame. The tyres scrub it away
+        # every step; how fast they scrub it is the whole handling model.
+        self.vlat = 0.0
+        self.slip = 0.0          # |vlat| last step, for screech and skid marks
         self.driver = None  # 'player', 'police', or None (parked/wandering)
         self.parked = False  # parked cars sit at the kerb until someone gets in
         self.wander_dir = random.choice([0, 1, 2, 3])
@@ -8045,8 +8080,28 @@ class Car:
         if self.input_steer == 0:
             self.steer_angle *= 0.8
 
-        dx = math.cos(self.angle) * self.velocity
-        dy = math.sin(self.angle) * self.velocity
+        # --- grip ---------------------------------------------------------
+        # Rotating the nose does not rotate the car's momentum with it. The
+        # difference between the two is the lateral component, and the tyres
+        # scrub it away over the next few steps - fast with grip, slowly with
+        # the handbrake down, which is what lets the back end come round.
+        hb = bool(self.input_handbrake) and self.driver == 'player'
+        retain = LAT_RETAIN_HANDBRAKE if hb else LAT_RETAIN
+        prev_angle = getattr(self, '_prev_angle', self.angle)
+        turned = (self.angle - prev_angle + math.pi) % math.tau - math.pi
+        self._prev_angle = self.angle
+        # momentum that failed to follow the nose becomes sideways travel
+        self.vlat -= self.velocity * math.sin(turned)
+        self.vlat *= retain
+        if abs(self.vlat) < 0.02:
+            self.vlat = 0.0
+        self.slip = abs(self.vlat)
+        if hb:
+            self.velocity *= HANDBRAKE_DRAG
+
+        fwd_x, fwd_y = math.cos(self.angle), math.sin(self.angle)
+        dx = fwd_x * self.velocity - fwd_y * self.vlat
+        dy = fwd_y * self.velocity + fwd_x * self.vlat
         if self.move_forward_check(dx, dy):
             return False
         # Blocked head-on. Try each axis alone so the car slides along the wall
@@ -8058,9 +8113,35 @@ class Car:
         slid_y = abs(dy) >= 1.0 and self.move_forward_check(0.0, dy)
         if slid_x or slid_y:
             self.velocity *= 0.86      # scrub a little speed on the scrape
+            self.vlat *= 0.5
             return False
         self.velocity *= -0.18         # true head-on: soft stop, faint kickback
+        self.vlat = 0.0
+        self.unwedge()
         return True  # collided
+
+    def unwedge(self):
+        """Last resort when the car has buried itself in geometry.
+
+        A head-on sets velocity *= -0.18, so a car that ends a step actually
+        overlapping a solid tile can never drive or reverse out of it - both
+        just bounce, forever. Measured: 265 of these in one ten-minute
+        session. Nudge toward the nearest free cardinal instead of leaving the
+        player pressing reverse at a wall that will not let go.
+        """
+        if not is_blocked(self.rect):
+            return
+        for step in (6, 12, 20, 30, 44, 60, 80, 104):
+            for ddx, ddy in ((0, -1), (0, 1), (-1, 0), (1, 0),
+                             (-1, -1), (1, -1), (-1, 1), (1, 1)):
+                probe = self.rect.move(ddx * step, ddy * step)
+                if (probe.left >= 0 and probe.top >= 0
+                        and probe.right <= MAP_WIDTH and probe.bottom <= MAP_HEIGHT
+                        and not is_blocked(probe)):
+                    self.rect.topleft = probe.topleft
+                    self.velocity = 0.0
+                    self.vlat = 0.0
+                    return
 
     def at_intersection(self):
         """True when the car is near the middle of a crossing tile.
@@ -8810,7 +8891,8 @@ class Game:
                 self.multiplier += 1
                 rose = True
             if rose:                    # one callout for the landing rung, not each
-                self.add_callout(f"MULTIPLIER X{self.multiplier}", hud_HUD_GOLD, scale=2)
+                self.add_callout(f"MULTIPLIER X{self.multiplier}", hud_HUD_GOLD,
+                                 scale=2, tag='mult')
         return gain
 
     def bump_multiplier(self, rungs):
@@ -8819,7 +8901,7 @@ class Game:
 
     def reset_multiplier(self):
         if self.multiplier > 1:
-            self.add_callout("MULTIPLIER LOST", hud_HUD_RED)
+            self.add_callout("MULTIPLIER LOST", hud_HUD_RED, tag='mult')
         self.multiplier = 1
         self.mult_prog = 0.0
         self.mult_decay = 0
@@ -8839,15 +8921,27 @@ class Game:
                 self.multiplier -= 1
 
     def add_pop(self, world_pos, text, col):
-        self.pops.append({'x': float(world_pos[0]), 'y': float(world_pos[1]),
+        # Three of these used to land on the same pixel and read as mush.
+        # Fanning them out by index is enough to keep them all countable.
+        n = len(self.pops)
+        self.pops.append({'x': float(world_pos[0]) + (n % 3 - 1) * 14,
+                          'y': float(world_pos[1]) - (n % 2) * 9,
                           'text': text, 'col': col, 'born': self.frame})
         if len(self.pops) > 48:
             del self.pops[:len(self.pops) - 48]
 
-    def add_callout(self, text, col=None, ttl=None, scale=2):
+    def add_callout(self, text, col=None, ttl=None, scale=2, tag=None):
+        """Big centre-screen shout.
+
+        `tag` makes a callout *replace* its predecessor instead of queueing
+        behind it. Without it MULTIPLIER X2, X3 and MULTIPLIER LOST all sat on
+        screen at once, three states of one thing shouting over each other.
+        """
+        if tag is not None:
+            self.callouts = [c for c in self.callouts if c.get('tag') != tag]
         self.callouts.append({'text': text, 'col': col or hud_HUD_GOLD,
                               'born': self.frame, 'ttl': ttl or FPS * 2,
-                              'scale': scale})
+                              'scale': scale, 'tag': tag})
         if len(self.callouts) > 3:
             self.callouts.pop(0)
 
@@ -9409,6 +9503,25 @@ class Game:
         if self.job is None and self.job_cooldown <= 0:
             self.job = Job.generate()
 
+    def lay_skid_marks(self):
+        """Two dark stripes under the back wheels whenever the car is sliding.
+
+        The decal system and the tyre-grime road art were already here; this
+        is what makes the city *record* your driving, which is exactly the
+        reward a handbrake needs in order to be worth pressing.
+        """
+        car = self.driving
+        if car is None or car.slip < SKID_MIN_SLIP:
+            return
+        if self.frame % 2:
+            return
+        back = -math.cos(car.angle) * 11, -math.sin(car.angle) * 11
+        side = -math.sin(car.angle) * 6, math.cos(car.angle) * 6
+        for sgn in (-1, 1):
+            self.add_decal((car.rect.centerx + back[0] + side[0] * sgn,
+                            car.rect.centery + back[1] + side[1] * sgn),
+                           'skid', 0.34)
+
     def check_roadkill_risk(self):
         """On foot, a car doing real speed that hits you can put you down.
 
@@ -9625,6 +9738,16 @@ class Game:
         if key is not None:
             self.handle_keydown(key)
 
+    def pad_handbrake(self):
+        """LB is the handbrake. It sits under the left index finger, which is
+        where every driving game in the last thirty years has put it."""
+        if self.pad is None:
+            return False
+        try:
+            return bool(self.pad.get_button(PAD_LB))
+        except pygame.error:
+            return False
+
     def apply_pad_driving(self, throttle, steer):
         """Right trigger accelerates, left brakes/reverses, left stick steers.
         A / B stand in on a pad whose triggers are digital."""
@@ -9708,6 +9831,14 @@ class Game:
                 steer += 1.0
             if self.pad is not None:
                 throttle, steer = self.apply_pad_driving(throttle, steer)
+            hb = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+            if self.pad is not None:
+                hb = hb or self.pad_handbrake()
+            self.driving.input_handbrake = bool(hb)
+            if hb:
+                # More lock while the back is loose, so the rotation you paid
+                # for with grip is one you can actually steer.
+                steer *= HANDBRAKE_STEER
             self.driving.input_throttle = max(-1.0, min(1.0, throttle))
             self.driving.input_steer = max(-1.0, min(1.0, steer))
         else:
@@ -9919,11 +10050,17 @@ class Game:
             self.move_player_on_foot()
 
         if self.driving:
+            # The lead was isotropic on a 16:9 buffer, so driving north you
+            # got 0.45s of road ahead against 0.69s driving east - not enough
+            # to react to anything. Scaling the vertical component by the
+            # aspect ratio evens the headroom out at about 0.8s either way.
             v = self.driving.velocity
-            lead = (math.cos(self.driving.angle) * v * 8.0,
-                    math.sin(self.driving.angle) * v * 8.0)
+            aspect = SCREEN_WIDTH / float(SCREEN_HEIGHT)
+            lead = (math.cos(self.driving.angle) * v * 15.0,
+                    math.sin(self.driving.angle) * v * 15.0 * aspect)
         else:
-            lead = (self.player_dir[0] * 26.0, self.player_dir[1] * 26.0)
+            lead = (self.player_dir[0] * 34.0,
+                    self.player_dir[1] * 34.0 * (SCREEN_WIDTH / float(SCREEN_HEIGHT)))
         self.camera.center_on(self.active_rect(), lead)
 
         for car in self.cars:
@@ -9952,6 +10089,7 @@ class Game:
         self.update_grub()
         self.update_bank()
         self.update_dropped_cash()
+        self.lay_skid_marks()
         if self.attack_cd > 0:
             self.attack_cd -= 1
         if self.punch_timer > 0:
@@ -10013,10 +10151,9 @@ class Game:
             else:
                 snd_stop(snd_CH_ENGINE_B)
             # --- tyres: one channel, volume-driven, never re-triggered ----
-            slip = abs(car.steer_angle) / max(0.001, car.max_steer * 2.2) * frac
-            if slip > 0.45:
+            if car.slip > SLIP_SCREECH:
                 snd_loop(snd_CH_TYRES, 'screech',
-                         min(0.45, (slip - 0.45) * 1.4) * snd__master)
+                         min(0.5, (car.slip - SLIP_SCREECH) * 0.22) * snd__master)
             else:
                 snd_stop(snd_CH_TYRES)
         else:
@@ -11006,8 +11143,10 @@ class Game:
         # world + entity passes only. Zero at rest, so it never perturbs the
         # camera-pan test.
         if self.shake > 0.0:
-            self.camera.shake_ox = math.sin(self.frame * 2.7) * self.shake
-            self.camera.shake_oy = math.cos(self.frame * 3.1) * self.shake
+            # sin(frame * 2.7) at 60fps is 25.8Hz - a buzz, not a shake. Just
+            # under 9Hz reads as an impact you can feel.
+            self.camera.shake_ox = math.sin(self.frame * 0.95) * self.shake
+            self.camera.shake_oy = math.cos(self.frame * 1.13) * self.shake
         else:
             self.camera.shake_ox = self.camera.shake_oy = 0.0
         start_col, end_col, start_row, end_row = self.camera.visible_tile_range()
@@ -11078,8 +11217,11 @@ class Game:
         self.draw_pops()
         # White flash on a big hit, one or two frames.
         if self.hit_flash > 0:
+            # A flash should be gone before you know it was there. 27% white
+            # held over six frames was a fog you consciously perceived as a
+            # rendering artefact rather than an impact.
             fl = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
-            fl.fill((255, 255, 255, int(70 * self.hit_flash / 6)))
+            fl.fill((255, 255, 255, min(210, int(210 * self.hit_flash / 2.0))))
             self.screen.blit(fl, (0, 0))
         if self.state == STATE_DEAD:
             # Nothing else draws over a death card. The old build kept the
@@ -11182,6 +11324,7 @@ class Game:
     _DECAL_COLORS = {
         'blood': ((104, 18, 24), (74, 12, 18), (140, 34, 34)),
         'scorch': ((30, 27, 26), (18, 16, 16), (52, 46, 42)),
+        'skid': ((38, 36, 38), (28, 26, 28), (48, 46, 48)),
     }
 
     def draw_decals(self):
@@ -11452,10 +11595,11 @@ class Game:
     # ---------------- overlays ----------------
     PAUSE_LINES = (
         ("WASD / ARROWS", "MOVE OR DRIVE"),
+        ("LSHIFT", "HANDBRAKE"),
         ("E", "ENTER / EXIT VEHICLE"),
         ("SPACE / F", "PUNCH OR SHOOT"),
         ("GAMEPAD", "RT GO  LT BRAKE  A CAR"),
-        ("", "X HIT  START PAUSE"),
+        ("", "LB HANDBRAKE  X HIT"),
         ("M / TAB", "FULL CITY MAP"),
         ("F11", "FULLSCREEN"),
         ("ESC / P", "PAUSE"),
@@ -11743,12 +11887,16 @@ class Game:
         self.draw_grub_strip(right, ry + RADAR_SIZE + 44)
 
         # damage / health bar, bottom left above the toasts
-        hp_frac, hlabel = None, None
+        # Always on. A bar that only appears once you are hurt means you
+        # learn where it lives during the one moment you cannot afford to go
+        # looking for it. DAMAGE also renamed: a bar labelled DAMAGE that
+        # empties as you take damage is backwards.
+        hp_frac = self.player_hp / PLAYER_MAX_HP
+        hlabel = "HEALTH"
         if self.driving is not None:
-            hp_frac, hlabel = self.driving.hp / self.driving.max_hp, "DAMAGE"
-        elif self.player_hp < PLAYER_MAX_HP - 0.5:
-            hp_frac, hlabel = self.player_hp / PLAYER_MAX_HP, "HEALTH"
-        if hp_frac is not None and hp_frac < 0.999:
+            hp_frac = self.driving.hp / self.driving.max_hp
+            hlabel = "CAR"
+        if hp_frac is not None:
             by = SCREEN_HEIGHT - 72
             pygame.draw.rect(self.screen, (30, 30, 38), (12, by, 78, 4))
             hcol = (hud_HUD_GREEN if hp_frac > 0.5
