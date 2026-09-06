@@ -2179,6 +2179,50 @@ def test_the_body_shop_is_not_a_free_button():
     g.driving = None
 
 
+def test_the_grand_basin_is_water_you_have_to_go_round():
+    """It was paint. You could jog straight across the most photographed
+    thing in Forest Park."""
+    wet = [(c, r) for r in range(M.MAP_TILES_H) for c in range(M.MAP_TILES_W)
+           if M.GAME_MAP[r][c]['landmark'] == "The Grand Basin"]
+    assert wet, "the basin is not on the map"
+    for c, r in wet:
+        assert M.GAME_MAP[r][c]['collidable'], f"{c},{r} is walkable water"
+        assert M.GAME_MAP[r][c]['type'] == M.TILE_WATER
+
+
+def test_forest_park_names_the_places_inside_it():
+    named = {M.GAME_MAP[r][c]['landmark']
+             for r in range(M.MAP_TILES_H) for c in range(M.MAP_TILES_W)}
+    for feature in ("The Grand Basin", "Art Hill", "Saint Louis Art Museum",
+                    "The Muny", "Saint Louis Zoo", "The Jewel Box"):
+        assert feature in named, f"{feature} claims no tiles"
+    assert "Forest Park" in named, "the park itself was completely eaten"
+
+
+def test_a_feature_never_seals_the_park_off():
+    """Making the basin solid must not cut anything off from the streets."""
+    for (parent, name, fx, fy, fw, fh, solid) in M.LANDMARK_FEATURES:
+        entry = next(e for e in M.LANDMARKS if e[5] == parent)
+        lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
+        open_tiles = [(c, r)
+                      for r in range(ly, ly + lh) for c in range(lx, lx + lw)
+                      if M.GAME_MAP[r][c]['landmark'] == name
+                      and not M.GAME_MAP[r][c]['collidable']]
+        for c, r in open_tiles:
+            assert M.WALK_REACHABLE[r][c], f"{name} at {c},{r} is sealed off"
+
+
+def test_the_hill_paints_its_hydrants():
+    assert 'hydrant_hill' in M.props_PROPS
+    plain = M.props_get('hydrant')
+    painted = M.props_get('hydrant_hill')
+    assert plain.get_size() == painted.get_size()
+    # and they are actually different sprites, not the same one twice
+    assert any(plain.get_at((x, y)) != painted.get_at((x, y))
+               for x in range(plain.get_width())
+               for y in range(plain.get_height()))
+
+
 def _run_all():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]

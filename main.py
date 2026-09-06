@@ -578,6 +578,25 @@ LANDMARKS = [
 # (range(4, MAP_TILES_W, 8)) or they would be a bridge to nowhere.
 RIVER_BRIDGES = (44, 52)
 
+# --- Features inside a landmark -------------------------------------------
+# Forest Park is one landmark, but it contains four or five places a St.
+# Louisan would name separately - and until now they were only paint. You
+# could jog straight across the Emerson Grand Basin. Each of these claims its
+# tiles inside the parent landmark, so it is discoverable in its own right,
+# and the basin is real water you have to go round.
+#
+# Positions are fractions of the parent footprint so they track the baked art
+# rather than being hand-copied tile numbers that silently drift apart.
+# (parent, name, fx, fy, fw, fh, solid)
+LANDMARK_FEATURES = (
+    ("Forest Park", "The Grand Basin", 0.235, 0.515, 0.375, 0.105, True),
+    ("Forest Park", "Art Hill", 0.250, 0.300, 0.345, 0.200, False),
+    ("Forest Park", "Saint Louis Art Museum", 0.330, 0.190, 0.190, 0.105, False),
+    ("Forest Park", "The Muny", 0.720, 0.150, 0.170, 0.160, False),
+    ("Forest Park", "Saint Louis Zoo", 0.210, 0.720, 0.210, 0.150, False),
+    ("Forest Park", "The Jewel Box", 0.470, 0.760, 0.110, 0.090, False),
+)
+
 CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
 
 # What ambient traffic / parked cars roll from. The St. Louis service vehicles
@@ -825,8 +844,35 @@ def build_map():
             for x in range(lx, min(lx + lw, MAP_TILES_W)):
                 game_map[y][x] = _landmark_tile(x - lx, y - ly, lw, lh, kind, name, color)
 
+    _stamp_features(game_map)
     _stamp_river(game_map)
     return game_map
+
+
+def _stamp_features(game_map):
+    """Claim the named places inside a landmark, and make the basin wet.
+
+    Only the landmark name and (for water) the collision change; the ground
+    type stays whatever the parent painted, so the baked art still shows
+    through. Run before _compute_reachable so a sealed pocket would be caught.
+    """
+    parents = {e[5]: e for e in LANDMARKS}
+    for (parent, name, fx, fy, fw, fh, solid) in LANDMARK_FEATURES:
+        entry = parents.get(parent)
+        if entry is None:
+            continue
+        lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
+        x0 = lx + int(round(fx * lw))
+        y0 = ly + int(round(fy * lh))
+        x1 = min(lx + lw, x0 + max(1, int(round(fw * lw))))
+        y1 = min(ly + lh, y0 + max(1, int(round(fh * lh))))
+        for y in range(max(0, y0), min(MAP_TILES_H, y1)):
+            for x in range(max(0, x0), min(MAP_TILES_W, x1)):
+                tile = game_map[y][x]
+                tile['landmark'] = name
+                if solid:
+                    tile['type'] = TILE_WATER
+                    tile['collidable'] = True
 
 
 def _stamp_river(game_map):
@@ -3593,7 +3639,8 @@ props_C_SIGNAL_DEAD = (30, 34, 32)
 props_SHADOW_ALPHA = 115              # 45% of 255
 
 props_PROPS = [
-    'streetlight', 'hydrant', 'trafficlight', 'dumpster', 'trashcan',
+    'streetlight', 'hydrant', 'hydrant_hill', 'trafficlight', 'dumpster',
+    'trashcan',
     'bench', 'mailbox', 'phonebooth', 'bus_stop', 'manhole', 'roadcone',
     'planter', 'newsbox',
 ]
@@ -3605,6 +3652,7 @@ props__FLAT = frozenset(('manhole',))
 props__ANCHORS = {
     'streetlight': (4, 10),
     'hydrant': (3, 7),
+    'hydrant_hill': (3, 7),
     'trafficlight': (3, 9),
     'dumpster': (7, 9),
     'trashcan': (3, 7),
@@ -3684,6 +3732,20 @@ def props__build_hydrant():
     props__box(s, 1, 0, 5, 8, props_C_RED)
     props__rect(s, 2, 1, 3, 1, props_C_RED_LIT)
     props__rect(s, 2, 6, 3, 1, props_C_RED_DARK)
+    return s
+
+
+def props__build_hydrant_hill():
+    """The Hill paints its hydrants green, white and red. Every corner. It is
+    the first thing anyone from here notices about the neighbourhood, and it
+    costs one extra sprite."""
+    s = props__surf(7, 8)
+    props__box(s, 0, 2, 7, 3, (30, 86, 48))
+    props__rect(s, 0, 3, 7, 1, (46, 118, 66))
+    props__box(s, 1, 0, 5, 8, (238, 234, 214))
+    props__rect(s, 1, 0, 5, 2, (30, 86, 48))          # green cap
+    props__rect(s, 1, 6, 5, 2, (176, 46, 44))         # red base
+    props__rect(s, 2, 3, 3, 1, (222, 218, 200))
     return s
 
 
@@ -3802,6 +3864,7 @@ def props__build_newsbox():
 props__BUILDERS = {
     'streetlight': props__build_streetlight,
     'hydrant': props__build_hydrant,
+    'hydrant_hill': props__build_hydrant_hill,
     'trafficlight': props__build_trafficlight,
     'dumpster': props__build_dumpster,
     'trashcan': props__build_trashcan,
@@ -11582,6 +11645,12 @@ class Game:
             return
         base = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
         for name, ox, oy in items:
+            # The Hill paints its hydrants green, white and red - every
+            # corner, and it is the first thing anyone from here notices
+            # about the neighbourhood. The props module has no idea what a
+            # neighbourhood is, so the swap happens here at the draw site.
+            if name == 'hydrant' and hood_at(c, r) == 'hill':
+                name = 'hydrant_hill'
             ax, ay = props_anchor_offset(name)
             x, y = base.left + ox + ax, base.top + oy + ay
             shadow = props_get_shadow(name)
