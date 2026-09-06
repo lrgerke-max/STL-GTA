@@ -408,7 +408,7 @@ _AWNING_COLORS = [
 # Landmark districts whose street level should always read as shopfronts.
 _COMMERCIAL_LANDMARKS = {
     "Delmar Loop", "Grand Center Arts District", "Central West End",
-    "The Hill", "Downtown & Busch Stadium",
+    "The Hill", "Downtown", "Soulard Farmers Market",
 }
 
 PLAYER_COLOR = (206, 92, 110)
@@ -435,8 +435,10 @@ CAR_COLORS = [
 # glance - see _landmark_tile().
 LANDMARK_LAYOUT = {
     "Gateway Arch": "arch",              # two leg footings; walk under the span
-    "Downtown & Busch Stadium": "stadium",  # solid bowl, one gate to the field
+    "Busch Stadium": "stadium",          # solid bowl, one gate to the field
     "Ted Drewes": "drivein",             # stand at the back, queue in the lot
+    "Ted Drewes on Grand": "drivein",
+    "Soulard Farmers Market": "market",  # open sheds you walk the aisles of
 }
 LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
 
@@ -448,22 +450,45 @@ LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyar
 # down in the south. Compressed and not to scale, but recognisable in the hand.
 LANDMARKS = [
     # --- East: the river, the Arch, downtown, the ballpark ---
-    (87, 42, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
-    (71, 41, 13, 12, "building", "Downtown & Busch Stadium", (118, 108, 122)),
-    (73, 60, 11, 10, "building", "Soulard & Anheuser-Busch", (150, 92, 58)),
-    # --- Midtown spine, running west from downtown ---
-    (50, 40, 9, 9, "building", "Grand Center Arts District", (108, 78, 136)),
-    (30, 28, 9, 10, "building", "Central West End", (96, 104, 132)),
-    (5, 30, 22, 22, "park", "Forest Park", COLOR_PARK),
+    (82, 40, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
+    # Busch III was sited so the Arch stands over centre field; the two used
+    # to be half a map apart, with downtown fused onto the ballpark.
+    (72, 43, 10, 10, "building", "Busch Stadium", (118, 108, 122)),
+    (63, 32, 12, 10, "building", "Downtown", (104, 100, 112)),
+    # Soulard Market and the brewery were one landmark and are a mile and a
+    # half apart: the market is 7th & Lafayette, the brewery is down past
+    # Arsenal by the river, and you can smell which is which.
+    (72, 54, 7, 5, "building", "Soulard Farmers Market", (168, 120, 72)),
+    (67, 66, 10, 9, "building", "Anheuser-Busch Brewery", (150, 92, 58)),
+    # --- Midtown spine, running north-west from downtown ---
+    # Grand & Washington is most of a mile NORTH of Market Street; Grand
+    # Center used to sit on a line with the ballpark.
+    (53, 31, 9, 9, "building", "Grand Center Arts District", (108, 78, 136)),
+    (32, 28, 9, 10, "building", "Central West End", (96, 104, 132)),
+    (11, 27, 20, 16, "park", "Forest Park", COLOR_PARK),
     # --- North-west ---
-    (9, 8, 15, 6, "building", "Delmar Loop", (150, 84, 76)),
+    # Delmar & Skinker is under a mile north of the park - you can see one
+    # from the other - not marooned in the corner of the map. Its east end
+    # lands above Forest Park's north-west corner, which puts the Delmar
+    # Divide on a real row.
+    (1, 15, 15, 5, "building", "Delmar Loop", (150, 84, 76)),
     # --- South city ---
     # Ted Drewes on Chippewa: a low white custard stand set back behind its
-    # lot, with the queue that never goes away. Small footprint on purpose.
-    (37, 53, 6, 4, "building", "Ted Drewes", (226, 222, 212)),
-    (28, 60, 9, 8, "building", "The Hill", (156, 108, 66)),
-    (42, 63, 14, 13, "park", "Tower Grove Park", COLOR_PARK),
+    # lot, with the queue that never goes away. It was at (37,53) - NORTH of
+    # both The Hill and Tower Grove Park, about three miles from where it
+    # belongs. Nobody in this city has ever driven north to get custard.
+    (5, 77, 6, 4, "building", "Ted Drewes", (226, 222, 212)),
+    # And the other one, on Grand. There are two. This is a fact people will
+    # correct you about.
+    (45, 74, 5, 3, "building", "Ted Drewes on Grand", (226, 222, 212)),
+    (23, 55, 10, 9, "building", "The Hill", (156, 108, 66)),
+    (38, 59, 14, 13, "park", "Tower Grove Park", COLOR_PARK),
 ]
+
+# Road rows carried across the Mississippi. 44 is the Eads, level with the
+# Arch; 52 is the Poplar Street Bridge. Both must be in the road grid
+# (range(4, MAP_TILES_W, 8)) or they would be a bridge to nowhere.
+RIVER_BRIDGES = (44, 52)
 
 CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
 
@@ -646,9 +671,25 @@ def _fill_city_blocks(game_map):
                                           'landmark': None, 'color': brick}
 
 
+def river_bank(row):
+    """West bank of the Mississippi on this row.
+
+    The river used to be three dead-straight tiles at the east edge. At the
+    Arch it is about two thousand feet wide and it bends, so the bank wanders
+    a couple of tiles - enough to stop it reading as a canal - and the water
+    is six tiles instead of three.
+    """
+    bank = MAP_TILES_W - 8
+    if row < 20:
+        bank += 2                    # the northward bend past the Chain of Rocks
+    elif 40 <= row <= 55:
+        bank -= 1                    # the bow the Arch sits inside
+    return bank
+
+
 def build_map():
-    """Generate the tile grid: roads on a grid, river along the east edge,
-    a dense brick block fabric between the roads, landmarks stamped on top."""
+    """Generate the tile grid: roads on a grid, the Mississippi down the east
+    side, a dense brick block fabric between the roads, landmarks on top."""
     game_map = [[None] * MAP_TILES_W for _ in range(MAP_TILES_H)]
     road_lines = set(range(4, MAP_TILES_W, 8))
 
@@ -657,7 +698,8 @@ def build_map():
             if x in road_lines or y in road_lines:
                 tile = {'type': TILE_ROAD, 'collidable': False, 'landmark': None, 'color': COLOR_ROAD}
             elif x >= MAP_TILES_W - 3:
-                tile = {'type': TILE_WATER, 'collidable': True, 'landmark': None, 'color': COLOR_WATER}
+                tile = {'type': TILE_WATER, 'collidable': True,
+                        'landmark': None, 'color': COLOR_WATER}
             else:
                 tile = {'type': TILE_GRASS, 'collidable': False, 'landmark': None, 'color': COLOR_GRASS}
             game_map[y][x] = tile
@@ -668,7 +710,34 @@ def build_map():
         for y in range(ly, min(ly + lh, MAP_TILES_H)):
             for x in range(lx, min(lx + lw, MAP_TILES_W)):
                 game_map[y][x] = _landmark_tile(x - lx, y - ly, lw, lh, kind, name, color)
+
+    _stamp_river(game_map)
     return game_map
+
+
+def _stamp_river(game_map):
+    """Cut the Mississippi in last, over everything else.
+
+    It has to be last. The road grid runs every eighth row clean across the
+    map, so before this the river was crossed by a dozen invisible bridges and
+    the city fabric filled in on top of the water - measured: rows 20 and 60
+    were solid road from the levee to the Illinois bank. Stamping the river
+    over the finished map means exactly two crossings exist, the ones named in
+    RIVER_BRIDGES, and everything else is water.
+    """
+    for y in range(MAP_TILES_H):
+        bank = river_bank(y)
+        for x in range(bank, MAP_TILES_W):
+            if y in RIVER_BRIDGES:
+                game_map[y][x] = {'type': TILE_ROAD, 'collidable': False,
+                                  'landmark': None, 'color': COLOR_ROAD}
+            elif x >= MAP_TILES_W - 2:
+                # The Illinois levee. There is a whole other state over there.
+                game_map[y][x] = {'type': TILE_GRASS, 'collidable': False,
+                                  'landmark': None, 'color': COLOR_GRASS_DARK}
+            else:
+                game_map[y][x] = {'type': TILE_WATER, 'collidable': True,
+                                  'landmark': None, 'color': COLOR_WATER}
 
 
 def _blend(a, b, t):
@@ -690,7 +759,7 @@ SIGN_ANTIQUES = ("ANTIQUES", (92, 56, 34), (238, 214, 150))
 SIGN_CROWN = ("CROWN", (188, 96, 132), (250, 242, 236))
 SIGN_CUSTARD = ("CUSTARD", (176, 46, 44), (246, 240, 226))
 SIGN_RAVIOLI = ("RAVIOLI", (140, 44, 40), (244, 226, 160))
-SIGN_SLINGERS = ("SLINGERS", (52, 66, 80), (226, 236, 240))
+SIGN_SLINGERS = ("EAT-RITE", (52, 66, 80), (226, 236, 240))
 SIGN_BODEGA = ("BODEGA", (166, 96, 40), (244, 232, 200))
 SIGN_FOX = ("FOX", (46, 38, 30), (248, 210, 96))
 SIGN_GROVE = ("THE GROVE", (58, 48, 96), (230, 190, 240))
@@ -701,46 +770,131 @@ SIGN_RECORDS = ("RECORDS", (40, 52, 74), (226, 226, 236))
 # Pork steak and provel used to hang here as shop signs. Neither is a shop -
 # a pork steak is what is on your neighbour's grill on a Sunday and provel is
 # an argument, not a storefront. Both moved to GRUB_KINDS as power-ups. What
-# replaced them are things that really do have signs out front in south city.
+# replaced them are things that really do have signs out front in this city.
 SIGN_FROZEN = ("FROZEN CUS", (176, 46, 44), (246, 240, 226))
 SIGN_TAVERN = ("TAVERN", (58, 62, 74), (226, 226, 216))
 SIGN_HARDWARE = ("HARDWARE", (74, 84, 62), (238, 234, 214))
 SIGN_LAUNDRY = ("LAUNDRY", (86, 106, 122), (236, 240, 244))
 SIGN_BBQ = ("BBQ", (104, 66, 38), (238, 216, 158))
+# --- per-neighbourhood specifics --------------------------------------
+SIGN_VOLPI = ("VOLPI", (140, 44, 40), (244, 226, 160))
+SIGN_GIOIA = ("GIOIA'S", (30, 86, 48), (238, 234, 214))
+SIGN_BOCCE = ("BOCCE", (74, 96, 62), (238, 234, 214))
+SIGN_TIVOLI = ("TIVOLI", (46, 38, 30), (248, 210, 96))
+SIGN_FITZ = ("FITZ'S", (96, 58, 34), (232, 222, 196))
+SIGN_VINTAGE = ("VINTAGE", (58, 48, 96), (230, 190, 240))
+SIGN_PAGEANT = ("PAGEANT", (40, 52, 74), (226, 226, 236))
+SIGN_STRAUBS = ("STRAUBS", (58, 76, 56), (240, 236, 216))
+SIGN_GASLIGHT = ("GASLIGHT", (46, 44, 52), (238, 214, 150))
+SIGN_CAFE = ("CAFE", (92, 56, 34), (238, 214, 150))
+SIGN_POWELL = ("POWELL", (58, 32, 92), (238, 210, 150))
+SIGN_SHELDON = ("SHELDON", (46, 38, 30), (232, 222, 196))
+SIGN_JAZZ = ("JAZZ ST L", (40, 52, 74), (226, 226, 236))
+SIGN_ATOMIC = ("ATOMIC", (58, 48, 96), (240, 190, 220))
+SIGN_RAINBOW = ("RAINBOW", (52, 50, 90), (240, 200, 230))
+SIGN_UNION = ("UNION STN", (78, 74, 72), (232, 226, 210))
+SIGN_CITYMUS = ("CITY MUSM", (150, 66, 58), (244, 230, 200))
+SIGN_MCGURKS = ("MCGURK'S", (34, 74, 52), (232, 230, 214))
+SIGN_MARKET = ("MARKET", (166, 96, 40), (244, 232, 200))
+SIGN_MARDI = ("MARDI GRAS", (86, 52, 118), (240, 214, 110))
+SIGN_SCHNUCKS = ("SCHNUCKS", (52, 66, 96), (232, 236, 244))
+SIGN_MAULLS = ("MAULLS", (104, 66, 38), (238, 216, 158))
+SIGN_GRBIC = ("GRBIC", (64, 76, 92), (234, 234, 226))
+SIGN_CEVAPI = ("CEVAPI", (98, 70, 50), (240, 226, 190))
+SIGN_BEVO = ("BEVO MILL", (140, 96, 48), (244, 232, 200))
+SIGN_MERCADO = ("MERCADO", (168, 88, 44), (250, 240, 200))
+SIGN_TAQUERIA = ("TAQUERIA", (48, 108, 76), (246, 238, 206))
+SIGN_PANADERIA = ("PANADERIA", (188, 132, 52), (56, 40, 28))
+SIGN_CASALOMA = ("CASA LOMA", (58, 54, 62), (238, 230, 214))
+SIGN_TATTOO = ("TATTOO", (40, 40, 48), (226, 226, 236))
+SIGN_CROWNCNDY = ("CROWN CNDY", (188, 96, 132), (250, 242, 236))
+SIGN_CHURCH = ("CHURCH", (60, 58, 72), (238, 234, 220))
+SIGN_BEAUTY = ("BEAUTY", (128, 64, 108), (248, 236, 240))
+SIGN_LIQUOR = ("LIQUOR", (120, 48, 44), (246, 230, 190))
 
+# Nine neighbourhoods, not four. The old four-way split had 'arts' covering
+# the Delmar Loop, the Central West End and Grand Center all at once, which
+# is how the FOX marquee ended up hanging on Delmar - a mile and a half and
+# an entirely different city from where the Fox is.
 HOOD_SIGNS = {
-    # The Hill and south city: Italian-American storefronts
-    'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_IMOS, SIGN_RAVIOLI,
-             SIGN_TAVERN),
-    # Cherokee / Bevo / south-east: antiques, bodegas, custard, corner taverns
-    'south': (SIGN_ANTIQUES, SIGN_BODEGA, SIGN_CUSTARD, SIGN_IMOS, SIGN_BBQ,
-              SIGN_TAVERN, SIGN_HARDWARE),
-    # Loop, Grand Center, the Grove: theatres, records, bars
-    'arts': (SIGN_FOX, SIGN_GROVE, SIGN_RECORDS, SIGN_OYSTER, SIGN_ANTIQUES),
-    # Downtown / Soulard: bars, diners, corner shops
-    'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_CROWN, SIGN_BODEGA,
-                 SIGN_LAUNDRY, SIGN_FROZEN),
+    # The Loop: theatres, records, vintage, Fitz's bottling its own root beer
+    'loop': (SIGN_TIVOLI, SIGN_PAGEANT, SIGN_FITZ, SIGN_VINTAGE, SIGN_RECORDS,
+             SIGN_TATTOO, SIGN_CAFE),
+    # Central West End: Straub's, gaslamps, private places, coffee
+    'cwe': (SIGN_STRAUBS, SIGN_GASLIGHT, SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN,
+            SIGN_IMOS),
+    # Grand Center: the Fox, Powell Hall, the Sheldon. The Fox lives HERE.
+    'grand': (SIGN_FOX, SIGN_POWELL, SIGN_SHELDON, SIGN_JAZZ, SIGN_CAFE),
+    # The Grove, on Manchester - nightlife, and nowhere near Grand Center
+    'grove': (SIGN_GROVE, SIGN_ATOMIC, SIGN_RAINBOW, SIGN_TAVERN, SIGN_TATTOO),
+    # Downtown and the riverfront
+    'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_UNION, SIGN_CITYMUS,
+                 SIGN_LAUNDRY, SIGN_BODEGA, SIGN_IMOS),
+    # Soulard: the market, McGurk's, and one week a year of Mardi Gras
+    'soulard': (SIGN_MCGURKS, SIGN_MARKET, SIGN_MARDI, SIGN_OYSTER,
+                SIGN_TAVERN, SIGN_BODEGA),
+    # The Hill: the real Italian names. Imo's is deliberately NOT here.
+    'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_RAVIOLI, SIGN_VOLPI,
+             SIGN_GIOIA, SIGN_BOCCE),
+    # Cherokee Street: antiques at the east end, mercados at the west
+    'cherokee': (SIGN_ANTIQUES, SIGN_MERCADO, SIGN_TAQUERIA, SIGN_PANADERIA,
+                 SIGN_CASALOMA, SIGN_TATTOO),
+    # North city: Crown Candy, corner stores, churches
+    'north': (SIGN_CROWNCNDY, SIGN_CROWN, SIGN_BBQ, SIGN_CHURCH, SIGN_BEAUTY,
+              SIGN_LIQUOR),
+    # South city: Bevo, the Bosnian corner, Schnucks, Maull's, custard
+    'south': (SIGN_CUSTARD, SIGN_FROZEN, SIGN_SCHNUCKS, SIGN_MAULLS,
+              SIGN_GRBIC, SIGN_CEVAPI, SIGN_BEVO, SIGN_IMOS, SIGN_HARDWARE,
+              SIGN_TAVERN, SIGN_BBQ),
 }
 HOOD_HOUSES = {
-    'hill': ('shotgun', 'shotgun', 'gable_brick', 'gable_brick', 'mansard'),
-    'south': ('shotgun', 'gable_brick', 'gable_brick', 'painted_lady', 'mansard'),
-    'arts': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'loop': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'cwe': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'grand': ('mansard', 'gable_brick', 'painted_lady'),
+    'grove': ('gable_brick', 'gable_brick', 'shotgun', 'mansard'),
     'downtown': ('mansard', 'mansard', 'gable_brick', 'painted_lady'),
+    'soulard': ('gable_brick', 'gable_brick', 'mansard', 'shotgun'),
+    'hill': ('shotgun', 'shotgun', 'gable_brick', 'gable_brick', 'mansard'),
+    'cherokee': ('gable_brick', 'painted_lady', 'shotgun', 'mansard'),
+    'north': ('gable_brick', 'mansard', 'gable_brick', 'shotgun'),
+    'south': ('shotgun', 'gable_brick', 'gable_brick', 'painted_lady', 'mansard'),
 }
 
 
 def hood_at(col, row):
-    """Coarse neighbourhood for a tile, traced onto the same geography the
-    LANDMARKS table uses (north = up, river on the east edge)."""
-    if row >= 56 and col < 40:
-        return 'hill'                     # The Hill / south-west
-    if row >= 52:
-        return 'south'                    # Cherokee, Bevo, Tower Grove south
-    if col < 46 and row < 40:
-        return 'arts'                     # Loop, CWE, Grand Center
-    if col >= 64:
-        return 'downtown'                 # downtown, riverfront, Soulard
-    return 'arts'
+    """Which neighbourhood a tile is in, first match wins.
+
+    Traced onto the same geography the LANDMARKS table uses (north up, river
+    east). The previous version had four regions and did real violence to the
+    map: (80, 20) - north city - came back 'downtown', and (20, 80) - St.
+    Louis Hills, three miles from The Hill - came back 'hill'.
+    """
+    if row < 22 and col >= 46:
+        return 'north'                    # Old North, Hyde Park, the Ville
+    if 12 <= row <= 22 and col < 22:
+        return 'loop'                     # Delmar Loop, University City
+    if row < 26 and col < 46:
+        return 'west'                     # Skinker-DeBaliviere, DeBaliviere
+    if 24 <= row <= 38 and 28 <= col <= 46:
+        return 'cwe'
+    if 26 <= row <= 42 and 48 <= col <= 62:
+        return 'grand'                    # Grand Center, midtown
+    if col >= 62 and row <= 50:
+        return 'downtown'
+    if col >= 62 and row > 50:
+        return 'soulard'                  # Soulard, Benton Park, the brewery
+    if 40 <= row <= 52 and 26 <= col <= 46:
+        return 'grove'                    # Manchester Ave
+    if 50 <= row <= 66 and col <= 36:
+        return 'hill'
+    if 68 <= row <= 80 and 44 <= col <= 70:
+        return 'cherokee'
+    return 'south'                        # Bevo, Carondelet, St. Louis Hills
+
+
+HOOD_SIGNS['west'] = (SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN, SIGN_LAUNDRY,
+                      SIGN_IMOS)
+HOOD_HOUSES['west'] = ('mansard', 'painted_lady', 'gable_brick')
 
 
 def hood_pick_sign(col, row, n):
@@ -813,6 +967,20 @@ def _lm_solid_district(lx, ly, lw, lh):
     return False                          # inner courtyard
 
 
+def _lm_solid_market(lx, ly, lw, lh):
+    """Soulard Market: open-sided sheds with aisles you walk down.
+
+    Open since 1779, and the point of it is that you go *through* it - so the
+    solid mass is the shed bars and everything between them is walkable, with
+    a street apron north and south.
+    """
+    if ly == 0 or ly == lh - 1:
+        return False                      # street apron, both sides
+    if lx == 0 or lx == lw - 1:
+        return False                      # walk round the ends
+    return ly % 2 == 1                    # shed bars; aisles between them
+
+
 def _lm_solid_drivein(lx, ly, lw, lh):
     """A walk-up stand: the building is a bar across the back, the front is an
     open lot you queue and park in. Side aprons stay open so you can get round."""
@@ -826,6 +994,7 @@ _LM_SOLID = {
     "stadium": _lm_solid_stadium,
     "district": _lm_solid_district,
     "drivein": _lm_solid_drivein,
+    "market": _lm_solid_market,
 }
 
 
@@ -5138,11 +5307,12 @@ lm_TILE = 64
 # old abstract top-down blobs did.
 lm_LANDMARK_ART = {
     "Gateway Arch": "arch",
-    "Downtown & Busch Stadium": "stadium",
-    "Soulard & Anheuser-Busch": "brewery",
+    "Busch Stadium": "stadium",
+    "Anheuser-Busch Brewery": "brewery",
     "Forest Park": "forest_park",
     "Tower Grove Park": "tower_grove",
     "Ted Drewes": "ted_drewes",
+    "Ted Drewes on Grand": "ted_drewes",
 }
 
 #: natural footprint of each landmark in tiles, derived from main.LANDMARKS.

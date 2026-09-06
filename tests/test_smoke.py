@@ -960,19 +960,49 @@ def test_shop_signs_fit_on_a_shopfront():
 
 
 def test_neighbourhoods_pick_their_own_character():
-    """The Hill should read Italian, the Loop should read arts - the whole
+    """The Hill should read Italian, the Loop should read Loop - the whole
     point of the hood table is that blocks are not interchangeable."""
-    hill = {M.hood_pick_sign(30, 62, M._noise(30, 62, 71) + i * 7)[0]
-            for i in range(24)}
-    arts = {M.hood_pick_sign(12, 12, M._noise(12, 12, 71) + i * 7)[0]
-            for i in range(24)}
-    assert hill & {"DELI", "PIZZERIA", "BAKERY", "IMO'S"}, hill
+    def signs(col, row):
+        return {M.hood_pick_sign(col, row, M._noise(col, row, 71) + i * 7)[0]
+                for i in range(40)}
+
+    hill = signs(30, 62)
+    loop = signs(12, 17)
+    assert hill & {"DELI", "PIZZERIA", "BAKERY", "VOLPI", "GIOIA'S"}, hill
     assert not (hill & {"FOX", "THE GROVE"}), hill
-    assert arts & {"FOX", "THE GROVE", "RECORDS"}, arts
+    assert loop & {"TIVOLI", "PAGEANT", "FITZ'S", "RECORDS", "VINTAGE"}, loop
     assert M.hood_at(30, 62) == 'hill'
     assert M.hood_at(70, 45) == 'downtown'
     for style in ('shotgun', 'gable_brick', 'mansard', 'painted_lady'):
         assert any(style in pool for pool in M.HOOD_HOUSES.values())
+
+
+def test_the_fox_is_in_grand_center_and_nowhere_else():
+    """Four neighbourhoods meant one 'arts' pool covering the Loop, the CWE
+    and Grand Center at once, so the FOX marquee turned up on Delmar - a mile
+    and a half and an entirely different city from where the Fox is."""
+    for hood, pool in M.HOOD_SIGNS.items():
+        names = {t for (t, _bg, _fg) in pool}
+        if "FOX" in names:
+            assert hood == 'grand', f"the Fox is hanging in {hood}"
+        if "THE GROVE" in names:
+            assert hood == 'grove', f"the Grove is hanging in {hood}"
+    assert M.hood_at(12, 17) == 'loop'
+    assert M.hood_at(56, 34) == 'grand'
+    assert M.hood_at(80, 12) == 'north', "north city is not downtown"
+    assert M.hood_at(20, 84) == 'south', "St Louis Hills is not The Hill"
+
+
+def test_every_hood_has_signs_and_houses():
+    for hood in set(M.HOOD_SIGNS) | set(M.HOOD_HOUSES):
+        assert M.HOOD_SIGNS.get(hood), hood
+        assert M.HOOD_HOUSES.get(hood), hood
+    # and every region hood_at can return is one of them
+    seen = {M.hood_at(c, r)
+            for r in range(0, M.MAP_TILES_H, 3)
+            for c in range(0, M.MAP_TILES_W, 3)}
+    for hood in seen:
+        assert hood in M.HOOD_SIGNS, f"hood_at returns {hood!r} with no signs"
 
 
 def test_ted_drewes_is_its_own_landmark_you_can_walk_up_to():
@@ -1024,9 +1054,49 @@ def test_the_arch_lets_you_walk_under_the_span():
         assert not M.GAME_MAP[ly + row][lx + sx]['collidable']
 
 
+def test_no_two_landmarks_overlap():
+    """Landmarks are stamped in list order, so an overlap silently deletes
+    whatever was underneath - Busch Stadium was found sitting on top of the
+    Gateway Arch's west leg footing, which quietly removed half the Arch."""
+    for i, a in enumerate(M.LANDMARKS):
+        ra = pygame.Rect(a[0], a[1], a[2], a[3])
+        for b in M.LANDMARKS[i + 1:]:
+            rb = pygame.Rect(b[0], b[1], b[2], b[3])
+            assert not ra.colliderect(rb), f"{a[5]} overlaps {b[5]}"
+
+
+def test_ted_drewes_is_south_where_chippewa_is():
+    """It sat north of both The Hill and Tower Grove Park, about three miles
+    from Chippewa. Nobody in this city drives north to get custard."""
+    ted = next(e for e in M.LANDMARKS if e[5] == "Ted Drewes")
+    hill = next(e for e in M.LANDMARKS if e[5] == "The Hill")
+    grove = next(e for e in M.LANDMARKS if e[5] == "Tower Grove Park")
+    assert ted[1] > hill[1] + hill[3], "Ted Drewes must be south of The Hill"
+    assert ted[1] > grove[1] + grove[3], "and south of Tower Grove Park"
+    assert any(e[5] == "Ted Drewes on Grand" for e in M.LANDMARKS), (
+        "there are two of them and people will correct you about it")
+
+
+def test_the_river_is_a_river_and_you_can_cross_it():
+    """It used to be three tiles of dead-straight water at the map edge."""
+    widths = []
+    for row in range(4, M.MAP_TILES_H - 4):
+        if row in M.RIVER_BRIDGES:
+            continue
+        w = sum(1 for c in range(M.MAP_TILES_W)
+                if M.GAME_MAP[row][c]['type'] == M.TILE_WATER)
+        widths.append(w)
+    assert min(widths) >= 4, f"the river narrows to {min(widths)} tiles"
+    assert len(set(widths)) > 1, "a river that never bends is a canal"
+    for row in M.RIVER_BRIDGES:
+        assert all(not M.GAME_MAP[row][c]['collidable']
+                   for c in range(M.river_bank(row), M.MAP_TILES_W)), (
+            f"the bridge on row {row} does not reach Illinois")
+
+
 def test_the_stadium_has_exactly_one_way_in():
     """Solid bowl, open field, a single gate - not a maze and not a plaza."""
-    entry = next(e for e in M.LANDMARKS if e[5] == "Downtown & Busch Stadium")
+    entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
     lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
     cx, cy = int(round(0.355 * lw)), int(round(0.50 * lh))
     field = (lx + cx, ly + cy)
