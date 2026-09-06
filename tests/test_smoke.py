@@ -65,6 +65,9 @@ def reset(g):
     g.hidden = False
     g.hide_timer = 0
     g.hurt_cd = 0
+    g.grub_until = {}
+    for _g in g.grub_pickups:
+        _g['taken'] = 0
     # new feedback / reactivity / stakes state
     g.multiplier = 1
     g.mult_prog = 0.0
@@ -1228,6 +1231,159 @@ def test_a_fresh_star_does_not_conjure_a_cop_on_top_of_you():
     g.cop_dispatch = M.COP_RESPONSE_BY_STAR[1]
     g.update_police()
     assert not g.police, "the call has to go out before a cruiser arrives"
+
+
+# ---------------------------------------------------------------------------
+# St. Louis grub: the power-up layer
+# ---------------------------------------------------------------------------
+
+def test_pork_steak_and_provel_are_not_shops():
+    """The owner's note: neither is a store. Both are food you eat mid-chase."""
+    for pool in M.HOOD_SIGNS.values():
+        for text, _bg, _fg in pool:
+            assert "PORK" not in text, f"{text} is still hanging over a shopfront"
+            assert "PROVEL" not in text, f"{text} is still hanging over a shopfront"
+    assert 'pork_steak' in M.GRUB_KINDS
+    assert 'provel' in M.GRUB_KINDS
+
+
+def test_every_grub_sign_still_fits_a_shopfront():
+    """Replacing the two bad signs must not have broken the 10-char rule."""
+    for pool in M.HOOD_SIGNS.values():
+        for text, _bg, _fg in pool:
+            assert len(text) <= 10, f"{text!r} is {len(text)} chars"
+            assert M.hud_text_width(text, 1) <= 62, text
+
+
+def test_eating_grub_heals_and_starts_a_clock():
+    g = game()
+    g.player_hp = 20.0
+    g.eat_grub('pork_steak', g.player_rect.center)
+    assert g.player_hp > 20.0
+    assert g.grub_active('pork_steak')
+    assert g.grub_seconds_left('pork_steak') > 0
+    # and it expires on its own
+    g.frame = g.grub_until['pork_steak'] + 1
+    assert not g.grub_active('pork_steak')
+
+
+def test_toasted_ravioli_is_a_straight_heal_with_no_timer():
+    g = game()
+    g.player_hp = 10.0
+    g.eat_grub('toasted_rav', g.player_rect.center)
+    assert g.player_hp == 10.0 + M.GRUB_HEAL
+    assert not g.grub_active('toasted_rav'), "t-ravs are not a buff, they are dinner"
+
+
+def test_a_pork_steak_halves_what_a_car_does_to_you():
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+
+    def hit_once(with_steak):
+        reset(g)
+        teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+        car = M.Car(*g.player_rect.center)
+        car.velocity = 7.0
+        g.cars.append(car)
+        try:
+            if with_steak:
+                g.grub_until['pork_steak'] = g.frame + 600
+            g.player_hp = M.PLAYER_MAX_HP
+            g.hurt_cd = 0
+            car.rect.center = g.player_rect.center
+            g.check_roadkill_risk()
+            return M.PLAYER_MAX_HP - g.player_hp
+        finally:
+            if car in g.cars:
+                g.cars.remove(car)
+
+    plain = hit_once(False)
+    fed = hit_once(True)
+    assert plain > 0, "the control hit did nothing"
+    assert fed < plain * 0.75, f"steak took {fed:.1f} vs {plain:.1f} plain"
+
+
+def test_gooey_butter_speeds_you_up_on_foot_and_gives_it_back():
+    g = game()
+    assert g.grub_speed_scale() == 1.0
+    g.grub_until['gooey_butter'] = g.frame + 600
+    assert g.grub_speed_scale() == M.GRUB_SPEED_BONUS
+    g.frame = g.grub_until['gooey_butter'] + 1
+    assert g.grub_speed_scale() == 1.0
+
+
+def test_gooey_butter_does_not_ratchet_a_car_faster_every_step():
+    """max_speed is written every step, so a multiplier applied to the live
+    value instead of the baseline would compound into orbit."""
+    g = game()
+    car = _drive(g)
+    base = car.base_max_speed
+    g.grub_until['gooey_butter'] = g.frame + 600
+    for _ in range(200):
+        g.apply_grub_to_car()
+    assert abs(car.max_speed - base * M.GRUB_SPEED_BONUS) < 0.01, car.max_speed
+    g.grub_until = {}
+    g.apply_grub_to_car()
+    assert abs(car.max_speed - base) < 0.01, "the ceiling must come back down"
+    g.driving = None
+
+
+def test_provel_makes_the_cops_lose_their_grip():
+    g = game()
+    dispatch_cops(g, 3)
+    g.update_police()
+    fast = max(c.max_speed for c in g.police)
+    g.grub_until['provel'] = g.frame + 600
+    g.bust_meter = 0
+    g.update_police()
+    slow = max(c.max_speed for c in g.police)
+    assert slow < fast, f"cops still doing {slow} on a wheel of provel"
+
+
+def test_a_concrete_makes_you_hit_harder():
+    g = game()
+    assert g.grub_ram_scale() == 1.0
+    g.grub_until['concrete'] = g.frame + 600
+    assert g.grub_ram_scale() == M.GRUB_RAM_BONUS
+    assert g.grub_self_ram() < 1.0
+
+
+def test_a_tallboy_doubles_what_chaos_is_worth():
+    g = game()
+    g.score = 0
+    g.mult_prog = 0.0
+    g.add_score(20, g.player_rect.center)
+    plain = g.mult_prog
+    g.mult_prog = 0.0
+    g.grub_until['tallboy'] = g.frame + 600
+    g.add_score(20, g.player_rect.center)
+    assert g.mult_prog > plain * 1.5, f"{g.mult_prog} vs {plain}"
+
+
+def test_grub_spawns_somewhere_you_can_actually_walk():
+    g = game()
+    for item in g.grub_pickups:
+        col = int(item['x']) // M.TILE_SIZE
+        row = int(item['y']) // M.TILE_SIZE
+        assert M.WALK_REACHABLE[row][col], (
+            f"{item['kind']} spawned in a sealed pocket at {col},{row}")
+        assert item['kind'] in M.GRUB_KINDS
+
+
+def test_walking_over_grub_takes_it_and_it_comes_back():
+    g = game()
+    item = g.grub_pickups[0]
+    item['taken'] = 0
+    item['kind'] = 'toasted_rav'
+    teleport(g, (item['x'], item['y']))
+    g.player_hp = 20.0
+    g.update_grub()
+    assert item['taken'], "walked straight over it without eating it"
+    healed = g.player_hp
+    g.frame = item['taken'] + M.GRUB_RESPAWN + 1
+    g.update_grub()
+    assert not item['taken'], "grub never came back"
+    assert healed > 20.0
 
 
 def _run_all():

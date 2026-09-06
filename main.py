@@ -238,6 +238,45 @@ PISTOL_AMMO = 24            # rounds per pickup
 WEAPON_PICKUP_COUNT = 9
 WEAPON_RESPAWN = FPS * 25
 
+# --- St. Louis grub: the power-up layer ----------------------------------
+# Pork steak and provel were shop signs, which is wrong twice over - neither
+# is a shop, and both are much funnier as something you eat off the street
+# mid-chase. These are GTA1 power-ups: walk over one, a clock starts, the
+# screen shouts, and for a few seconds you are different.
+#
+# key -> (label, seconds, hud colour, marker colour, one-line effect)
+GRUB_KINDS = {
+    # The south-city Sunday cookout in a bun. Heals you outright and then
+    # makes you hard to put down - this is the flagship.
+    'pork_steak': ("PORK STEAK", 20, (238, 216, 158), (150, 78, 54),
+                   "half damage taken"),
+    # A basket of t-ravs. Common, cheap, straight heal, no timer.
+    'toasted_rav': ("T-RAVS", 0, (244, 226, 160), (176, 132, 66),
+                    "heals you"),
+    # Sugar rush. Legend says a baker got the proportions wrong and the city
+    # decided to keep it that way.
+    'gooey_butter': ("GOOEY BUTTER", 15, (250, 226, 150), (214, 178, 92),
+                     "faster on foot and on the gas"),
+    # Ted Drewes hands it to you upside down to prove it will not fall out.
+    'concrete': ("CONCRETE", 14, (246, 240, 226), (222, 218, 208),
+                 "you do not go down, and you hit harder"),
+    # Provel: not a cheese, a civic argument. Throw it under a cruiser.
+    'provel': ("PROVEL", 14, (226, 230, 240), (226, 214, 150),
+               "the cops lose their grip"),
+    # A tallboy in a brown bag. Doubles the chaos multiplier's appetite and
+    # makes the wheel wander, which is the joke and the trade.
+    'tallboy': ("TALLBOY", 18, (226, 232, 236), (150, 156, 168),
+                "double chaos, wandering wheel"),
+}
+GRUB_PICKUP_COUNT = 14      # scattered on reachable ground at once
+GRUB_RESPAWN = FPS * 30
+GRUB_RADIUS = 26            # px: how close counts as eating it
+GRUB_HEAL = 42.0            # HP a food pickup restores
+GRUB_SPEED_BONUS = 1.30     # gooey butter: on foot and on the throttle
+GRUB_ARMOUR = 0.5           # pork steak: incoming damage multiplier
+GRUB_RAM_BONUS = 2.0        # concrete: damage you deal by ramming
+GRUB_COP_GRIP = 0.62        # provel: cop max speed while they are sliding
+
 # Every fixed callout / shout string, gathered so the font-coverage test can
 # assert the bitmap font actually has every glyph they need.
 CALLOUT_STRINGS = (
@@ -246,6 +285,9 @@ CALLOUT_STRINGS = (
     "FRENZY DONE", "JACKED!", "12 LEFT", "YOU MONSTER",
     # chase senses + the death card
     "SPOTTED", "SEARCHING", "HIDDEN", "BAIL $250", "WRECK TOTALLED",
+    # St. Louis grub
+    "PORK STEAK", "T-RAVS", "GOOEY BUTTER", "CONCRETE", "PROVEL",
+    "TALLBOY", "+42HP", "PORK STEAK 20",
     "RUN DOWN ON THE STREET", "SCORE 0", "CASH $0", "RUNS 0   STREAK 0",
     "COMING TO UNDER THE ARCH", "RELEASED FROM THE STATION",
 )
@@ -588,7 +630,6 @@ SIGN_OYSTER = ("OYSTER BAR", (58, 32, 92), (238, 158, 226))
 SIGN_ANTIQUES = ("ANTIQUES", (92, 56, 34), (238, 214, 150))
 SIGN_CROWN = ("CROWN", (188, 96, 132), (250, 242, 236))
 SIGN_CUSTARD = ("CUSTARD", (176, 46, 44), (246, 240, 226))
-SIGN_PROVEL = ("PROVEL", (46, 62, 100), (226, 230, 240))
 SIGN_RAVIOLI = ("RAVIOLI", (140, 44, 40), (244, 226, 160))
 SIGN_SLINGERS = ("SLINGERS", (52, 66, 80), (226, 236, 240))
 SIGN_BODEGA = ("BODEGA", (166, 96, 40), (244, 232, 200))
@@ -598,19 +639,28 @@ SIGN_DELI = ("DELI", (58, 76, 56), (240, 236, 216))
 SIGN_PIZZERIA = ("PIZZERIA", (150, 44, 40), (242, 234, 208))
 SIGN_BAKERY = ("BAKERY", (170, 140, 74), (52, 38, 26))
 SIGN_RECORDS = ("RECORDS", (40, 52, 74), (226, 226, 236))
-SIGN_PORK = ("PORK STEAK", (104, 66, 38), (238, 216, 158))
+# Pork steak and provel used to hang here as shop signs. Neither is a shop -
+# a pork steak is what is on your neighbour's grill on a Sunday and provel is
+# an argument, not a storefront. Both moved to GRUB_KINDS as power-ups. What
+# replaced them are things that really do have signs out front in south city.
+SIGN_FROZEN = ("FROZEN CUS", (176, 46, 44), (246, 240, 226))
+SIGN_TAVERN = ("TAVERN", (58, 62, 74), (226, 226, 216))
+SIGN_HARDWARE = ("HARDWARE", (74, 84, 62), (238, 234, 214))
+SIGN_LAUNDRY = ("LAUNDRY", (86, 106, 122), (236, 240, 244))
+SIGN_BBQ = ("BBQ", (104, 66, 38), (238, 216, 158))
 
 HOOD_SIGNS = {
     # The Hill and south city: Italian-American storefronts
     'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_IMOS, SIGN_RAVIOLI,
-             SIGN_PROVEL),
-    # Cherokee / Bevo / south-east: antiques, bodegas, custard
-    'south': (SIGN_ANTIQUES, SIGN_BODEGA, SIGN_CUSTARD, SIGN_IMOS, SIGN_PORK),
+             SIGN_TAVERN),
+    # Cherokee / Bevo / south-east: antiques, bodegas, custard, corner taverns
+    'south': (SIGN_ANTIQUES, SIGN_BODEGA, SIGN_CUSTARD, SIGN_IMOS, SIGN_BBQ,
+              SIGN_TAVERN, SIGN_HARDWARE),
     # Loop, Grand Center, the Grove: theatres, records, bars
     'arts': (SIGN_FOX, SIGN_GROVE, SIGN_RECORDS, SIGN_OYSTER, SIGN_ANTIQUES),
     # Downtown / Soulard: bars, diners, corner shops
     'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_CROWN, SIGN_BODEGA,
-                 SIGN_PROVEL),
+                 SIGN_LAUNDRY, SIGN_FROZEN),
 }
 HOOD_HOUSES = {
     'hill': ('shotgun', 'shotgun', 'gable_brick', 'gable_brick', 'mansard'),
@@ -7037,6 +7087,10 @@ class Car:
         self.velocity = 0.0
         self.steer_angle = 0.0
         self.max_speed = 9.5
+        # The ceiling this car came with. Power-ups and the police AI both
+        # write max_speed, so anything that raises it needs a baseline it can
+        # restore rather than compounding on itself every step.
+        self.base_max_speed = 9.5
         self.acceleration = tune.get('acceleration', 0.28)
         self.brake_force = 0.5
         self.drag = 0.965
@@ -7662,6 +7716,15 @@ class Game:
             wx, wy = random_open_spawn()
             self.weapon_pickups.append({'x': wx, 'y': wy, 'taken': 0})
 
+        # --- grub: the St. Louis power-up layer ---------------------------
+        # key -> sim step the effect expires on. Absent means not running.
+        self.grub_until = {}
+        self.grub_pickups = []
+        for _ in range(GRUB_PICKUP_COUNT):
+            gx, gy = random_open_spawn()
+            self.grub_pickups.append({'x': gx, 'y': gy, 'taken': 0,
+                                      'kind': random.choice(list(GRUB_KINDS))})
+
         # --- jobs ---------------------------------------------------------
         self.job = Job.generate()
         self.jobs_done = 0
@@ -7784,7 +7847,9 @@ class Game:
             self.add_pop(world_pos, f"+{gain}",
                          hud_HUD_GOLD if mult and factor > 1 else hud_HUD_GREEN)
         if mult and base > 0:
-            self.mult_prog += base
+            # A tallboy makes every reckless thing you do count twice toward
+            # the next rung. It also makes you drive like this.
+            self.mult_prog += base * (2.0 if self.grub_active('tallboy') else 1.0)
             self.mult_decay = 0
             rose = False
             while self.mult_prog >= MULT_RUNG and self.multiplier < MULT_MAX:
@@ -8060,6 +8125,70 @@ class Game:
                 self.add_callout("PISTOL", hud_HUD_GOLD, ttl=FPS, scale=1)
                 self.add_pop((w['x'], w['y']), f"+{PISTOL_AMMO}", hud_HUD_GOLD)
 
+    # ---------------- grub: St. Louis power-ups ----------------
+    def grub_active(self, key):
+        """True while that power-up is still running."""
+        return self.grub_until.get(key, 0) > self.frame
+
+    def grub_seconds_left(self, key):
+        return max(0, (self.grub_until.get(key, 0) - self.frame)) // FPS
+
+    def eat_grub(self, kind, world_pos):
+        """Take a food pickup: heal, start its clock, and shout about it."""
+        label, secs, hud_col, _marker, _blurb = GRUB_KINDS[kind]
+        self.player_hp = min(PLAYER_MAX_HP, self.player_hp + GRUB_HEAL)
+        if secs:
+            self.grub_until[kind] = self.frame + secs * FPS
+        self.add_callout(label, hud_col, ttl=FPS, scale=1)
+        self.add_pop(world_pos, f"+{int(GRUB_HEAL)}HP", hud_col)
+        self.kick(1.0)
+        self.spawn_burst(world_pos, 6, ('spark',), 1.4)
+
+    def update_grub(self):
+        """Walk-over pickups on a respawn timer, same shape as the pistols."""
+        pr = self.active_rect()
+        for g in self.grub_pickups:
+            if g['taken']:
+                if self.frame - g['taken'] >= GRUB_RESPAWN:
+                    g['taken'] = 0
+                    # come back somewhere else, as a different thing to eat
+                    g['x'], g['y'] = random_open_spawn()
+                    g['kind'] = random.choice(list(GRUB_KINDS))
+                continue
+            if math.hypot(pr.centerx - g['x'], pr.centery - g['y']) < GRUB_RADIUS:
+                g['taken'] = self.frame
+                self.eat_grub(g['kind'], (g['x'], g['y']))
+
+    def apply_grub_to_car(self):
+        """Push the active food effects into the car you are driving.
+
+        Gooey butter lifts the ceiling; a tallboy makes the wheel wander, so
+        the score bonus it carries is paid for in a car that will not hold a
+        line. Both are restored the moment the clock runs out because the
+        baseline is re-read from the variant tuning every step.
+        """
+        car = self.driving
+        if car is None:
+            return
+        car.max_speed = car.base_max_speed * self.grub_speed_scale()
+        if self.grub_active('tallboy') and abs(car.velocity) > 1.0:
+            # a slow wander, not a twitch: sine on the frame counter
+            car.input_steer = max(-1.0, min(1.0, car.input_steer
+                                            + math.sin(self.frame * 0.06) * 0.34))
+
+    def grub_speed_scale(self):
+        """Gooey butter: a sugar rush you can feel in the legs and the pedal."""
+        return GRUB_SPEED_BONUS if self.grub_active('gooey_butter') else 1.0
+
+    def grub_ram_scale(self):
+        """A Ted Drewes concrete is so thick they hand it to you upside down
+        to prove it will not fall out. Neither will you."""
+        return GRUB_RAM_BONUS if self.grub_active('concrete') else 1.0
+
+    def grub_self_ram(self):
+        """The other half of the concrete: it costs your own paintwork less."""
+        return 0.5 if self.grub_active('concrete') else 1.0
+
     # ---------------- population streaming ----------------
     def travel_heading(self):
         """Direction of travel in radians, or None when barely moving. Used to
@@ -8295,7 +8424,12 @@ class Game:
             speed = abs(car.velocity)
             if speed <= 4.0 or not car.rect.colliderect(pr.inflate(2, 2)):
                 continue
-            self.player_hp -= speed * ROADKILL_DAMAGE
+            damage = speed * ROADKILL_DAMAGE
+            if self.grub_active('pork_steak'):
+                damage *= GRUB_ARMOUR       # a pork steak is structural
+            if self.grub_active('concrete'):
+                damage *= 0.65              # and a concrete does not tip over
+            self.player_hp -= damage
             self.hurt_cd = HURT_IMMUNE_STEPS
             kb = pygame.Vector2(pr.centerx - car.rect.centerx,
                                 pr.centery - car.rect.centery)
@@ -8727,8 +8861,9 @@ class Game:
         float position: brush a building and you slide along it.
         """
         self.sync_player_float()
-        dx = self.player_dir[0] * PLAYER_SPEED
-        dy = self.player_dir[1] * PLAYER_SPEED
+        speed = PLAYER_SPEED * self.grub_speed_scale()
+        dx = self.player_dir[0] * speed
+        dy = self.player_dir[1] * speed
         if dx == 0.0 and dy == 0.0:
             return
         self.player_aim = math.atan2(dy, dx)
@@ -8761,6 +8896,7 @@ class Game:
             self.update_death()
             return
         if self.driving:
+            self.apply_grub_to_car()
             # Scraping a wall used to raise your wanted level. Bouncing off a
             # kerb is not a crime; only the offences in handle_collisions are.
             pre_speed = abs(self.driving.velocity)
@@ -8805,6 +8941,7 @@ class Game:
             self.check_roadkill_risk()
         self.update_bullets()
         self.update_weapon_pickups()
+        self.update_grub()
         if self.attack_cd > 0:
             self.attack_cd -= 1
         if self.punch_timer > 0:
@@ -9015,8 +9152,8 @@ class Game:
                     self.kick(min(5.0, speed * 0.55), freeze=1 if speed > 7.5 else 0)
                     self.spawn_burst(car.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
-                    self.driving.damage(speed * 0.7)
-                    car.damage(speed * 1.6)
+                    self.driving.damage(speed * 0.7 * self.grub_self_ram())
+                    car.damage(speed * 1.6 * self.grub_ram_scale())
         for cop in self.police:
             if self.driving.rect.colliderect(cop.rect):
                 self.shunt(cop, speed)
@@ -9025,8 +9162,8 @@ class Game:
                     self.kick(min(5.0, speed * 0.55))
                     self.spawn_burst(cop.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
-                    self.driving.damage(speed * 0.6)
-                    cop.damage(speed * 1.3)
+                    self.driving.damage(speed * 0.6 * self.grub_self_ram())
+                    cop.damage(speed * 1.3 * self.grub_ram_scale())
 
     def shunt(self, other, speed):
         """Momentum transfer into a rammed car: shove it down the contact
@@ -9154,6 +9291,10 @@ class Game:
         searching = False
         for cop in self.police:
             cop.max_speed = COP_SPEED_BY_STAR[star]
+            if self.grub_active('provel'):
+                # A wheel of provel under a cruiser. It is not a cheese, it is
+                # a lubricant, and everyone from here knows it.
+                cop.max_speed *= GRUB_COP_GRIP
             cop.sight_range = COP_SIGHT * COP_SIGHT_BY_STAR[star]
             if self.cop_can_see(cop, active_c):
                 cop.alert = 'chase'
@@ -9719,6 +9860,7 @@ class Game:
         self.draw_bullets()
         self.draw_fx()
         self.draw_weapon_pickups()
+        self.draw_grub_pickups()
         self.draw_frenzy_icon()
         self.draw_job_marker()
         self.draw_pops()
@@ -9854,6 +9996,70 @@ class Game:
             self.screen.fill((58, 56, 62), (x, y, 12, 7))             # crate
             self.screen.fill((92, 90, 98), (x, y, 12, 2))
             self.screen.fill(hud_HUD_GOLD, (x + 4, y + 2, 4, 3))      # brass
+
+    # Each food is drawn as itself rather than as a generic crate, because
+    # the whole joke only lands if you can tell a pork steak from a concrete
+    # at a glance while doing 9 px a step down Gravois.
+    def _grub_pork_steak(self, x, y):
+        self.screen.fill((92, 48, 34), (x - 7, y - 4, 14, 9))       # the steak
+        self.screen.fill((150, 78, 54), (x - 6, y - 3, 12, 6))
+        self.screen.fill((186, 112, 78), (x - 4, y - 2, 8, 2))      # sauce sheen
+        self.screen.fill((70, 60, 52), (x - 7, y - 1, 14, 1))       # grill mark
+        self.screen.fill((234, 214, 170), (x + 4, y - 5, 4, 3))     # the bone
+
+    def _grub_toasted_rav(self, x, y):
+        self.screen.fill((72, 60, 48), (x - 8, y - 3, 16, 8))       # the basket
+        for i in range(3):
+            self.screen.fill((196, 152, 82), (x - 7 + i * 5, y - 5, 4, 4))
+            self.screen.fill((228, 194, 128), (x - 6 + i * 5, y - 4, 2, 1))
+        self.screen.fill((160, 46, 42), (x - 2, y + 3, 5, 2))       # marinara
+
+    def _grub_gooey_butter(self, x, y):
+        self.screen.fill((188, 150, 88), (x - 7, y - 4, 14, 9))     # the slab
+        self.screen.fill((236, 208, 132), (x - 6, y - 3, 12, 6))
+        self.screen.fill((250, 238, 206), (x - 5, y - 3, 10, 2))    # powder sugar
+        self.screen.fill((248, 246, 240), (x - 3, y - 5, 3, 2))
+
+    def _grub_concrete(self, x, y):
+        self.screen.fill((172, 166, 156), (x - 4, y - 2, 9, 9))     # the cup
+        self.screen.fill((238, 234, 224), (x - 5, y - 6, 11, 5))    # custard
+        self.screen.fill((252, 250, 246), (x - 4, y - 7, 6, 2))
+        self.screen.fill((150, 44, 40), (x + 1, y - 8, 3, 2))       # cherry
+
+    def _grub_provel(self, x, y):
+        self.screen.fill((176, 150, 78), (x - 7, y - 4, 14, 9))     # the wheel
+        self.screen.fill((228, 214, 148), (x - 6, y - 3, 12, 6))
+        for k, (ox, oy) in enumerate(((-3, -1), (1, 0), (3, 2))):   # the holes
+            self.screen.fill((178, 158, 96), (x + ox, y + oy, 2, 2))
+
+    def _grub_tallboy(self, x, y):
+        self.screen.fill((44, 42, 46), (x - 4, y - 8, 9, 14))       # the can
+        self.screen.fill((150, 156, 168), (x - 3, y - 7, 7, 12))
+        self.screen.fill((196, 60, 56), (x - 3, y - 3, 7, 3))       # the band
+        self.screen.fill((226, 230, 236), (x - 3, y - 7, 3, 11))    # highlight
+
+    _GRUB_ART = {
+        'pork_steak': _grub_pork_steak,
+        'toasted_rav': _grub_toasted_rav,
+        'gooey_butter': _grub_gooey_butter,
+        'concrete': _grub_concrete,
+        'provel': _grub_provel,
+        'tallboy': _grub_tallboy,
+    }
+
+    def draw_grub_pickups(self):
+        bob = (self.frame // 7) % 3 - 1
+        for g in self.grub_pickups:
+            if g['taken']:
+                continue
+            sx, sy = self.camera.apply_pos((g['x'], g['y']))
+            if not (-16 < sx < SCREEN_WIDTH + 16 and -16 < sy < SCREEN_HEIGHT + 16):
+                continue
+            x, y = int(sx), int(sy) + bob
+            self.screen.fill((22, 20, 24), (x - 7, y + 6, 15, 3))   # ground shadow
+            art = self._GRUB_ART.get(g['kind'])
+            if art is not None:
+                art(self, x, y)
 
     def draw_punch(self):
         """A two-frame arc where the fist lands, so a swing reads on screen."""
@@ -10115,6 +10321,16 @@ class Game:
         ('hidden', "HIDDEN", hud_HUD_GREEN),
     )
 
+    def draw_grub_strip(self, right, y):
+        """Whatever you last ate, and how long it has left, right-aligned."""
+        for key in GRUB_KINDS:
+            if not self.grub_active(key):
+                continue
+            label, _secs, col, _marker, _blurb = GRUB_KINDS[key]
+            txt = f"{label} {self.grub_seconds_left(key)}"
+            hud_text(self.screen, txt, right - hud_text_width(txt, 1), y, col, True, 1)
+            y += 10
+
     def draw_chase_state(self, right, y, ticks):
         if self.wanted_level <= 0 and not self.hidden:
             return
@@ -10205,6 +10421,12 @@ class Game:
             pygame.draw.circle(self.screen, hud_HUD_RED,
                                (int(rx + self.frenzy_icon[0] * scale),
                                 int(ry + self.frenzy_icon[1] * scale)), 2)
+        for g in self.grub_pickups:
+            if g['taken']:
+                continue
+            marker = GRUB_KINDS[g['kind']][3]
+            self.screen.fill(marker, (int(rx + g['x'] * scale),
+                                      int(ry + g['y'] * scale), 2, 2))
         hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
 
         # chaos multiplier + its progress bar, under the radar
@@ -10224,6 +10446,7 @@ class Game:
 
         self.hud_left_y = self.draw_objective()
         self.draw_bust_meter()
+        self.draw_grub_strip(right, ry + RADAR_SIZE + 44)
 
         # damage / health bar, bottom left above the toasts
         hp_frac, hlabel = None, None
