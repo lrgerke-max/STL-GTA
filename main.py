@@ -223,6 +223,24 @@ ROADKILL_MAX = 30.0         # HP ceiling on a single hit, whatever the speed
 RESPAWN_IMMUNE_STEPS = FPS * 2   # you come to next to live Memorial Drive traffic
 COP_RAMMING_STAR = 4        # below this, cops brake for you instead of mowing
 
+# --- The bank under the Arch ---------------------------------------------
+# Cash you are carrying is not yours yet. Drive or walk under the span of the
+# Gateway Arch and it banks. Die and every unbanked dollar hits the pavement
+# where you died, recoverable for a minute if you dare go back for it.
+#
+# This is the spine the sandbox was missing. Before it, cash arrived from
+# deliveries and left only as bail - and bail is min(cash, cost), so once you
+# were broke, which took about sixty seconds, getting busted was free and the
+# number top-right never moved again for the rest of the session. Now there
+# is a reason to drive somewhere specific, a reason to stop, a reason to be
+# frightened of dying, and a "one more run before I bank" decision every
+# forty-five seconds.
+BANK_RADIUS = 150           # px from the centre of the Arch footprint
+BANK_MIN = 1                # do not spam the callout for nothing
+DROPPED_CASH_LIFE = FPS * 60    # how long your dropped roll waits for you
+DROPPED_CASH_RADIUS = 34
+ARCH_JOB_TARGET = 50000     # banked. The door at the end of the ladder.
+
 # --- Jobs -----------------------------------------------------------------
 # The delivery loop: cash comes from finishing runs, score comes from chaos.
 # Keeping them separate is the whole point - one rewards care, one doesn't.
@@ -259,6 +277,8 @@ PLAYER_HP_REGEN = 0.06      # per step, when not freshly hit
 # Below this closing speed a pedestrian is knocked down and gets up again;
 # at or above it they do not.
 SPLAT_SPEED = 5.2
+# Below this a car-on-pedestrian contact is a bump, not an offence.
+NUDGE_SPEED = 2.5
 DECAL_MAX = 64              # ground stains kept before the oldest is dropped
 
 # --- Combat ---------------------------------------------------------------
@@ -324,6 +344,9 @@ CALLOUT_STRINGS = (
     # St. Louis grub
     "PORK STEAK", "T-RAVS", "GOOEY BUTTER", "CONCRETE", "PROVEL",
     "TALLBOY", "+42HP", "PORK STEAK 20",
+    # the bank under the Arch
+    "BANKED $1200", "GOT IT BACK", "$50000 TO THE ARCH JOB",
+    "THE ARCH JOB IS OPEN", "DROPPED $900 - GO GET IT",
     "RUN DOWN ON THE STREET", "SCORE 0", "CASH $0", "RUNS 0   STREAK 0",
     "COMING TO UNDER THE ARCH", "RELEASED FROM THE STATION",
 )
@@ -7863,7 +7886,9 @@ class Game:
         self.wanted_level = 0
         self.score = 0
         self.best_score = 0
-        self.cash = 200          # seed float so the first bail is survivable
+        self.cash = 200          # on you, and losable; see the bank at the Arch
+        self.banked = 0          # safe. Only banked money counts for the ladder.
+        self.dropped = []        # rolls of cash left where somebody died
         self.discovered = set()
         self.toasts = []
         self.busted_flash = 0
@@ -7976,6 +8001,7 @@ class Game:
             'player': {'x': self.player_rect.centerx, 'y': self.player_rect.centery},
             'score': self.score,
             'cash': self.cash,
+            'banked': self.banked,
             'wanted_level': self.wanted_level,
             'discovered': list(self.discovered),
             'jobs_done': self.jobs_done,
@@ -8004,6 +8030,7 @@ class Game:
             self.player_rect.center = (state['player']['x'], state['player']['y'])
             self.score = state.get('score', 0)
             self.cash = state.get('cash', 0)
+            self.banked = state.get('banked', 0)
             self.wanted_level = min(WANTED_MAX, max(0, int(state.get('wanted_level', 0))))
             self.discovered = set(state.get('discovered', []))
             self.jobs_done = state.get('jobs_done', 0)
@@ -8023,6 +8050,54 @@ class Game:
 
     def active_rect(self):
         return self.driving.rect if self.driving else self.player_rect
+
+    def arch_center(self):
+        """World centre of the Gateway Arch footprint, or the station."""
+        for entry in LANDMARKS:
+            if entry[5] == "Gateway Arch":
+                return ((entry[0] + entry[2] / 2.0) * TILE_SIZE,
+                        (entry[1] + entry[3] / 2.0) * TILE_SIZE)
+        return self.police_station
+
+    def update_bank(self):
+        """Under the span: bank what you are carrying."""
+        if self.cash < BANK_MIN:
+            return
+        ax, ay = self.arch_center()
+        here = self.active_rect().center
+        if math.hypot(here[0] - ax, here[1] - ay) > BANK_RADIUS:
+            return
+        amount = int(self.cash)
+        self.banked += amount
+        self.cash -= amount
+        self.add_callout(f"BANKED ${amount}", hud_HUD_GREEN, scale=2)
+        self.add_pop(here, f"${amount}", hud_HUD_GREEN)
+        left = max(0, ARCH_JOB_TARGET - self.banked)
+        if left:
+            self.add_toast(f"${left} to the Arch job")
+        else:
+            self.add_toast("The Arch job is open. Somebody's waiting.")
+
+    def drop_cash(self, amount, pos):
+        """Leave a roll of cash on the pavement where you went down."""
+        if amount < BANK_MIN:
+            return
+        self.dropped.append({'x': pos[0], 'y': pos[1], 'amount': int(amount),
+                             'born': self.frame})
+
+    def update_dropped_cash(self):
+        pr = self.active_rect()
+        keep = []
+        for d in self.dropped:
+            if self.frame - d['born'] > DROPPED_CASH_LIFE:
+                continue
+            if math.hypot(pr.centerx - d['x'], pr.centery - d['y']) < DROPPED_CASH_RADIUS:
+                self.cash += d['amount']
+                self.add_pop((d['x'], d['y']), f"+${d['amount']}", hud_HUD_GREEN)
+                self.add_callout("GOT IT BACK", hud_HUD_GREEN, scale=1)
+                continue
+            keep.append(d)
+        self.dropped = keep
 
     def arch_respawn_point(self):
         """Under the span of the Gateway Arch: where every life starts.
@@ -8576,9 +8651,21 @@ class Game:
         self.death_kind = kind
         self.death_note = note
         self.death_timer = DEATH_HOLD_STEPS
+        # Getting killed scatters everything you were carrying across the
+        # pavement; getting arrested does not, because they hand your effects
+        # back at the desk minus the bail. That is the whole difference
+        # between the two deaths, and it makes surrendering to a chase a real
+        # decision when you are holding a big roll.
+        lost = 0
+        if kind == 'wasted':
+            lost = int(self.cash)
+            if lost >= BANK_MIN:
+                self.drop_cash(lost, self.active_rect().center)
+                self.cash -= lost
         self.death_stats = {
             'score': self.score,
-            'cash': self.cash,
+            'cash': self.banked,
+            'dropped': lost,
             'jobs': self.jobs_done,
             'streak': self.streak,
             'peak_star': self.peak_star,
@@ -9169,6 +9256,8 @@ class Game:
         self.update_bullets()
         self.update_weapon_pickups()
         self.update_grub()
+        self.update_bank()
+        self.update_dropped_cash()
         if self.attack_cd > 0:
             self.attack_cd -= 1
         if self.punch_timer > 0:
@@ -9358,7 +9447,14 @@ class Game:
                 self.combo += 1
                 self.combo_timer = FPS * 2
                 self.add_score(5 * min(self.combo, 12), ped.rect.center)
-                self.wanted_bump(1, 'pedestrian')
+                # Rolling into somebody in a parking bay is not a crime. This
+                # used to fire at *any* closing speed including 0.0, which
+                # criminalised careful driving: a measured pilot that yielded,
+                # braked and swerved still spent a quarter of a ten-minute
+                # session at 3+ stars and, with JOB_HEAT_LIMIT blocking
+                # pickups above three, completed no deliveries at all.
+                if speed >= NUDGE_SPEED:
+                    self.wanted_bump(1, 'pedestrian')
                 self.kick(1.3 + min(3.0, speed * 0.28))
                 self.spawn_burst(ped.rect.center, 4, ('debris',), 1.8)
                 self.frenzy_hit('ped')
@@ -9692,8 +9788,12 @@ class Game:
             return
         # Bail scales with how hot you were when they took you, so a five-star
         # bust is a real loss and running is worth something.
-        bail = min(self.cash, BAIL_BY_STAR[min(self.peak_star, WANTED_MAX)])
-        self.cash -= bail
+        bail = BAIL_BY_STAR[min(self.peak_star, WANTED_MAX)]
+        from_hand = min(self.cash, bail)
+        self.cash -= from_hand
+        from_bank = min(self.banked, bail - from_hand)
+        self.banked -= from_bank
+        bail = from_hand + from_bank
         self.busted_flash = FPS * 2
         if self.driving:
             self.driving.driver = None
@@ -10193,6 +10293,7 @@ class Game:
         self.draw_fx()
         self.draw_weapon_pickups()
         self.draw_grub_pickups()
+        self.draw_dropped_cash()
         self.draw_foot_police()
         self.draw_frenzy_icon()
         self.draw_job_marker()
@@ -10270,11 +10371,13 @@ class Game:
             chase = st.get('chase', 0) // FPS
             lines = [
                 f"SCORE {st['score']}",
-                f"CASH ${int(st['cash'])}",
+                f"BANKED ${int(st['cash'])}",
                 f"RUNS {st['jobs']}   STREAK {st['streak']}",
                 f"TOP STAR {st.get('peak_star', 0)}   "
                 f"CHASE {chase // 60}:{chase % 60:02d}",
             ]
+            if st.get('dropped'):
+                lines.append(f"DROPPED ${st['dropped']} - GO GET IT")
             y = top + hud_text_height(word, scale) + 24
             for ln in lines:
                 lw = hud_text_width(ln, 1)
@@ -10287,7 +10390,15 @@ class Game:
                      else "BOOKED AT THE JUSTICE CENTER")
             ww = hud_text_width(where, 1)
             hud_text(self.screen, where, (SCREEN_WIDTH - ww) // 2,
-                     SCREEN_HEIGHT - 34, hud_HUD_GOLD, True, 1)
+                     SCREEN_HEIGHT - 34, hud_HUD_GREY_DIM, True, 1)
+            # The compulsion spine, on every card, every time: GTA1's
+            # "$1,000,000 unlocks the next city" in one row.
+            left = max(0, ARCH_JOB_TARGET - self.banked)
+            goal = (f"${left} TO THE ARCH JOB" if left
+                    else "THE ARCH JOB IS OPEN")
+            gw = hud_text_width(goal, 1)
+            hud_text(self.screen, goal, (SCREEN_WIDTH - gw) // 2,
+                     SCREEN_HEIGHT - 22, hud_HUD_GOLD, True, 1)
 
     # ---------------- feedback rendering ----------------
     _DECAL_COLORS = {
@@ -10408,6 +10519,25 @@ class Game:
             art = self._GRUB_ART.get(g['kind'])
             if art is not None:
                 art(self, x, y)
+
+    def draw_dropped_cash(self):
+        """A roll of notes where somebody died, blinking as it goes stale."""
+        for d in self.dropped:
+            age = self.frame - d['born']
+            if age > DROPPED_CASH_LIFE:
+                continue
+            # last five seconds: flash, so you know the clock is running out
+            if age > DROPPED_CASH_LIFE - FPS * 5 and (self.frame // 6) % 2 == 0:
+                continue
+            sx, sy = self.camera.apply_pos((d['x'], d['y']))
+            if not (-16 < sx < SCREEN_WIDTH + 16 and -16 < sy < SCREEN_HEIGHT + 16):
+                continue
+            x, y = int(sx), int(sy) + ((self.frame // 9) % 3 - 1)
+            self.screen.fill((20, 26, 20), (x - 7, y + 4, 15, 3))
+            self.screen.fill((48, 78, 52), (x - 7, y - 4, 14, 8))    # the band
+            self.screen.fill((104, 148, 100), (x - 6, y - 3, 12, 6))
+            self.screen.fill((198, 226, 190), (x - 5, y - 2, 10, 2))
+            self.screen.fill(hud_HUD_GOLD, (x - 1, y - 1, 3, 3))
 
     def draw_foot_police(self):
         """Beat cops, with a ring under anyone who currently has eyes on you.
@@ -10762,7 +10892,14 @@ class Game:
         ticks = pygame.time.get_ticks()
 
         hud_draw_score(self.screen, self.score, right, 8, 2)
+        # Two numbers, because they mean different things: white is the roll
+        # in your pocket, which you lose when you are killed, and gold is what
+        # you have banked under the Arch, which is yours for good.
         hud_draw_cash(self.screen, self.cash, right, 32, 2)
+        if self.banked:
+            btxt = f"BANKED ${int(self.banked)}"
+            hud_text(self.screen, btxt, right - hud_text_width(btxt, 1), 50,
+                     hud_HUD_GOLD, True, 1)
 
         # slots=WANTED_MAX, not the default 6: the sixth slot was
         # unreachable by construction and ate 13px of the block forever.
@@ -10795,6 +10932,9 @@ class Game:
             pygame.draw.circle(self.screen, hud_HUD_RED,
                                (int(rx + self.frenzy_icon[0] * scale),
                                 int(ry + self.frenzy_icon[1] * scale)), 2)
+        for d in self.dropped:
+            self.screen.fill(hud_HUD_GREEN, (int(rx + d['x'] * scale),
+                                             int(ry + d['y'] * scale), 3, 3))
         for g in self.grub_pickups:
             if g['taken']:
                 continue

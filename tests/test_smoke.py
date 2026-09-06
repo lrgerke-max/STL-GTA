@@ -41,6 +41,8 @@ def reset(g):
         g.driving = None
     g.score = 0
     g.cash = 200
+    g.banked = 0
+    g.dropped = []
     g.wanted_level = 0
     g.police = []
     g.bust_meter = 0
@@ -1558,6 +1560,102 @@ def test_walking_over_grub_takes_it_and_it_comes_back():
     g.update_grub()
     assert not item['taken'], "grub never came back"
     assert healed > 20.0
+
+
+# ---------------------------------------------------------------------------
+# The bank under the Arch
+# ---------------------------------------------------------------------------
+
+def test_cash_banks_under_the_arch_and_nowhere_else():
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    g.cash = 900
+    g.banked = 0
+    g.update_bank()
+    assert g.cash == 900, "banked from the middle of the map"
+
+    teleport(g, g.arch_center())
+    g.update_bank()
+    assert g.banked == 900, "the Arch did not take the deposit"
+    assert g.cash == 0
+
+
+def test_getting_killed_drops_your_roll_where_you_died():
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    g.cash = 1200
+    g.banked = 4000
+    where = g.player_rect.center
+    g.wasted("TEST")
+    assert g.cash == 0, "you do not keep the roll"
+    assert g.banked == 4000, "banked money is safe"
+    assert len(g.dropped) == 1
+    roll = g.dropped[0]
+    assert roll['amount'] == 1200
+    assert math.hypot(roll['x'] - where[0], roll['y'] - where[1]) < 4
+
+    # and you can go back for it
+    g.finish_death()
+    teleport(g, (roll['x'], roll['y']))
+    g.update_dropped_cash()
+    assert g.cash == 1200, "could not pick the roll back up"
+    assert not g.dropped
+
+
+def test_a_dropped_roll_does_not_wait_forever():
+    g = game()
+    g.cash = 500
+    g.wasted("TEST")
+    g.finish_death()
+    assert g.dropped
+    g.frame += M.DROPPED_CASH_LIFE + 1
+    g.update_dropped_cash()
+    assert not g.dropped, "the roll should have gone cold"
+
+
+def test_being_arrested_keeps_your_roll_but_takes_bail():
+    """The whole difference between the two deaths: they hand your effects
+    back at the desk, so surrendering while holding a big roll is a real
+    decision rather than a strictly worse outcome."""
+    g = game()
+    g.cash = 3000
+    g.banked = 0
+    g.peak_star = 3
+    g.busted()
+    assert not g.dropped, "an arrest does not scatter your money on the road"
+    assert g.cash == 3000 - M.BAIL_BY_STAR[3]
+
+
+def test_bail_reaches_into_the_bank_when_your_pockets_are_light():
+    g = game()
+    g.cash = 40
+    g.banked = 5000
+    g.peak_star = 5
+    g.busted()
+    assert g.cash == 0
+    assert g.banked == 5000 - (M.BAIL_BY_STAR[5] - 40)
+
+
+def test_a_nudge_in_a_parking_bay_is_not_a_police_matter():
+    """Measured on the old build: a car-on-pedestrian contact raised a wanted
+    star at *any* closing speed, 0.0 included, so a pilot that yielded,
+    braked and swerved still spent a quarter of its session at 3+ stars."""
+    g = game()
+    car = _drive(g)
+    car.angle = 0.0
+    for speed, should_bump in ((0.0, False), (1.0, False), (4.0, True)):
+        g.wanted_level = 0
+        g.infraction_at = {}
+        ped = next(p for p in g.pedestrians if p.down_timer <= 0)
+        ped.rect.center = (car.rect.centerx + 18, car.rect.centery)
+        ped.bump_cooldown = 0
+        car.velocity = speed
+        g.handle_collisions()
+        if should_bump:
+            assert g.wanted_level > 0, f"a {speed} hit should be an offence"
+        else:
+            assert g.wanted_level == 0, f"a {speed} nudge is not a crime"
+    g.driving = None
 
 
 def _run_all():
