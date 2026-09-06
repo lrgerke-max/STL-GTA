@@ -82,7 +82,16 @@ ROAD_ORIGIN = 4
 ROAD_STEP = 8
 ROAD_LINES = set(range(ROAD_ORIGIN, MAP_TILES_W, ROAD_STEP))
 
-RADAR_SIZE = 78             # smaller than the old 110px minimap, GTA1 proportions
+RADAR_SIZE = 86             # GTA1 proportions, a shade larger than the old 78
+# The radar shows a WINDOW on the city, not the whole thing. At the old
+# whole-map scale (78px for 6400px of world, 0.0122 px per world px) a city
+# block was six radar pixels and, at four stars, the player dot and five cop
+# dots occupied an eight-pixel smear - it could tell you neither where the
+# next turn was nor where the police were, which are the only two things a
+# radar exists for. The whole-city view lives on the M / TAB map screen,
+# which already does it well.
+RADAR_WORLD = 1120          # world px across the radar: 17 tiles, ~2 blocks
+RADAR_BASE_PX = 800         # the city baked once at this size, then sub-sampled
 STAR_BLOCK_W = 76           # width of the 6-slot wanted star row
 MAP_OVERVIEW_SIZE = 300     # side of the full-city map drawn by the M / TAB screen
 
@@ -10673,8 +10682,6 @@ class Game:
         # far side of a brick two-flat from a cruiser is not being caught.
         if seen:
             self.heat_timer = 0
-            if not self.was_spotted and self.wanted_level > 0:
-                self.add_toast("Spotted!")
         self.was_spotted = seen
 
     def cop_search_point(self, cop):
@@ -11790,22 +11797,105 @@ class Game:
             hud_text(self.screen, s, 14, top + 4 + i * 10, hud_HUD_GREEN, True, 1)
 
     def build_radar_base(self):
-        """Pre-render the static map once.
+        """Pre-render the whole city once, big, so the radar can window into it.
 
         The previous HUD re-filled a 40x40 grid of rects every single frame,
-        which profiled as roughly half the total frame cost. The map never
-        changes, so it is baked to one surface and blitted.
+        which profiled as roughly half the total frame cost; the map never
+        changes, so it is baked. It is now baked at RADAR_BASE_PX rather than
+        at radar size, because the radar shows a moving window rather than the
+        entire map - a 640KB surface, and one subsurface + scale per frame.
         """
-        surf = pygame.Surface((RADAR_SIZE, RADAR_SIZE))
+        surf = pygame.Surface((RADAR_BASE_PX, RADAR_BASE_PX))
         surf.fill((16, 16, 22))
-        scale = RADAR_SIZE / float(MAP_WIDTH)
-        step = max(1, MAP_TILES_W // 48)
-        cell = max(1, int(step * TILE_SIZE * scale + 0.5))
-        for r in range(0, MAP_TILES_H, step):
-            for c in range(0, MAP_TILES_W, step):
+        cell = max(1, RADAR_BASE_PX // MAP_TILES_W + 1)
+        for r in range(MAP_TILES_H):
+            py = r * RADAR_BASE_PX // MAP_TILES_H
+            for c in range(MAP_TILES_W):
                 surf.fill(GAME_MAP[r][c]['color'],
-                          (int(c * TILE_SIZE * scale), int(r * TILE_SIZE * scale), cell, cell))
+                          (c * RADAR_BASE_PX // MAP_TILES_W, py, cell, cell))
         return surf
+
+    def draw_radar(self, rx, ry):
+        """A local window on the city, with the player as a pointed triangle
+        and anything important outside the window pinned to the rim.
+
+        The rim chevrons are the piece the old whole-map radar structurally
+        could not provide: "they are coming from the north" is the single most
+        useful thing a chase radar can tell you.
+        """
+        if self.radar_base is None:
+            self.radar_base = self.build_radar_base()
+        active = self.active_rect()
+        cx, cy = active.center
+        half = RADAR_WORLD * 0.5
+        # world -> base-surface pixels
+        b = RADAR_BASE_PX / float(MAP_WIDTH)
+        win = int(RADAR_WORLD * b)
+        bx = int(max(0, min(RADAR_BASE_PX - win, (cx - half) * b)))
+        by = int(max(0, min(RADAR_BASE_PX - win, (cy - half) * b)))
+        view = self.radar_base.subsurface(pygame.Rect(bx, by, win, win))
+        self.screen.blit(pygame.transform.scale(view, (RADAR_SIZE, RADAR_SIZE)),
+                         (rx, ry))
+
+        # world -> radar pixels, for whatever is inside the window
+        left = bx / b
+        top = by / b
+        k = RADAR_SIZE / float(RADAR_WORLD)
+
+        def blip(pos, colour, size=2):
+            px = rx + (pos[0] - left) * k
+            py = ry + (pos[1] - top) * k
+            if rx <= px < rx + RADAR_SIZE and ry <= py < ry + RADAR_SIZE:
+                self.screen.fill(colour, (int(px) - size // 2, int(py) - size // 2,
+                                          size, size))
+                return True
+            return False
+
+        def chevron(pos, colour):
+            """Pin an off-window thing to the rim at its true bearing."""
+            ang = math.atan2(pos[1] - cy, pos[0] - cx)
+            r = RADAR_SIZE * 0.5 - 4
+            px = int(rx + RADAR_SIZE * 0.5 + math.cos(ang) * r)
+            py = int(ry + RADAR_SIZE * 0.5 + math.sin(ang) * r)
+            tip = (px + math.cos(ang) * 3, py + math.sin(ang) * 3)
+            a = (px + math.cos(ang + 2.4) * 4, py + math.sin(ang + 2.4) * 4)
+            c = (px + math.cos(ang - 2.4) * 4, py + math.sin(ang - 2.4) * 4)
+            pygame.draw.polygon(self.screen, colour,
+                                [(int(tip[0]), int(tip[1])),
+                                 (int(a[0]), int(a[1])), (int(c[0]), int(c[1]))])
+
+        for d in self.dropped:
+            blip((d['x'], d['y']), hud_HUD_GREEN, 3)
+        for g in self.grub_pickups:
+            if not g['taken']:
+                blip((g['x'], g['y']), GRUB_KINDS[g['kind']][3], 2)
+        if self.frenzy_icon is not None:
+            blip(self.frenzy_icon[:2], hud_HUD_RED, 3)
+        if self.job is not None:
+            jc = hud_HUD_GREEN if self.job.collected else hud_HUD_GOLD
+            if not blip(self.job.target_pos, jc, 3):
+                chevron(self.job.target_pos, jc)
+        for cop in list(self.police) + list(self.foot_police):
+            if not blip(cop.rect.center, hud_HUD_RED, 2):
+                chevron(cop.rect.center, hud_HUD_RED)
+
+        # the player: a triangle pointed the way you are actually facing, which
+        # a dot can never be, and which is most of why the old radar was hard
+        # to navigate by
+        if self.driving is not None:
+            head = self.driving.angle
+        elif self.player_dir[0] or self.player_dir[1]:
+            head = math.atan2(self.player_dir[1], self.player_dir[0])
+        else:
+            head = self.player_aim
+        pcx = rx + RADAR_SIZE * 0.5
+        pcy = ry + RADAR_SIZE * 0.5
+        pts = [(pcx + math.cos(head) * 5, pcy + math.sin(head) * 5),
+               (pcx + math.cos(head + 2.5) * 4, pcy + math.sin(head + 2.5) * 4),
+               (pcx + math.cos(head - 2.5) * 4, pcy + math.sin(head - 2.5) * 4)]
+        pygame.draw.polygon(self.screen, hud_HUD_WHITE,
+                            [(int(x), int(y)) for x, y in pts])
+        hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
 
     def draw_hud(self):
         """GTA1 arcade gauge: chunky score and cash right-aligned at the top,
@@ -11813,60 +11903,46 @@ class Game:
         right = SCREEN_WIDTH - 10
         ticks = pygame.time.get_ticks()
 
-        hud_draw_score(self.screen, self.score, right, 8, 2)
+        hud_draw_score(self.screen, self.score, right, 6, 2)
         # Two numbers, because they mean different things: white is the roll
         # in your pocket, which you lose when you are killed, and gold is what
         # you have banked under the Arch, which is yours for good.
-        hud_draw_cash(self.screen, self.cash, right, 32, 2)
+        hud_draw_cash(self.screen, self.cash, right, 24, 2)
         if self.banked:
             btxt = f"BANKED ${int(self.banked)}"
-            hud_text(self.screen, btxt, right - hud_text_width(btxt, 1), 50,
+            hud_text(self.screen, btxt, right - hud_text_width(btxt, 1), 42,
                      hud_HUD_GOLD, True, 1)
 
         # slots=WANTED_MAX, not the default 6: the sixth slot was
         # unreachable by construction and ate 13px of the block forever.
         star_w = hud_draw_stars(self.screen, self.wanted_level,
-                                right - STAR_BLOCK_W, 56, ticks,
+                                right - STAR_BLOCK_W, 53, ticks,
                                 slots=WANTED_MAX,
                                 blink=not self.spotted and self.wanted_level > 0)[0]
-        self.draw_chase_state(right, 56 + 12, ticks)
+        self.draw_chase_state(right, 64, ticks)
 
         # radar, aligned to the same right edge as the gauge above it
-        rx, ry = right - RADAR_SIZE, 74
-        if self.radar_base is None:
-            self.radar_base = self.build_radar_base()
-        self.screen.blit(self.radar_base, (rx, ry))
-        scale = RADAR_SIZE / float(MAP_WIDTH)
-        active = self.active_rect()
-        pygame.draw.circle(self.screen, hud_HUD_WHITE,
-                           (int(rx + active.centerx * scale),
-                            int(ry + active.centery * scale)), 2)
-        for cop in list(self.police) + list(self.foot_police):
-            pygame.draw.circle(self.screen, hud_HUD_RED,
-                               (int(rx + cop.rect.centerx * scale),
-                                int(ry + cop.rect.centery * scale)), 1)
-        if self.job is not None:
-            jc = hud_HUD_GREEN if self.job.collected else hud_HUD_GOLD
-            jx, jy = self.job.target_pos
-            pygame.draw.circle(self.screen, jc,
-                               (int(rx + jx * scale), int(ry + jy * scale)), 2)
-        if self.frenzy_icon is not None:
-            pygame.draw.circle(self.screen, hud_HUD_RED,
-                               (int(rx + self.frenzy_icon[0] * scale),
-                                int(ry + self.frenzy_icon[1] * scale)), 2)
-        for d in self.dropped:
-            self.screen.fill(hud_HUD_GREEN, (int(rx + d['x'] * scale),
-                                             int(ry + d['y'] * scale), 3, 3))
-        for g in self.grub_pickups:
-            if g['taken']:
-                continue
-            marker = GRUB_KINDS[g['kind']][3]
-            self.screen.fill(marker, (int(rx + g['x'] * scale),
-                                      int(ry + g['y'] * scale), 2, 2))
-        hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
+        rx, ry = right - RADAR_SIZE, 76
+        self.draw_radar(rx, ry)
 
-        # chaos multiplier + its progress bar, under the radar
-        cy0 = ry + RADAR_SIZE + 9
+        # speedometer, immediately under the radar. Speed was previously not
+        # represented anywhere on screen - no number, no bar, no engine note -
+        # in a game whose entire verb is driving.
+        if self.driving is not None:
+            v = abs(self.driving.velocity)
+            frac = min(1.0, v / max(1.0, self.driving.base_max_speed))
+            bar_y = ry + RADAR_SIZE + 5
+            pygame.draw.rect(self.screen, (30, 30, 38), (rx, bar_y, RADAR_SIZE, 5))
+            col = (hud_HUD_RED if frac > 0.92
+                   else hud_HUD_GOLD if frac > 0.70 else hud_HUD_WHITE)
+            pygame.draw.rect(self.screen, col,
+                             (rx, bar_y, int(RADAR_SIZE * frac), 5))
+            mph = f"{int(v * 8.4)} MPH"
+            hud_text(self.screen, mph, right - hud_text_width(mph, 1),
+                     bar_y + 7, hud_HUD_GREY_DIM, True, 1)
+
+        # chaos multiplier + its progress bar, under the speedo
+        cy0 = ry + RADAR_SIZE + 26
         # A multiplier of 1 is no multiplier; the old `or mult_prog > 0`
         # drew "X1" with a bar, which is a HUD element meaning nothing.
         if self.multiplier > 1:
