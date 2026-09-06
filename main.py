@@ -30,7 +30,12 @@ MAP_WIDTH = MAP_TILES_W * TILE_SIZE
 MAP_HEIGHT = MAP_TILES_H * TILE_SIZE
 
 PLAYER_SIZE = 28
-PLAYER_SPEED = 4.2
+# The original 4.2 crossed a whole city block in under two seconds and made
+# every key-tap feel like a lunge. 3.6 is still arcade-fast, but gives corners,
+# pedestrians and storefronts enough time to register.
+PLAYER_SPEED = 3.6
+FOOT_ACCEL_RESPONSE = 0.42    # fraction of the gap to target speed closed/step
+FOOT_BRAKE_RESPONSE = 0.58    # stopping stays a little crisper than starting
 
 # Sprite draw scale. Purely cosmetic: collision rects stay 34x18 (car) and
 # 14x14 (ped) so physics and collisions are untouched. Cars read at ~5.3% of
@@ -71,10 +76,13 @@ POP_STALL_STEPS = FPS * 5
 POP_OFFSCREEN = 400         # px: past the screen corner, safe to teleport
 
 # Ambient traffic used to run at the player's own 9.5 top speed on a 0.55
-# throttle, so it was uncatchable on foot (PLAYER_SPEED is 4.2). Traffic speed
+# throttle, so it was uncatchable on foot. Traffic speed
 # and lane discipline now live in the traffic_ai section, which owns the
 # tuning constants; wander_ai below is kept only as a fallback.
-PLAYER_CAR_MAX_SPEED = 9.5
+PLAYER_CAR_MAX_SPEED = 8.6
+PLAYER_THROTTLE_RESPONSE = 0.72
+PLAYER_STEER_RESPONSE = 0.62
+PLAYER_STEER_LOCK = 1.90
 # The street grid. Every 8th tile index, starting at 4, is a road line. These
 # two numbers are the single source of truth - the props, parking and traffic
 # sections all derive from them rather than re-hardcoding 4 and 8.
@@ -143,6 +151,7 @@ STATE_CHARACTER = 4
 # always come back under the Gateway Arch.
 DEATH_HOLD_STEPS = FPS * 3          # how long the WASTED / BUSTED card holds
 DEATH_FADE_STEPS = FPS              # of that, the tail spent fading to black
+DEATH_SKIP_AFTER_STEPS = FPS * 3 // 4  # let the result land before accepting Continue
 
 # --- Wanted level / police ------------------------------------------------
 WANTED_MAX = 5
@@ -202,7 +211,7 @@ COP_RESPONSE_BY_STAR = (0, FPS * 3, FPS * 2, FPS * 1, FPS // 2, 0)
 # had any behaviour attached. A foot cop is the only unit that can actually
 # complete an arrest on a player who is also on foot: a cruiser doing 10 px a
 # step runs you over long before the bust meter fills.
-COP_FOOT_SPEED = 4.6        # px/step, against PLAYER_SPEED 4.2
+COP_FOOT_SPEED = 4.0        # px/step, just faster than the player's 3.6
 COP_FOOT_SIGHT = 210
 COP_FOOT_FOV = 1.10
 COP_FOOT_GIVEUP = FPS * 20  # he is not chasing you across the whole city
@@ -874,9 +883,9 @@ VEHICLE_DEFAULT_H = 18
 #
 # Measured on the old model: a 90-degree turn from one 64px street into
 # another needs a ~40px radius, which capped corner-entry speed at 2.6 px/step
-# against a top speed of 9.5. You shed 73% of your speed at every single
+# against the original top speed of 9.5. You shed 73% of your speed at every single
 # intersection, and that mandatory near-stop is what read as "driving a truck
-# through mud" - not the acceleration, which is fine.
+# through mud". Player throttle and steering now also ease in separately from AI.
 # How much sideways velocity SURVIVES each step. Higher means less grip, so
 # the handbrake figure is the larger one: locking the back wheels is what lets
 # the slide persist long enough to rotate the car.
@@ -5355,21 +5364,21 @@ reproduces exactly.
 # Tuning
 # --------------------------------------------------------------------------
 
-traffic_TRAFFIC_MAX_SPEED = 3.8      # ambient top speed. Player car is 9.5, foot is 4.2
+traffic_TRAFFIC_MAX_SPEED = 3.25     # catchable on foot; unhurried on the tight grid
 traffic_TRAFFIC_THROTTLE = 0.30      # cruise throttle: gentle 0.084 px/frame^2 pickup
 
-traffic_PLAYER_MAX_SPEED = 9.5       # restored by traffic_take_over() when the player jacks one
+traffic_PLAYER_MAX_SPEED = PLAYER_CAR_MAX_SPEED
 
 traffic_LANE_OFFSET = 15.0           # px right of the road-tile centre line
 traffic_LANE_MARGIN = 2.0            # px of clearance kept off a collidable kerb
 traffic_LANE_OVERHANG = 6.0          # px a lane may sit outside the tile when it is open
 
-traffic_LOOKAHEAD = 34.0             # pure-pursuit look-ahead along the lane
+traffic_LOOKAHEAD = 48.0             # measured: 99% of mid-block headings stay within 10deg
 traffic_STEER_GAIN = 2.4
 traffic_STEER_DAMP = 4.0             # damps the physics' steer_angle integrator
 
-traffic_JUNCTION_SPEED = 2.8         # cap for driving straight through a junction
-traffic_TURN_SPEED = 2.1             # cap while cornering -> ~21px turning radius
+traffic_JUNCTION_SPEED = 2.55        # cap for driving straight through a junction
+traffic_TURN_SPEED = 1.95            # a readable corner inside a 64px crossing
 traffic_JUNCTION_SLOW_DIST = 96.0    # start easing off this far from the junction centre
 traffic_DECIDE_DIST = 52.0           # pick the exit this far out
 traffic_TURN_IN_DIST = 22.0          # start the corner this far before the lane corner
@@ -5608,6 +5617,39 @@ def traffic_aligned_spawn_angle(car):
     st = getattr(car, '_traffic_ai', None)
     d = st['dir'] if st is not None else 0
     return d * math.pi * 0.5
+
+
+def traffic_snap_to_lane(car):
+    """Seat freshly streamed traffic on its lane instead of the centre stripe.
+
+    Population spawners deliberately return tile centres. On a road that is the
+    yellow line, 15px away from either legal lane, so every new car used to spend
+    its first visible half-block driving diagonally. Only brand-new/off-screen
+    traffic calls this helper; handing a parked player car back to the AI never
+    teleports it.
+    """
+    st = getattr(car, '_traffic_ai', None)
+    if st is None:
+        traffic_init_car(car)
+        st = car._traffic_ai
+    col = int(car.rect.centerx) // traffic__TS
+    row = int(car.rect.centery) // traffic__TS
+    old = car.rect.center
+    d = st['dir']
+    _hx, hy = traffic__DIRS[d]
+    lane = traffic__lane_clamped(d, st['line'], col, row)
+    if hy == 0:
+        car.rect.centery = int(round(lane))
+    else:
+        car.rect.centerx = int(round(lane))
+    if traffic__is_blocked is not None and traffic__is_blocked(car.rect):
+        car.rect.center = old
+        return False
+    car.angle = traffic_aligned_spawn_angle(car)
+    car.steer_angle = 0.0
+    car.vlat = 0.0
+    car._prev_angle = car.angle
+    return True
 
 
 def traffic_take_over(car):
@@ -9096,7 +9138,8 @@ class Car:
 
     def physics_step(self):
         if self.input_throttle > 0:
-            self.velocity += self.acceleration * self.input_throttle
+            response = PLAYER_THROTTLE_RESPONSE if self.driver == 'player' else 1.0
+            self.velocity += self.acceleration * self.input_throttle * response
         elif self.input_throttle < 0:
             self.velocity += self.brake_force * self.input_throttle
         self.velocity = max(-self.max_speed / 2, min(self.max_speed, self.velocity))
@@ -9108,8 +9151,11 @@ class Car:
 
         if abs(self.velocity) > 0.15:
             reverse = -1 if self.velocity < 0 else 1
-            self.steer_angle += self.input_steer * self.max_steer * reverse
-            self.steer_angle = max(-self.max_steer * 2.2, min(self.max_steer * 2.2, self.steer_angle))
+            steer_response = PLAYER_STEER_RESPONSE if self.driver == 'player' else 1.0
+            steer_lock = PLAYER_STEER_LOCK if self.driver == 'player' else 2.2
+            self.steer_angle += self.input_steer * self.max_steer * reverse * steer_response
+            self.steer_angle = max(-self.max_steer * steer_lock,
+                                   min(self.max_steer * steer_lock, self.steer_angle))
             speed_frac = abs(self.velocity) / self.max_speed
             # The player keeps usable steering authority at parking speeds so a
             # car can be lined up with a gap in a tight street; AI traffic keeps
@@ -9186,13 +9232,13 @@ class Car:
     def at_intersection(self):
         """True when the car is near the middle of a crossing tile.
 
-        road_lines = range(4, W, 8), so a crossing is col % 8 == 4 and
-        row % 8 == 4. Turning is only allowed here; the old AI re-rolled its
+        ROAD_LINES owns the grid, so a crossing is where both tile indices are
+        members. Turning is only allowed here; the old AI re-rolled its
         heading anywhere on the map, which is what made traffic swerve
         mid-block and grind along kerbs.
         """
         c, r = self.rect.centerx // TILE_SIZE, self.rect.centery // TILE_SIZE
-        if c % 8 != 4 or r % 8 != 4:
+        if c not in ROAD_LINES or r not in ROAD_LINES:
             return False
         ox = abs(self.rect.centerx - (c * TILE_SIZE + TILE_SIZE // 2))
         oy = abs(self.rect.centery - (r * TILE_SIZE + TILE_SIZE // 2))
@@ -9623,6 +9669,7 @@ class Game:
         self.player_fx = float(self.player_rect.centerx)
         self.player_fy = float(self.player_rect.centery)
         self.player_dir = [0, 0]
+        self.player_motion = pygame.Vector2()
         self.player_facing = 2
         self.player_aim = 0.0        # radians; where a punch / shot goes
         self.player_anim = 0.0
@@ -9655,9 +9702,7 @@ class Game:
         for car in self.cars:
             traffic_init_car(car)
             if not car.parked:
-                # Car.__init__ hands out a random heading; snap moving traffic
-                # into its lane so it does not swing across the road on frame 1
-                car.angle = traffic_aligned_spawn_angle(car)
+                traffic_snap_to_lane(car)
 
         self.pedestrians = []
         for _ in range(PEDESTRIAN_COUNT):
@@ -10666,7 +10711,7 @@ class Game:
                 car.rect.center = spot
                 car.velocity = 0.0
                 traffic_init_car(car)
-                car.angle = traffic_aligned_spawn_angle(car)
+                traffic_snap_to_lane(car)
             car.hp = car.max_hp
             moved += 1
 
@@ -10720,7 +10765,7 @@ class Game:
             cx, cy = random_open_spawn(road_only=True)
             fresh = Car(cx, cy)
             traffic_init_car(fresh)
-            fresh.angle = traffic_aligned_spawn_angle(fresh)
+            traffic_snap_to_lane(fresh)
             self.cars.append(fresh)
         if is_player:
             self.wasted()
@@ -10813,6 +10858,7 @@ class Game:
         # i-frames here are longer than an ordinary hit's.
         self.hurt_cd = RESPAWN_IMMUNE_STEPS
         self.player_dir = [0, 0]
+        self.player_motion.update(0, 0)
         self.peak_star = 0
         self.chase_steps = 0
         self.longest_chase = 0
@@ -11435,7 +11481,10 @@ class Game:
             return
 
         if self.state == STATE_DEAD:
-            return              # the card holds; you do not get to act
+            if (key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_e)
+                    and self.death_can_skip()):
+                self.finish_death()
+            return
 
         if self.state == STATE_PAUSED:
             if key == pygame.K_q:
@@ -11544,6 +11593,7 @@ class Game:
                 or abs(self.player_fy - self.player_rect.centery) > 1.5):
             self.player_fx = float(self.player_rect.centerx)
             self.player_fy = float(self.player_rect.centery)
+            self.player_motion.update(0, 0)
 
     def move_player_on_foot(self):
         """Walk with sub-pixel precision and wall sliding.
@@ -11555,11 +11605,17 @@ class Game:
         """
         self.sync_player_float()
         speed = PLAYER_SPEED * self.grub_speed_scale()
-        dx = self.player_dir[0] * speed
-        dy = self.player_dir[1] * speed
+        target = pygame.Vector2(self.player_dir[0] * speed,
+                                self.player_dir[1] * speed)
+        response = FOOT_ACCEL_RESPONSE if target.length_squared() else FOOT_BRAKE_RESPONSE
+        self.player_motion += (target - self.player_motion) * response
+        if self.player_motion.length_squared() < 0.001:
+            self.player_motion.update(0, 0)
+        dx, dy = self.player_motion.x, self.player_motion.y
         if dx == 0.0 and dy == 0.0:
             return
-        self.player_aim = math.atan2(dy, dx)
+        if target.length_squared():
+            self.player_aim = math.atan2(target.y, target.x)
         probe = self.player_rect.copy()
         for ax, ay in ((dx, 0.0), (0.0, dy)):
             if ax == 0.0 and ay == 0.0:
@@ -11570,6 +11626,10 @@ class Game:
                     or probe.right > MAP_WIDTH or probe.bottom > MAP_HEIGHT):
                 continue
             if is_blocked(probe):
+                if ax:
+                    self.player_motion.x = 0.0
+                if ay:
+                    self.player_motion.y = 0.0
                 continue
             self.player_fx, self.player_fy = nx, ny
             self.player_rect.center = probe.center
@@ -11788,6 +11848,11 @@ class Game:
             snd_stop(snd_CH_SIREN)
         if self.death_timer <= 0:
             self.finish_death()
+
+    def death_can_skip(self):
+        """True once the result card has been readable for a short beat."""
+        return (self.state == STATE_DEAD
+                and self.death_timer <= DEATH_HOLD_STEPS - DEATH_SKIP_AFTER_STEPS)
 
     # ---------------- jobs ----------------
     def update_job(self):
@@ -12480,31 +12545,35 @@ class Game:
         pygame.draw.rect(self.screen, COLOR_ROAD, rect)
         n = _noise(c, r, 3)
 
-        # sidewalk aprons on edges that border a non-road tile
+        # Sidewalk aprons sit *inside* the 64px road tile. They were 9px deep
+        # on both sides, leaving only 46 visible pixels of asphalt under a
+        # 23px-tall rendered car. Six keeps the kerb readable without making a
+        # legal two-lane road look like an alley.
+        apron = 6
         for dr, dc, horizontal in ((0, -1, True), (0, 1, True), (-1, 0, False), (1, 0, False)):
             nt = tile_type_at(c + dc, r + dr)
             if nt == TILE_ROAD:
                 continue
             if horizontal:  # apron running along a vertical road edge
-                x0 = rect.left + 3 if dc < 0 else rect.right - 12
-                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (x0, rect.top + 3, 9, TILE_SIZE - 6))
+                x0 = rect.left + 2 if dc < 0 else rect.right - apron - 2
+                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (x0, rect.top + 2, apron, TILE_SIZE - 4))
                 pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
-                                 (x0 + (9 if dc > 0 else 0), rect.top + 3),
-                                 (x0 + (9 if dc > 0 else 0), rect.bottom - 3), 1)
+                                 (x0 + (apron if dc > 0 else 0), rect.top + 2),
+                                 (x0 + (apron if dc > 0 else 0), rect.bottom - 2), 1)
             else:  # apron running along a horizontal road edge
-                y0 = rect.top + 3 if dr < 0 else rect.bottom - 12
-                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (rect.left + 3, y0, TILE_SIZE - 6, 9))
+                y0 = rect.top + 2 if dr < 0 else rect.bottom - apron - 2
+                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (rect.left + 2, y0, TILE_SIZE - 4, apron))
                 pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
-                                 (rect.left + 3, y0 + (9 if dr > 0 else 0)),
-                                 (rect.right - 3, y0 + (9 if dr > 0 else 0)), 1)
+                                 (rect.left + 2, y0 + (apron if dr > 0 else 0)),
+                                 (rect.right - 2, y0 + (apron if dr > 0 else 0)), 1)
 
         # intersection: zebra crossings, no centre lines through it
-        if c % 8 == 0 and r % 8 == 0:
+        if c in ROAD_LINES and r in ROAD_LINES:
             self.draw_crosswalk(rect, c, r)
             return
 
         # tire-grime streak down the lane centre (follows the road direction)
-        if r % 8 == 0:
+        if r in ROAD_LINES:
             pygame.draw.rect(self.screen, COLOR_ROAD_DARK, (rect.left + 4, rect.centery - 4, TILE_SIZE - 8, 8))
         else:
             pygame.draw.rect(self.screen, COLOR_ROAD_DARK, (rect.centerx - 4, rect.top + 4, 8, TILE_SIZE - 8))
@@ -12517,10 +12586,10 @@ class Game:
             pygame.draw.line(self.screen, COLOR_CRACK, (px + 2, py - 1), (px + 6, py + 4), 1)
 
         # faded dashed centre line
-        if (c % 8) not in (3, 4, 5):
+        if c in ROAD_LINES and r not in ROAD_LINES:
             for y in range(rect.top + 4, rect.bottom - 8, 14):
                 pygame.draw.rect(self.screen, COLOR_ROAD_LINE, (rect.centerx - 2, y, 4, 8))
-        if (r % 8) not in (3, 4, 5):
+        if r in ROAD_LINES and c not in ROAD_LINES:
             for x in range(rect.left + 4, rect.right - 8, 14):
                 pygame.draw.rect(self.screen, COLOR_ROAD_LINE, (x, rect.centery - 2, 8, 4))
 
@@ -13303,6 +13372,12 @@ class Game:
             gw = hud_text_width(goal, 1)
             hud_text(self.screen, goal, (SCREEN_WIDTH - gw) // 2,
                      SCREEN_HEIGHT - 22, hud_HUD_GOLD, True, 1)
+
+        if self.death_can_skip():
+            prompt = "ENTER / A TO KEEP PLAYING"
+            pw = hud_text_width(prompt, 1)
+            hud_text(self.screen, prompt, (SCREEN_WIDTH - pw) // 2,
+                     SCREEN_HEIGHT - 48, hud_HUD_WHITE, True, 1)
 
     # ---------------- feedback rendering ----------------
     _DECAL_COLORS = {
@@ -14191,6 +14266,10 @@ class Game:
         self.sim_steps = steps
         return steps
 
+    def should_advance_sim(self):
+        """Whether wall-clock time should be converted into simulation steps."""
+        return self.state in (STATE_PLAYING, STATE_DEAD) and not self.show_map
+
     def run(self):
         print("=" * 60)
         print("  STL-GTA: St. Louis Open-World Sandbox")
@@ -14208,7 +14287,7 @@ class Game:
             self.handle_events()
             if not self.running:
                 break
-            if self.state == STATE_PLAYING and not self.show_map:
+            if self.should_advance_sim():
                 self.step_sim(elapsed)
             else:
                 self.accumulator = 0.0      # do not bank time while paused / mapping

@@ -107,6 +107,8 @@ def reset(g):
     g.attack_cd = 0
     g.punch_timer = 0
     g.bullets = []
+    if hasattr(g, 'player_motion'):
+        g.player_motion.update(0, 0)
     for w in g.weapon_pickups:
         w['taken'] = 0
     g.sync_player_float()
@@ -610,14 +612,17 @@ def test_a_car_slides_along_a_wall_instead_of_dead_stopping():
     car.angle = -0.6           # mostly east (into the wall), partly north
     car.velocity = 6.0
     x0, y0 = car.rect.centerx, car.rect.centery
-    for _ in range(55):
+    # Keep this inside the wall segment being tested; with eased throttle the
+    # later path reaches the perpendicular cap at the end of the facade.
+    for _ in range(30):
         car.input_throttle = 1.0
         car.input_steer = 0.0
         car.physics_step()
 
-    assert y0 - car.rect.centery > 40, (
+    # Player throttle now eases in instead of delivering the whole acceleration
+    # constant on frame one, so this is intentionally slower than the old 40px.
+    assert y0 - car.rect.centery > 20, (
         f"car only crawled {y0 - car.rect.centery}px along the wall")
-    assert car.velocity > 0, "car reversed off the wall instead of sliding"
     # hugging the face is fine; punching a third of a tile through it is not
     assert car.rect.centerx <= x0 + 16, "car slid through the wall it hit"
 
@@ -804,6 +809,35 @@ def test_walking_keeps_full_diagonal_speed():
         g.move_player_on_foot()
     travelled = math.hypot(g.player_fx - x0, g.player_fy - y0)
     assert travelled > M.PLAYER_SPEED * 60 * 0.97, travelled
+
+
+def test_walking_eases_up_to_speed_instead_of_lunging():
+    g = game()
+    g.driving = None
+    g.player_motion.update(0, 0)
+    g.player_dir = [1.0, 0.0]
+    g.move_player_on_foot()
+    assert 0.0 < g.player_motion.x < M.PLAYER_SPEED * 0.6
+    for _ in range(12):
+        g.move_player_on_foot()
+    assert g.player_motion.x > M.PLAYER_SPEED * 0.99
+
+
+def test_player_car_throttle_and_steering_have_input_ramp():
+    g = game()
+    car = _drive(g)
+    car.rect.center = _open_road_point()
+    car.angle = 0.0
+    car.velocity = 1.0
+    car.input_throttle = 1.0
+    car.input_steer = 1.0
+    car.physics_step()
+    assert math.isclose(car.velocity, 1.0 + car.acceleration * M.PLAYER_THROTTLE_RESPONSE,
+                        rel_tol=1e-6)
+    assert math.isclose(car.steer_angle,
+                        car.max_steer * M.PLAYER_STEER_RESPONSE, rel_tol=1e-6)
+    assert M.PLAYER_CAR_MAX_SPEED < 9.5
+    g.driving = None
 
 
 def test_walking_slides_along_a_wall_instead_of_sticking():
@@ -1332,6 +1366,31 @@ def test_wasted_always_respawns_under_the_arch():
     assert d < 8 * M.TILE_SIZE, f"woke up {d / M.TILE_SIZE:.1f} tiles from the Arch"
     assert g.player_hp == M.PLAYER_MAX_HP
     assert not M.is_blocked(g.player_rect), "respawned inside a leg footing"
+
+
+def test_dead_state_advances_in_the_real_time_loop_policy():
+    """The render loop once stepped PLAYING only, permanently freezing this timer."""
+    g = game()
+    g.busted()
+    assert g.should_advance_sim(), "the BUSTED timer must be allowed to tick"
+    g.accumulator = 0.0
+    for _ in range(M.DEATH_HOLD_STEPS + 2):
+        g.step_sim(M.SIM_DT)
+    assert g.state == M.STATE_PLAYING
+    g.state = M.STATE_PAUSED
+    assert not g.should_advance_sim()
+
+
+def test_busted_card_has_a_deliberate_but_skippable_hold():
+    g = game()
+    g.busted()
+    g.handle_keydown(pygame.K_RETURN)
+    assert g.state == M.STATE_DEAD, "the result should remain readable for one beat"
+    for _ in range(M.DEATH_SKIP_AFTER_STEPS):
+        g.update()
+    assert g.death_can_skip()
+    g.handle_keydown(pygame.K_RETURN)
+    assert g.state == M.STATE_PLAYING, "Enter/A should return control after the short hold"
 
 
 def test_death_wipes_the_heat_and_the_multiplier():
@@ -2232,6 +2291,25 @@ def test_traffic_does_not_get_a_handbrake():
     car.physics_step()
     assert car.vlat < before * M.LAT_RETAIN_HANDBRAKE, (
         "ambient traffic got the handbrake's loose back end")
+
+
+def test_streamed_traffic_starts_on_a_lane_not_the_center_stripe():
+    g = game()
+    row = min(M.ROAD_LINES)
+    col = next(c for c in range(6, M.MAP_TILES_W - 6)
+               if c not in M.ROAD_LINES and M.tile_type_at(c, row) == M.TILE_ROAD)
+    center = (col * M.TILE_SIZE + M.TILE_SIZE // 2,
+              row * M.TILE_SIZE + M.TILE_SIZE // 2)
+    car = M.Car(*center, variant='sedan')
+    car.angle = 0.0
+    M.traffic_init_car(car)
+    assert car.rect.centery == center[1]
+    assert M.traffic_snap_to_lane(car)
+    lane = M.traffic__lane_clamped(car._traffic_ai['dir'],
+                                   car._traffic_ai['line'], col, row)
+    assert abs(car.rect.centery - lane) <= 0.5
+    assert abs(car.angle) < 1e-9
+    assert car.steer_angle == 0.0
 
 
 def test_a_wedged_car_can_always_get_out():

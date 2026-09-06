@@ -32,7 +32,9 @@ pip install -r requirements.txt && python main.py
 - **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, box truck, school bus,
   blue/red **Route 70 MetroBus**, Hill delivery Vespa, and a rare black Trans Am with a gold
   hood bird and the radio permanently stuck on KSHE — each with its own size and handling.
-  Ambient **MetroLink** trains, a **Loop trolley**, and the Clydesdales run their own lines.
+  Moving traffic spawns directly in its proper lane and uses a measured long-look steering
+  line, while wider asphalt aprons keep the two-lane streets from reading like alleys. Ambient
+  **MetroLink** trains, a **Loop trolley**, and the Clydesdales run their own lines.
 - **The $50,000 Arch Job**: bank enough money and a real multi-stage finale opens under the
   Arch: borrow a cutter from City Museum, bring a getaway car, strap 43 pounds of visible
   stainless steel to it, survive a forced five-star run to The Hill, and lose the cops in
@@ -48,11 +50,17 @@ pip install -r requirements.txt && python main.py
 - **Combat**: `SPACE` swings your fists — a short arc that drops a pedestrian, and finishes one already on the floor. Find a pistol crate on the street and the same key fires it; bullets kill people, punch holes in cars and cop cruisers, and discharging a firearm in public is very much a crime. Punching a car dents it; enough dents and it goes up.
 - **Cars that actually hit each other**: ramming transfers momentum — the struck car gets shoved down the contact normal, yaws away from an off-centre hit, and a parked car knocked at the kerb coasts before it stops. Traffic used to absorb a full-speed broadside without twitching.
 - **Impact juice**: wall slams and collisions land — screen shake, a frame of hitstop on the big ones, a spray of sparks / glass / smoke, a white flash. Floating `+N` / `$N` numbers rise off whatever you just did; big moments get a centre-screen ALL-CAPS callout.
-- **WASTED**: cars (yours, traffic, cop) have health. Enough hits and one smokes, catches fire, then explodes — a blast that scatters the crowd and can chain to the next car. Total your ride and you lose the cargo and the multiplier and wake up on the pavement.
+- **WASTED / BUSTED**: cars (yours, traffic, cop) have health. Enough hits and one smokes,
+  catches fire, then explodes — a blast that scatters the crowd and can chain to the next car.
+  Either loss gets a readable result card, then automatically returns you beneath the Arch;
+  after its opening beat, `ENTER`, `SPACE`, `E`, or gamepad `A` skips straight back to play.
 - **Steal Any Car**: walk up to traffic or a parked car and press `E` to jack it — and it matters which one, because every variant now has its own top speed. The Vespa is 60% faster than the refuse truck.
 - **Handbrake turns**: `LSHIFT` (or gamepad `LB`) locks the back wheels. The car carries momentum sideways through a turn now, so you can stab the brake, let the back step out, rotate while keeping your speed, and power out — instead of braking to a quarter of top speed at every single intersection. Slides leave rubber on the road.
 - **Wanted System**: whole-star wanted levels 0–5. Running someone down or shunting traffic at speed earns stars; scraping a kerb does not. Cops spawn *off-screen near you* rather than across the map, chase with whisker-based obstacle avoidance, and have to hold sustained contact (watch the BUSTING bar) before you are taken. Stars only decay once you are genuinely clear of them — parking and waiting no longer works.
-- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag, run on a **fixed 60 Hz timestep** so the game plays identically at 30, 60 or 240 fps.
+- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag, with eased
+  player throttle / steering and a calmer top speed. Walking also ramps into motion instead of
+  jumping to full speed on the first frame. Everything runs on a **fixed 60 Hz timestep** so the
+  game plays identically at 30, 60 or 240 fps.
 - **Scrolling camera** (it leads the car in its direction of travel so you can see where you're going) **+ HUD radar + a full-screen city map** on `M` / `TAB`, across the full 100×100-tile map, with `F5` / `F9` JSON save/load, an in-game pause / controls screen, and an `F3` debug overlay.
 - **Chunky 1997-console look**: everything is procedurally baked hard-pixel art at a 640×360 internal buffer, nearest-neighbour upscaled 2×. Optional CRT scanline / vignette pass on `F2`. No image assets.
 
