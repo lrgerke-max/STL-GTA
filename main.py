@@ -43,8 +43,31 @@ SPRITE_SCALE_PED = 1.0
 SHADOW_DX = 3               # southeast, matching the building shadows
 SHADOW_DY = 3
 
-PARKED_CAR_COUNT = 22       # kerbside cars available to steal
-MOVING_CAR_COUNT = 8        # ambient traffic actually in motion
+PARKED_CAR_COUNT = 30       # kerbside cars available to steal
+MOVING_CAR_COUNT = 22       # ambient traffic actually in motion
+PEDESTRIAN_COUNT = 90       # people on the street
+
+# --- Population streaming -------------------------------------------------
+# The map is 100x100 tiles and the viewport sees 0.56% of it, so a population
+# scattered over the whole city puts nobody on screen: 40 pedestrians measured
+# 0.0 visible on average. Raising the raw count cannot fix that - you would
+# need ~1800 of them. Instead the pool stays modest and anything that wanders
+# out of earshot is recycled into the ring just outside the view, which is what
+# GTA1 did: the city you cannot see does not need simulating.
+POP_KEEP_RADIUS = 760       # px from the player before an entity is recycled
+# The respawn ring hugs the viewport: its inner edge is just past the screen
+# corner (hypot(320, 180) = 367) so nothing ever pops into view, but close
+# enough that moving even a little sweeps fresh traffic and people into shot.
+POP_RESPAWN_MIN = 390
+POP_RESPAWN_MAX = 650
+POP_RECYCLE_PER_STEP = 3    # spread the work over frames, avoid mass teleports
+POP_AHEAD_SPREAD = 1.9      # radians either side of travel to bias respawns into
+POP_AHEAD_SPEED = 2.5       # px/step of travel before that bias kicks in
+# Concentrating traffic near the player also concentrates its jams. A car that
+# has sat still off-screen this long has deadlocked against its neighbours, so
+# recycle it rather than let the knot grow.
+POP_STALL_STEPS = FPS * 5
+POP_OFFSCREEN = 400         # px: past the screen corner, safe to teleport
 
 # Ambient traffic used to run at the player's own 9.5 top speed on a 0.55
 # throttle, so it was uncatchable on foot (PLAYER_SPEED is 4.2). Traffic speed
@@ -775,6 +798,38 @@ def random_open_spawn(road_only=False):
             continue                       # never spawn inside a sealed pocket
         return c * TILE_SIZE + TILE_SIZE // 2, r * TILE_SIZE + TILE_SIZE // 2
     return MAP_WIDTH // 2, MAP_HEIGHT // 2
+
+
+def ring_spawn_near(ax, ay, road_only=False, rmin=POP_RESPAWN_MIN,
+                    rmax=POP_RESPAWN_MAX, heading=None, spread=POP_AHEAD_SPREAD):
+    """A reachable tile centre in an annulus around (ax, ay).
+
+    Used to seed and to recycle the street population, so people and traffic
+    are always where the player actually is rather than smeared over a map
+    that is 99.4% off-screen. Returns None if nothing suitable was found.
+
+    `heading` biases the ring toward the way the player is travelling. Driving
+    at full speed crosses the whole keep radius in about a second, so a
+    uniform ring wastes half its budget behind you on entities you will never
+    meet; weighting it forward is what keeps traffic in the windscreen.
+    """
+    for _ in range(28):
+        if heading is None:
+            ang = random.uniform(0, math.tau)
+        else:
+            ang = heading + random.uniform(-spread, spread)
+        dist = random.uniform(rmin, rmax)
+        col = int(ax + math.cos(ang) * dist) // TILE_SIZE
+        row = int(ay + math.sin(ang) * dist) // TILE_SIZE
+        if not (2 <= col < MAP_TILES_W - 2 and 2 <= row < MAP_TILES_H - 2):
+            continue
+        tile = GAME_MAP[row][col]
+        if tile['collidable'] or not WALK_REACHABLE[row][col]:
+            continue
+        if road_only and tile['type'] != TILE_ROAD:
+            continue
+        return col * TILE_SIZE + TILE_SIZE // 2, row * TILE_SIZE + TILE_SIZE // 2
+    return None
 
 
 def free_point_near(x, y, w, h, max_rings=6, require_reachable=True):
@@ -6717,6 +6772,7 @@ class Car:
         self.pinned = 0          # consecutive steps making no headway
         self.reverse_timer = 0   # steps left of a back-out manoeuvre
         self.reverse_side = 1
+        self.stall = 0           # steps stopped in traffic; feeds the jam breaker
         # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
         # counting down) then explodes. Trucks soak more, the scooter is paper.
         self.max_hp = {'bus': 170.0, 'garbage_truck': 155.0, 'box_truck': 120.0,
@@ -7212,7 +7268,11 @@ class Game:
             car.velocity = 0.0
             self.cars.append(car)
         for _ in range(MOVING_CAR_COUNT):
-            cx, cy = random_open_spawn(road_only=True)
+            # seeded around the player, not smeared over the whole map, so the
+            # first street you see already has traffic on it
+            spot = ring_spawn_near(px, py, road_only=True, rmin=140,
+                                   rmax=POP_KEEP_RADIUS)
+            cx, cy = spot if spot else random_open_spawn(road_only=True)
             self.cars.append(Car(cx, cy))
 
         self.rail = build_rail_vehicles()
@@ -7227,9 +7287,11 @@ class Game:
                 car.angle = traffic_aligned_spawn_angle(car)
 
         self.pedestrians = []
-        for _ in range(40):
-            px2, py2 = random_open_spawn()
+        for _ in range(PEDESTRIAN_COUNT):
+            spot = ring_spawn_near(px, py, rmin=50, rmax=POP_KEEP_RADIUS)
+            px2, py2 = spot if spot else random_open_spawn()
             self.pedestrians.append(Pedestrian(px2, py2, self._ped_kind_for(px2, py2)))
+        self._kerb_queue = []      # cached kerb spots for recycling parked cars
 
         # POLICE_STATION_TILE names a building tile, so its raw centre is solid
         # ground. Resolve it once to the nearest standable spot: anything that
@@ -7667,6 +7729,102 @@ class Game:
                 self.ammo = min(99, self.ammo + PISTOL_AMMO)
                 self.add_callout("PISTOL", hud_HUD_GOLD, ttl=FPS, scale=1)
                 self.add_pop((w['x'], w['y']), f"+{PISTOL_AMMO}", hud_HUD_GOLD)
+
+    # ---------------- population streaming ----------------
+    def travel_heading(self):
+        """Direction of travel in radians, or None when barely moving. Used to
+        aim the respawn ring at the road ahead instead of the one behind."""
+        if self.driving is not None:
+            if abs(self.driving.velocity) < POP_AHEAD_SPEED:
+                return None
+            return self.driving.angle if self.driving.velocity > 0 else \
+                self.driving.angle + math.pi
+        dx, dy = self.player_dir[0], self.player_dir[1]
+        if math.hypot(dx, dy) * PLAYER_SPEED < POP_AHEAD_SPEED:
+            return None
+        return math.atan2(dy, dx)
+
+    def _kerb_spot(self):
+        """A kerbside parking bay in the ring just outside the view."""
+        if not self._kerb_queue:
+            ax, ay = self.active_rect().center
+            try:
+                spots = parking_parking_spots(max_count=16, near=(ax, ay),
+                                              radius=POP_RESPAWN_MAX)
+            except (TypeError, ValueError):
+                spots = ()
+            self._kerb_queue = [s for s in spots
+                                if math.hypot(s[0] - ax, s[1] - ay) >= POP_RESPAWN_MIN]
+            random.shuffle(self._kerb_queue)
+        return self._kerb_queue.pop() if self._kerb_queue else None
+
+    def update_population(self):
+        """Recycle anything that has wandered far away back to just off-screen.
+
+        The viewport is 0.56% of the map, so a population spread over the whole
+        city is a population you never see - 40 pedestrians measured 0.0 visible
+        on average. Keeping the same modest pool but always near the player is
+        what makes the streets look inhabited, and it costs nothing extra: the
+        entities were being simulated either way.
+        """
+        ax, ay = self.active_rect().center
+        limit = POP_KEEP_RADIUS * POP_KEEP_RADIUS
+        moved = 0
+        heading = self.travel_heading()
+
+        for ped in self.pedestrians:
+            if moved >= POP_RECYCLE_PER_STEP:
+                break
+            if ped.down_timer > 0:            # do not vanish a body mid-fall
+                continue
+            dx, dy = ped.rect.centerx - ax, ped.rect.centery - ay
+            if dx * dx + dy * dy <= limit:
+                continue
+            spot = ring_spawn_near(ax, ay, heading=heading)
+            if spot is None:
+                continue
+            ped.rect.center = spot
+            ped.mood = 'calm'
+            ped.mood_timer = 0
+            ped.down_timer = 0
+            ped.bump_cooldown = 0
+            ped.knock.update(0, 0)
+            if ped.follower:
+                ped.follower.x, ped.follower.y = float(spot[0]), float(spot[1])
+            moved += 1
+
+        for car in self.cars:
+            if moved >= POP_RECYCLE_PER_STEP * 2:
+                break
+            if car is self.driving or car.driver is not None or car.burn > 0:
+                continue
+            dx, dy = car.rect.centerx - ax, car.rect.centery - ay
+            d2 = dx * dx + dy * dy
+            # A deadlocked knot of traffic well off-screen is worth breaking up
+            # even though it has not drifted out of range. car.stall is counted
+            # in the traffic loop in update(), which visits every car.
+            jammed = (car.stall > POP_STALL_STEPS
+                      and d2 > POP_OFFSCREEN * POP_OFFSCREEN)
+            if d2 <= limit and not jammed:
+                continue
+            car.stall = 0
+            if car.parked:
+                bay = self._kerb_spot()
+                if bay is None:
+                    continue
+                car.rect.center = (int(bay[0]), int(bay[1]))
+                car.angle = bay[2]
+                car.velocity = 0.0
+            else:
+                spot = ring_spawn_near(ax, ay, road_only=True, heading=heading)
+                if spot is None:
+                    continue
+                car.rect.center = spot
+                car.velocity = 0.0
+                traffic_init_car(car)
+                car.angle = traffic_aligned_spawn_angle(car)
+            car.hp = car.max_hp
+            moved += 1
 
     # ---------------- wrecks + explosions ----------------
     def update_wrecks(self):
@@ -8220,6 +8378,8 @@ class Game:
         for car in self.cars:
             if car.driver is None and not car.parked:
                 traffic_drive(car, self.cars)
+                # how long this car has been going nowhere, for the jam breaker
+                car.stall = car.stall + 1 if abs(car.velocity) < 0.3 else 0
             elif car.parked and abs(car.velocity) > 0.05:
                 # shunted at the kerb: let it coast to a stop instead of
                 # absorbing the hit and sitting there like scenery
@@ -8242,6 +8402,7 @@ class Game:
             self.attack_cd -= 1
         if self.punch_timer > 0:
             self.punch_timer -= 1
+        self.update_population()
         self.update_wrecks()
         self.update_police()
         self.update_wanted_decay()

@@ -804,6 +804,60 @@ def test_ramming_a_car_actually_moves_it():
         f"rammed car barely moved: {before} -> {victim.velocity}")
 
 
+def test_population_streams_toward_the_player():
+    """The viewport is 0.56% of the map, so a population spread over the whole
+    city is a population you never see - 40 peds measured 0.0 visible. Anything
+    that wanders out of earshot has to come back to just off-screen."""
+    g = game()
+    g.driving = None
+    teleport(g, M.random_open_spawn())
+    g.sync_player_float()
+    # scatter everyone to the far corners
+    for i, ped in enumerate(g.pedestrians):
+        ped.rect.center = (200 + (i % 5) * 40, 200 + (i // 5) * 40)
+        ped.down_timer = 0
+    ax, ay = g.player_rect.center
+    far0 = sum(1 for p in g.pedestrians
+               if math.hypot(p.rect.centerx - ax, p.rect.centery - ay) > M.POP_KEEP_RADIUS)
+    assert far0 > 20, "test setup should have scattered them"
+
+    for _ in range(len(g.pedestrians) * 2):
+        g.player_dir = [0, 0]
+        g.update_population()
+    ax, ay = g.player_rect.center
+    far1 = sum(1 for p in g.pedestrians
+               if math.hypot(p.rect.centerx - ax, p.rect.centery - ay) > M.POP_KEEP_RADIUS)
+    assert far1 < far0 // 4, f"streaming left {far1} of {far0} stragglers behind"
+    # and nothing pops into view: recycled entities land outside the viewport
+    for ped in g.pedestrians:
+        d = math.hypot(ped.rect.centerx - ax, ped.rect.centery - ay)
+        assert d < M.POP_KEEP_RADIUS + M.TILE_SIZE or ped.down_timer > 0
+    assert M.POP_RESPAWN_MIN > math.hypot(M.SCREEN_WIDTH / 2, M.SCREEN_HEIGHT / 2), \
+        "respawn ring must sit outside the viewport corner"
+
+
+def test_the_streets_are_actually_populated():
+    """The whole point, measured the way a player meets it: boot the game and
+    look at the screen. A fresh Game, not the shared one, because this is
+    about the spawn distribution and earlier tests scatter entities around."""
+    random.seed(4242)
+    g = M.Game()
+    assert len(g.pedestrians) == M.PEDESTRIAN_COUNT
+    assert len(g.cars) == M.PARKED_CAR_COUNT + M.MOVING_CAR_COUNT
+
+    seen = []
+    for i in range(400):
+        g.player_dir = [1, 0] if (i // 60) % 2 == 0 else [0, 1]
+        g.step_sim(M.SIM_DT)
+        if i % 40 == 0:
+            view = pygame.Rect(g.camera.x, g.camera.y,
+                               M.SCREEN_WIDTH, M.SCREEN_HEIGHT)
+            seen.append(sum(1 for p in g.pedestrians if view.colliderect(p.rect)))
+    average = sum(seen) / len(seen)
+    assert average >= 5.0, f"only {average:.1f} pedestrians on screen on average"
+    assert min(seen) >= 1, f"the street emptied out completely: {seen}"
+
+
 def test_gamepad_is_optional_and_never_crashes_without_one():
     """CI and most desktops have no pad plugged in; every read must degrade
     to a safe zero rather than raising."""
