@@ -59,6 +59,12 @@ def reset(g):
     g.death_kind = None
     g.death_stats = None
     g.cop_dispatch = 0
+    g.foot_police = []
+    g.crime_pos = None
+    g.crime_frame = -10 ** 9
+    g.peak_star = 0
+    g.chase_steps = 0
+    g.longest_chase = 0
     g.spotted = False
     g.was_spotted = False
     g.searching = False
@@ -289,7 +295,7 @@ def test_cops_spawn_within_reach_of_the_player():
 
 def test_single_frame_of_contact_does_not_bust_you():
     g = game()
-    dispatch_cops(g, 1)
+    dispatch_cops(g, 2)
     g.police[0].rect.center = g.player_rect.center
     g.update_police()
     assert g.state == M.STATE_PLAYING, "one touch must not be an instant bust"
@@ -297,29 +303,57 @@ def test_single_frame_of_contact_does_not_bust_you():
 
 
 def test_sustained_contact_does_bust_you():
+    """In a car, where a cruiser will actually close on you. Below
+    COP_RAMMING_STAR a cruiser deliberately brakes short of a player on foot
+    and leaves the arrest to the beat cop - see the test below."""
     g = game()
-    dispatch_cops(g, 1)
+    car = _drive(g)
+    dispatch_cops(g, 2)
     g.cash = 1000
+    g.peak_star = 2
     for _ in range(M.BUST_CONTACT_STEPS + 4):
         if g.police:
-            g.police[0].rect.center = g.player_rect.center
+            g.police[0].rect.center = car.rect.center
         g.update_police()
     assert g.state == M.STATE_DEAD, "sustained contact should have taken you"
     assert g.death_kind == 'busted'
     assert g.wanted_level == 0
-    assert g.cash == 1000 - M.BAIL_COST
+    assert g.cash == 1000 - M.BAIL_BY_STAR[2]
 
 
-def test_bust_respawn_is_the_station_not_a_random_tile():
-    """Busting used to teleport you to a random tile on a 100x100 map, which
-    destroyed any sense of where you were."""
+def test_a_beat_cop_can_actually_arrest_you_on_foot():
+    """The arrest fantasy the old build never once delivered: 30 on-foot
+    trials produced 23 run over and 0 arrested, because a cruiser deletes
+    100 HP long before BUST_CONTACT_STEPS elapses."""
     g = game()
-    g.wanted_level = 2
-    g.busted()
-    g.finish_death()
-    d = math.hypot(g.player_rect.centerx - g.police_station[0],
-                   g.player_rect.centery - g.police_station[1])
-    assert d < 10 * M.TILE_SIZE, f"woke up {d:.0f}px from the station"
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    g.wanted_level = 1
+    g.cash = 1000
+    for _ in range(M.FPS * 25):
+        g.update_police()
+        if g.state == M.STATE_DEAD:
+            break
+    assert g.state == M.STATE_DEAD, "a beat cop never took a stationary player"
+    assert g.death_kind == 'busted', "he should arrest you, not kill you"
+
+
+def test_both_ways_of_dying_wake_you_under_the_arch():
+    """One respawn anchor teaches the map. Busting used to teleport you to a
+    random tile on a 100x100 grid, then to the station; either way you were
+    somewhere else every time and never learned where anything was."""
+    entry = next(e for e in M.LANDMARKS if e[5] == "Gateway Arch")
+    ax = (entry[0] + entry[2] / 2.0) * M.TILE_SIZE
+    ay = (entry[1] + entry[3] / 2.0) * M.TILE_SIZE
+    for kill in ('busted', 'wasted'):
+        g = game()
+        teleport(g, (12 * M.TILE_SIZE, 88 * M.TILE_SIZE))
+        g.wanted_level = 2
+        getattr(g, kill)()
+        assert g.state == M.STATE_DEAD, kill
+        g.finish_death()
+        d = math.hypot(g.player_rect.centerx - ax, g.player_rect.centery - ay)
+        assert d < 8 * M.TILE_SIZE, (
+            f"{kill} woke up {d / M.TILE_SIZE:.1f} tiles from the Arch")
 
 
 def test_heat_does_not_decay_while_a_cop_is_on_you():
@@ -1216,19 +1250,159 @@ def test_hiding_needs_cover_and_stillness():
     assert not g.hidden, "you cannot hide in the middle of Market Street"
 
 
+def test_one_star_is_a_beat_cop_on_foot_not_a_cruiser():
+    """A cruiser cannot arrest a pedestrian - BUST_CONTACT_STEPS wants 42
+    steps of contact and a car doing 10px a step runs you over long before
+    that. Measured on the old build: 30 on-foot trials, 23 run over, 0
+    arrested. One star is a man on foot now."""
+    assert M.COP_COUNT_BY_STAR[1] == 0, "one star should field no cruiser"
+    assert M.COP_FOOT_BY_STAR[1] == 1, "one star should field a beat cop"
+    g = game()
+    g.wanted_level = 1
+    for _ in range(M.FPS * 8):
+        g.update_police()
+        if g.foot_police:
+            break
+    assert g.foot_police, "no beat cop ever turned up for one star"
+    assert not g.police, "one star must not put a cruiser on the street"
+    assert M.COP_FOOT_SPEED > M.PLAYER_SPEED, "he has to be able to catch you"
+    assert M.COP_FOOT_SPEED < M.COP_SPEED_BY_STAR[2], "but not like a car"
+
+
+def test_a_beat_cop_walks_toward_you_and_can_hold_you():
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    g.wanted_level = 1
+    for _ in range(M.FPS * 8):
+        g.update_police()
+        if g.foot_police:
+            break
+    cop = g.foot_police[0]
+    start = math.hypot(cop.rect.centerx - g.player_rect.centerx,
+                       cop.rect.centery - g.player_rect.centery)
+    for _ in range(M.FPS * 6):
+        g.update_police()
+        if g.state == M.STATE_DEAD:
+            break
+    if g.foot_police:
+        end = math.hypot(g.foot_police[0].rect.centerx - g.player_rect.centerx,
+                         g.foot_police[0].rect.centery - g.player_rect.centery)
+        closed = start - end
+    else:
+        closed = start
+    assert closed > 60, f"the beat cop only closed {closed:.0f}px in 6s"
+
+
+def test_a_beat_cop_never_leaves_the_map():
+    g = game()
+    g.wanted_level = 1
+    for _ in range(M.FPS * 30):
+        g.update_police()
+        for cop in g.foot_police:
+            assert 0 <= cop.rect.centerx <= M.MAP_WIDTH, cop.rect.center
+            assert 0 <= cop.rect.centery <= M.MAP_HEIGHT, cop.rect.center
+            assert not M.is_blocked(cop.rect), "a beat cop walked into a wall"
+        if g.state == M.STATE_DEAD:
+            g.finish_death()
+            g.wanted_level = 1
+
+
+def test_cops_are_sent_to_the_crime_not_to_wherever_you_got_to():
+    """The measured failure of the first LOS pass: a lone unit spawned 400-900
+    px out with no idea which way to look and never once found the player in
+    10 trials, which turned one star into an inert countdown."""
+    g = game()
+    teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+    g.wanted_bump(1, 'pedestrian')
+    scene = g.crime_pos
+    assert scene is not None, "the offence did not stamp a crime scene"
+    # walk a long way off before anyone is dispatched
+    teleport(g, (70 * M.TILE_SIZE, 70 * M.TILE_SIZE))
+    aim = g.dispatch_target()
+    d = math.hypot(aim[0] - scene[0], aim[1] - scene[1])
+    assert d < M.TILE_SIZE, "dispatch ignored the crime scene"
+    # and it goes stale, so they stop guarding an address you left ten
+    # seconds ago
+    g.frame = g.crime_frame + M.CRIME_SCENE_STALE + 1
+    aim = g.dispatch_target()
+    assert math.hypot(aim[0] - scene[0], aim[1] - scene[1]) > M.TILE_SIZE
+
+
+def test_losing_five_stars_pays_more_than_losing_one():
+    def payout(star):
+        g = game()
+        g.wanted_level = star
+        g.peak_star = star
+        g.police = []
+        g.heat_timer = 10 ** 6
+        g.score = 0
+        for _ in range(M.FPS * 90):
+            g.update_wanted_decay()
+            if g.wanted_level == 0:
+                return g.score
+        raise AssertionError(f"never shed {star} stars")
+
+    one, five = payout(1), payout(5)
+    assert five > one * 4, f"five stars paid {five}, one star paid {one}"
+
+
+def test_bail_scales_with_how_hot_you_were():
+    cheap, dear = M.BAIL_BY_STAR[1], M.BAIL_BY_STAR[5]
+    assert dear > cheap * 4
+    g = game()
+    g.cash = 10000
+    g.peak_star = 5
+    g.busted()
+    assert g.cash == 10000 - M.BAIL_BY_STAR[5]
+
+
+def test_hiding_in_a_parked_car_counts():
+    """The driving layer's own version of ducking into a gangway."""
+    g = game()
+    car = _drive(g)
+    car.velocity = 0.0
+    car.input_throttle = 0.0
+    g.spotted = False
+    for _ in range(M.HIDE_CAR_STEPS + 4):
+        g.update_hiding()
+    assert g.hidden, "sitting still in a car with the engine off is hiding"
+    car.velocity = 5.0
+    g.update_hiding()
+    assert not g.hidden, "driving away is not hiding"
+    g.driving = None
+
+
+def test_under_the_arch_is_the_best_place_to_hide():
+    g = game()
+    spot = g.arch_respawn_point()
+    teleport(g, spot)
+    assert g.hide_scale() > M.HIDE_DECAY_SCALE, (
+        "the map's anchor should be mechanically special")
+
+
+def test_no_cop_sees_you_from_off_the_edge_of_the_screen():
+    """Anything over ~300px lets a cop see you from outside the frame, which
+    always reads as cheating however true it is."""
+    for star in range(1, M.WANTED_MAX + 1):
+        assert M.COP_SIGHT_BY_STAR[star] <= 300, star
+    assert M.COP_FOOT_SIGHT <= 300
+
+
 def test_one_star_is_slower_than_five():
     """Escalation: a beat cop should be losable, the full department not."""
-    assert M.COP_SPEED_BY_STAR[1] < M.COP_SPEED_BY_STAR[5]
+    assert M.COP_SPEED_BY_STAR[2] < M.COP_SPEED_BY_STAR[5]
     assert M.COP_SIGHT_BY_STAR[1] < M.COP_SIGHT_BY_STAR[5]
     assert M.COP_RESPONSE_BY_STAR[1] > M.COP_RESPONSE_BY_STAR[5]
-    assert M.COP_SPEED_BY_STAR[1] > M.PLAYER_SPEED, "a cruiser still outruns a jogger"
+    assert M.WANTED_DECAY_BY_STAR[1] < M.WANTED_DECAY_BY_STAR[5], (
+        "a one-star scrape should resolve inside a block")
+    assert M.COP_SPEED_BY_STAR[2] > M.PLAYER_SPEED, "a cruiser outruns a jogger"
 
 
 def test_a_fresh_star_does_not_conjure_a_cop_on_top_of_you():
     g = game()
-    g.wanted_level = 1
+    g.wanted_level = 2
     g.police = []
-    g.cop_dispatch = M.COP_RESPONSE_BY_STAR[1]
+    g.cop_dispatch = M.COP_RESPONSE_BY_STAR[2]
     g.update_police()
     assert not g.police, "the call has to go out before a cruiser arrives"
 
