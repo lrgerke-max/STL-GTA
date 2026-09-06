@@ -60,6 +60,7 @@ ROAD_LINES = set(range(ROAD_ORIGIN, MAP_TILES_W, ROAD_STEP))
 
 RADAR_SIZE = 78             # smaller than the old 110px minimap, GTA1 proportions
 STAR_BLOCK_W = 76           # width of the 6-slot wanted star row
+MAP_OVERVIEW_SIZE = 300     # side of the full-city map drawn by the M / TAB screen
 
 # --- Simulation timing ---------------------------------------------------
 # Every tuning constant in this file (PLAYER_SPEED, accelerations, drag,
@@ -84,6 +85,7 @@ INFRACTION_COOLDOWN = {
     'pedestrian': FPS * 1,
     'traffic': FPS * 3,
     'cop': FPS * 2,
+    'gunfire': FPS * 2,
 }
 COP_SPAWN_MIN = 420         # px: cops arrive from off-screen, not from downtown
 COP_SPAWN_MAX = 900
@@ -107,6 +109,52 @@ JOB_MIN_TILE_SPAN = 12      # never pair two landmarks that are basically adjace
 JOB_STREAK_BONUS = 0.15     # +15% per consecutive on-time drop, capped below
 JOB_STREAK_CAP = 6
 JOB_HEAT_LIMIT = 3          # no dispatcher will hand you a run at 3+ stars
+
+# --- Chaos score multiplier --------------------------------------------------
+# The GTA1 compulsion spine: every reckless act feeds a running multiplier,
+# parking bleeds it, and death (busted / wasted) wipes it. Chaos score is
+# multiplied; delivery cash and the flat delivery bonus are not.
+MULT_MAX = 8
+MULT_RUNG = 55             # chaos points banked per multiplier rung
+MULT_DECAY_GRACE = FPS * 7 # steps of no chaos before the multiplier starts to fall
+MULT_DECAY_STEP = FPS * 3  # steps per rung shed after that
+
+# --- Kill Frenzy -----------------------------------------------------------
+FRENZY_SECONDS = 45
+FRENZY_COOLDOWN = FPS * 10   # after one ends before the next icon appears
+COMBO_SHOUTS = {5: "GOURANGA!", 10: "SLINGER STREAK",
+                15: "TOTAL CARNAGE", 20: "ST LOUIS HATES YOU"}
+
+# --- On-foot player health ----------------------------------------------
+PLAYER_MAX_HP = 100.0
+PLAYER_HP_REGEN = 0.06      # per step, when not freshly hit
+
+# --- Splatter -------------------------------------------------------------
+# Below this closing speed a pedestrian is knocked down and gets up again;
+# at or above it they do not.
+SPLAT_SPEED = 5.2
+DECAL_MAX = 64              # ground stains kept before the oldest is dropped
+
+# --- Combat ---------------------------------------------------------------
+PUNCH_RANGE = 30            # px from the player's centre
+PUNCH_ARC = 1.15            # radians, half-angle of the swing
+PUNCH_COOLDOWN = 16         # steps between swings
+PUNCH_DAMAGE = 26.0         # against a car
+SHOOT_COOLDOWN = 11
+BULLET_SPEED = 13.0
+BULLET_LIFE = 42            # steps (~9 tiles of travel)
+BULLET_DAMAGE = 34.0
+PISTOL_AMMO = 24            # rounds per pickup
+WEAPON_PICKUP_COUNT = 9
+WEAPON_RESPAWN = FPS * 25
+
+# Every fixed callout / shout string, gathered so the font-coverage test can
+# assert the bitmap font actually has every glyph they need.
+CALLOUT_STRINGS = (
+    "DELIVERED!", "BUSTED!", "WASTED", "LOST 'EM", "NEW TURF",
+    "MULTIPLIER LOST", "MULTIPLIER X8", "KILL FRENZY!", "FRENZY OVER",
+    "FRENZY DONE", "JACKED!", "12 LEFT", "YOU MONSTER",
+)
 
 # --- Tile types ---
 TILE_GRASS = 0
@@ -184,7 +232,18 @@ CAR_COLORS = [
 
 # --- Landmarks: real St. Louis places, spread across the world grid ---
 # (x_tile, y_tile, w_tiles, h_tiles, kind, name, color)
-LANDMARK_OPEN_GROUND = {"Gateway Arch"}
+#
+# Collision layout per landmark. The old single rule stamped a 3x3 maze of
+# 2x2 blocks into every "building" landmark, which made them miserable to
+# deliver into: no legible way in, and the drop marker could land deep in an
+# alley. Each landmark now gets a shape that matches its art and reads at a
+# glance - see _landmark_tile().
+LANDMARK_LAYOUT = {
+    "Gateway Arch": "arch",              # two leg footings; walk under the span
+    "Downtown & Busch Stadium": "stadium",  # solid bowl, one gate to the field
+    "Ted Drewes": "drivein",             # stand at the back, queue in the lot
+}
+LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
 
 # Positions trace the real St. Louis map (north = up, Mississippi on the east
 # edge): the Arch on the riverfront with downtown and the ballpark just inland,
@@ -204,6 +263,9 @@ LANDMARKS = [
     # --- North-west ---
     (9, 8, 15, 6, "building", "Delmar Loop", (150, 84, 76)),
     # --- South city ---
+    # Ted Drewes on Chippewa: a low white custard stand set back behind its
+    # lot, with the queue that never goes away. Small footprint on purpose.
+    (37, 53, 6, 4, "building", "Ted Drewes", (226, 222, 212)),
     (28, 60, 9, 8, "building", "The Hill", (156, 108, 66)),
     (42, 63, 14, 13, "park", "Tower Grove Park", COLOR_PARK),
 ]
@@ -418,33 +480,219 @@ def _blend(a, b, t):
     return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
+# ---------------------------------------------------------------------------
+# Neighbourhood character: which shop signs and which housing stock a block
+# gets. Real St. Louis reads completely differently north to south - the Hill
+# is delis and pizzerias over brick shotguns, the Loop and Grand Center are
+# theatres and record shops, south city is Cherokee antiques and Bevo flats.
+# Everything here is a deterministic lookup keyed on the tile, so no frame ever
+# re-rolls a sign or a roof.
+# ---------------------------------------------------------------------------
+# (text <= 10 chars so it fits a 64px shopfront at scale 1, bg, fg)
+SIGN_IMOS = ("IMO'S", (30, 86, 48), (238, 234, 214))
+SIGN_OYSTER = ("OYSTER BAR", (58, 32, 92), (238, 158, 226))
+SIGN_ANTIQUES = ("ANTIQUES", (92, 56, 34), (238, 214, 150))
+SIGN_CROWN = ("CROWN", (188, 96, 132), (250, 242, 236))
+SIGN_CUSTARD = ("CUSTARD", (176, 46, 44), (246, 240, 226))
+SIGN_PROVEL = ("PROVEL", (46, 62, 100), (226, 230, 240))
+SIGN_RAVIOLI = ("RAVIOLI", (140, 44, 40), (244, 226, 160))
+SIGN_SLINGERS = ("SLINGERS", (52, 66, 80), (226, 236, 240))
+SIGN_BODEGA = ("BODEGA", (166, 96, 40), (244, 232, 200))
+SIGN_FOX = ("FOX", (46, 38, 30), (248, 210, 96))
+SIGN_GROVE = ("THE GROVE", (58, 48, 96), (230, 190, 240))
+SIGN_DELI = ("DELI", (58, 76, 56), (240, 236, 216))
+SIGN_PIZZERIA = ("PIZZERIA", (150, 44, 40), (242, 234, 208))
+SIGN_BAKERY = ("BAKERY", (170, 140, 74), (52, 38, 26))
+SIGN_RECORDS = ("RECORDS", (40, 52, 74), (226, 226, 236))
+SIGN_PORK = ("PORK STEAK", (104, 66, 38), (238, 216, 158))
+
+HOOD_SIGNS = {
+    # The Hill and south city: Italian-American storefronts
+    'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_IMOS, SIGN_RAVIOLI,
+             SIGN_PROVEL),
+    # Cherokee / Bevo / south-east: antiques, bodegas, custard
+    'south': (SIGN_ANTIQUES, SIGN_BODEGA, SIGN_CUSTARD, SIGN_IMOS, SIGN_PORK),
+    # Loop, Grand Center, the Grove: theatres, records, bars
+    'arts': (SIGN_FOX, SIGN_GROVE, SIGN_RECORDS, SIGN_OYSTER, SIGN_ANTIQUES),
+    # Downtown / Soulard: bars, diners, corner shops
+    'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_CROWN, SIGN_BODEGA,
+                 SIGN_PROVEL),
+}
+HOOD_HOUSES = {
+    'hill': ('shotgun', 'shotgun', 'gable_brick', 'gable_brick', 'mansard'),
+    'south': ('shotgun', 'gable_brick', 'gable_brick', 'painted_lady', 'mansard'),
+    'arts': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'downtown': ('mansard', 'mansard', 'gable_brick', 'painted_lady'),
+}
+
+
+def hood_at(col, row):
+    """Coarse neighbourhood for a tile, traced onto the same geography the
+    LANDMARKS table uses (north = up, river on the east edge)."""
+    if row >= 56 and col < 40:
+        return 'hill'                     # The Hill / south-west
+    if row >= 52:
+        return 'south'                    # Cherokee, Bevo, Tower Grove south
+    if col < 46 and row < 40:
+        return 'arts'                     # Loop, CWE, Grand Center
+    if col >= 64:
+        return 'downtown'                 # downtown, riverfront, Soulard
+    return 'arts'
+
+
+def hood_pick_sign(col, row, n):
+    pool = HOOD_SIGNS[hood_at(col, row)]
+    return pool[(n >> 7) % len(pool)]
+
+
+def hood_pick_house(col, row, n):
+    pool = HOOD_HOUSES[hood_at(col, row)]
+    return pool[(n >> 9) % len(pool)]
+
+
+def _lm_solid_arch(lx, ly, lw, lh):
+    """The Arch is a *vertical* catenary: in plan it is two leg footings and a
+    span 600ft overhead. Only the footings block you - everything between and
+    under the legs is open ground you can walk straight through. Columns and
+    base row track the fractions lm__bake_arch() draws the legs at, so the
+    collision sits exactly under the steel."""
+    leg_a = max(1, int(round(0.145 * lw)))
+    leg_b = min(lw - 2, int(round(0.775 * lw)))
+    base = int(round(0.575 * lh))
+    return lx in (leg_a, leg_b) and base - 1 <= ly <= base
+
+
+def _lm_solid_stadium(lx, ly, lw, lh):
+    """Busch Stadium as a real bowl: the seating ring is a hard wall, the field
+    inside is open, and a single gate corridor due south is the only way in.
+    Ellipse centre/radii match lm__bake_stadium()'s art."""
+    cx, cy = 0.355 * lw, 0.50 * lh
+    rx, ry = max(1.0, 0.335 * lw), max(1.0, 0.465 * lh)
+    dx = (lx + 0.5 - cx) / rx
+    dy = (ly + 0.5 - cy) / ry
+    v = dx * dx + dy * dy
+    if v > 1.0 or v < 0.40:
+        return False                      # outside the bowl, or on the field
+    # the one gate: a 3-tile corridor running south from the field to the street
+    if abs(lx - int(round(cx))) <= 1 and (ly + 0.5) >= cy:
+        return False
+    return True
+
+
+def _lm_solid_district(lx, ly, lw, lh):
+    """A city block you can actually use, and one that still reads as a dense
+    neighbourhood: a walkable apron outside, a band of buildings, an alley,
+    a second band on the bigger blocks, and a small courtyard in the middle
+    where the drop marker lands. Every band has a gate through the middle of
+    all four sides, so there is always a legible way in and nothing is sealed.
+    """
+    if lw < 6 or lh < 6:
+        return False                      # too small for a ring; leave it open
+    # Depth from the nearest edge puts every tile on exactly one ring, so the
+    # gates of one ring can never accidentally punch a hole in another's corner.
+    depth = min(lx, ly, lw - 1 - lx, lh - 1 - ly)
+    if depth == 0:
+        return False                      # approach apron
+    if depth == 1:                        # outer building band
+        if (ly == 1 or ly == lh - 2) and abs(lx - lw // 2) <= 1:
+            return False                  # north / south gate
+        if (lx == 1 or lx == lw - 2) and abs(ly - lh // 2) <= 1:
+            return False                  # east / west gate
+        return True
+    if depth == 2:
+        return False                      # the alley between the two bands
+    if depth == 3 and lw >= 8 and lh >= 8:
+        if (ly == 3 or ly == lh - 4) and lx == lw // 2:
+            return False
+        if (lx == 3 or lx == lw - 4) and ly == lh // 2:
+            return False
+        return True
+    return False                          # inner courtyard
+
+
+def _lm_solid_drivein(lx, ly, lw, lh):
+    """A walk-up stand: the building is a bar across the back, the front is an
+    open lot you queue and park in. Side aprons stay open so you can get round."""
+    if lx == 0 or lx == lw - 1:
+        return False
+    return ly < max(1, lh - 2)
+
+
+_LM_SOLID = {
+    "arch": _lm_solid_arch,
+    "stadium": _lm_solid_stadium,
+    "district": _lm_solid_district,
+    "drivein": _lm_solid_drivein,
+}
+
+
 def _landmark_tile(lx, ly, lw, lh, kind, name, color):
     """Build one tile of a landmark.
 
     Landmarks used to be solid rectangles, which walled them off completely:
     landmark_at() reads the tile under the player's centre, so a fully
     collidable footprint made every building landmark impossible to reach or
-    discover. Now the footprint is mostly walkable ground with structures
-    standing in it, and the outer ring is always open so you can walk in.
+    discover. Each landmark now carries a named layout (LANDMARK_LAYOUT) whose
+    solid mass matches its baked art and always leaves a legible way in.
     """
     if kind == "park":
         return {'type': TILE_PARK, 'collidable': False, 'landmark': name, 'color': color}
 
-    perimeter = lx == 0 or ly == 0 or lx == lw - 1 or ly == lh - 1
-    if name in LANDMARK_OPEN_GROUND:
-        # open monument grounds: only a small central structure is solid
-        solid = lx == lw // 2 and abs(ly - lh // 2) <= 1
-    else:
-        # city district: 2x2 blocks of buildings separated by walkable alleys
-        solid = (not perimeter) and (lx % 3 != 0) and (ly % 3 != 0)
-
-    if solid:
+    layout = LANDMARK_LAYOUT.get(name, LANDMARK_DEFAULT_LAYOUT)
+    if _LM_SOLID[layout](lx, ly, lw, lh):
         return {'type': TILE_BUILDING, 'collidable': True, 'landmark': name, 'color': color}
     return {'type': TILE_PLAZA, 'collidable': False, 'landmark': name,
             'color': _blend(color, COLOR_SIDEWALK, 0.55)}
 
 
 GAME_MAP = build_map()
+
+
+def _compute_reachable():
+    """Flood-fill the walkable tile graph outward from the street network.
+
+    Anything this does not reach is a sealed pocket - a courtyard with no gate,
+    the hollow inside a solid mass - and nothing the game *places* (a job
+    marker, a spawn, a weapon pickup) may land there. A drop marker inside a
+    sealed block is the single most infuriating bug this map can produce: the
+    objective reads as reachable and simply is not.
+    """
+    reach = [[False] * MAP_TILES_W for _ in range(MAP_TILES_H)]
+    start = None
+    for r in range(MAP_TILES_H):
+        for c in range(MAP_TILES_W):
+            tile = GAME_MAP[r][c]
+            if tile['type'] == TILE_ROAD and not tile['collidable']:
+                start = (c, r)
+                break
+        if start:
+            break
+    if start is None:
+        return reach
+    reach[start[1]][start[0]] = True
+    stack = [start]
+    while stack:
+        c, r = stack.pop()
+        for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nc, nr = c + dc, r + dr
+            if not (0 <= nc < MAP_TILES_W and 0 <= nr < MAP_TILES_H):
+                continue
+            if reach[nr][nc] or GAME_MAP[nr][nc]['collidable']:
+                continue
+            reach[nr][nc] = True
+            stack.append((nc, nr))
+    return reach
+
+
+WALK_REACHABLE = _compute_reachable()
+
+
+def is_reachable(x, y):
+    """True if a pixel position sits on open ground connected to the streets."""
+    c, r = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+    if 0 <= r < MAP_TILES_H and 0 <= c < MAP_TILES_W:
+        return WALK_REACHABLE[r][c]
+    return False
 
 
 def tile_at(col, row):
@@ -500,17 +748,22 @@ def random_open_spawn(road_only=False):
             continue
         if not road_only and tile['collidable']:
             continue
+        if not WALK_REACHABLE[r][c]:
+            continue                       # never spawn inside a sealed pocket
         return c * TILE_SIZE + TILE_SIZE // 2, r * TILE_SIZE + TILE_SIZE // 2
     return MAP_WIDTH // 2, MAP_HEIGHT // 2
 
 
-def free_point_near(x, y, w, h, max_rings=6):
+def free_point_near(x, y, w, h, max_rings=6, require_reachable=True):
     """Nearest position to (x, y) where a w x h rect does not overlap anything.
 
     Used anywhere the game has to *place* something rather than move it:
     getting out of a car, dropping a job marker on a landmark, respawning.
     Returns None when there is genuinely no room within max_rings tiles, so
     callers can refuse the action instead of stuffing the player into a wall.
+
+    require_reachable also rejects open ground that is walled off from the
+    street network, so nothing is ever placed somewhere you cannot walk to.
     """
     probe = pygame.Rect(0, 0, w, h)
     step = TILE_SIZE // 2
@@ -527,8 +780,11 @@ def free_point_near(x, y, w, h, max_rings=6):
             probe.center = (int(x + ox), int(y + oy))
             if probe.left < 0 or probe.top < 0 or probe.right > MAP_WIDTH or probe.bottom > MAP_HEIGHT:
                 continue
-            if not is_blocked(probe):
-                return probe.centerx, probe.centery
+            if is_blocked(probe):
+                continue
+            if require_reachable and not is_reachable(probe.centerx, probe.centery):
+                continue
+            return probe.centerx, probe.centery
     return None
 
 
@@ -2147,6 +2403,12 @@ hud__FONT = {
     "'": "..#..|..#..|..#..|.....|.....|.....|.....",
     "%": "##..#|##..#|...#.|..#..|.#...|#..##|#..##",
     "&": ".##..|#..#.|#.#..|.#...|#.#.#|#..#.|.##.#",
+    # +, ( and ) were missing: live strings like "+5" and "(x2 streak)" were
+    # rendering as filled MISSING boxes in-game. The callout / pop-number layer
+    # leans on "+" hard, so they earn their place.
+    "+": ".....|..#..|..#..|#####|..#..|..#..|.....",
+    "(": "..#..|.#...|.#...|.#...|.#...|.#...|..#..",
+    ")": "..#..|...#.|...#.|...#.|...#.|...#.|..#..",
 }
 
 hud__MISSING = "#####|#...#|#...#|#...#|#...#|#...#|#####"
@@ -4531,6 +4793,7 @@ lm_LANDMARK_ART = {
     "Soulard & Anheuser-Busch": "brewery",
     "Forest Park": "forest_park",
     "Tower Grove Park": "tower_grove",
+    "Ted Drewes": "ted_drewes",
 }
 
 #: natural footprint of each landmark in tiles, derived from main.LANDMARKS.
@@ -4543,6 +4806,7 @@ lm_FOOTPRINT_TILES = {
 lm__GROUND = {
     "arch": (66, 82, 54),
     "stadium": (96, 92, 88),
+    "ted_drewes": (52, 52, 54),
     "brewery": (70, 68, 68),
     "forest_park": (68, 84, 56),
     "central_west_end": (102, 98, 94),
@@ -4556,6 +4820,7 @@ lm__GROUND = {
 lm__LABEL_AT = {
     "arch": (0.46, 0.40),
     "stadium": (0.34, 0.93),
+    "ted_drewes": (0.50, 0.97),
     "brewery": (0.50, 0.93),
     "forest_park": (0.50, 0.93),
     "central_west_end": (0.50, 0.93),
@@ -6078,9 +6343,93 @@ def lm__bake_grand_center(w, h):
     return s
 
 
+def lm__bake_ted_drewes(w, h):
+    """Ted Drewes Frozen Custard, Chippewa (Route 66).
+
+    Research: a low, wide, flat-roofed white stand set back behind its lot,
+    green-trimmed, with a long row of walk-up service windows under a red
+    TED DREWES band and a yellow FROZEN CUSTARD strip above it. The queue
+    spilling across the lot is the landmark as much as the building is.
+    """
+    s = lm__new(w, h)
+    # the lot: asphalt with faded bay stripes
+    lm__fill_mottle(s, w, h, lm_ASPHALT, (lm_ASPHALT_LT, lm_ASPHALT_DK), 211, 7, 5)
+
+    # Vertical budget, top to bottom: signage band, the stand, the queue, the
+    # lot. Everything is measured off h so nothing clips off the surface.
+    sign_h = max(20, int(h * 0.16))
+    by = sign_h + 3
+    bh = max(26, int(h * 0.40))
+    bx, bw = 8, int(w) - 16
+    lot_y = by + bh
+
+    for px in range(14, int(w) - 14, max(26, int(w * 0.11))):
+        lm__line(s, lm_LINE_W, (px, lot_y + 34), (px, h - 8))
+    lm__line(s, lm_LINE_Y, (6, h - 6), (w - 6, h - 6), 2)
+
+    # ---- roof signage: yellow FROZEN CUSTARD over the red TED DREWES ------
+    td, fc = "TED DREWES", "FROZEN CUSTARD"
+    sign_w = min(bw, max(hud_text_width(td, 2), hud_text_width(fc, 1)) + 14)
+    sx0 = bx + (bw - sign_w) // 2
+    lm__r(s, lm_SHADOW, sx0 + 4, 6, sign_w, sign_h)
+    lm__r(s, (214, 190, 66), sx0, 2, sign_w, 10)             # yellow strip
+    pygame.draw.rect(s, lm_OUTLINE, (sx0, 2, sign_w, 10), 1)
+    if hud_text_width(fc, 1) <= sign_w - 4:
+        hud_text(s, fc, sx0 + (sign_w - hud_text_width(fc, 1)) // 2, 3,
+                 (48, 40, 24), False, 1)
+    lm__r(s, (176, 46, 44), sx0, 12, sign_w, sign_h - 10)    # red band
+    pygame.draw.rect(s, lm_OUTLINE, (sx0, 12, sign_w, sign_h - 10), 1)
+    hud_text(s, td, sx0 + (sign_w - hud_text_width(td, 2)) // 2, 15,
+             (246, 240, 226), False, 2)
+
+    # ---- the stand -------------------------------------------------------
+    lm__r(s, lm_SHADOW, bx + 6, by + 6, bw, bh)
+    lm__r(s, (228, 226, 218), bx, by, bw, bh)                # white block
+    lm__r(s, (204, 202, 194), bx, by + bh - 8, bw, 8)        # base shade
+    lm__r(s, (54, 96, 62), bx, by + bh - 12, bw, 4)          # green trim band
+    lm__r(s, (176, 46, 44), bx, by, bw, 3)                   # red roof edge
+    pygame.draw.rect(s, lm_OUTLINE, (bx, by, bw, bh), 1)
+
+    # ---- the row of walk-up service windows ------------------------------
+    win_h = max(12, int(bh * 0.42))
+    win_y = by + int(bh * 0.28)
+    slots = max(3, bw // 34)
+    pad = max(4, (bw - slots * 24) // (slots + 1))
+    for i in range(slots):
+        wx = bx + pad + i * (24 + pad)
+        if wx + 22 > bx + bw:
+            break
+        lm__r(s, (26, 30, 34), wx, win_y, 22, win_h)
+        lm__r(s, (128, 168, 176), wx + 2, win_y + 2, 18, win_h - 7)   # lit glass
+        lm__r(s, (196, 214, 216), wx + 2, win_y + 2, 18, 3)
+        lm__r(s, (150, 148, 140), wx - 2, win_y + win_h - 3, 26, 4)   # counter
+        pygame.draw.rect(s, lm_OUTLINE, (wx, win_y, 22, win_h), 1)
+
+    # ---- the queue: the landmark as much as the building is --------------
+    coats = ((176, 74, 66), (66, 96, 148), (196, 176, 96), (86, 140, 96),
+             (150, 96, 160), (198, 130, 78), (94, 100, 112))
+    qx, idx = bx + 6, 0
+    while qx < bx + bw - 12:
+        n = lm__noise(idx, 0, 217)
+        px = qx + (n % 3)
+        py = lot_y + 6 + ((n >> 5) % 9)
+        lm__r(s, lm_SHADOW, px + 1, py + 11, 8, 3)
+        lm__r(s, coats[idx % len(coats)], px, py + 4, 7, 8)  # body
+        lm__r(s, (198, 158, 128), px + 1, py, 5, 5)          # head
+        lm__r(s, (40, 38, 44), px, py + 12, 7, 3)            # legs
+        if n & 16:                                           # holding a cone
+            lm__r(s, (238, 234, 220), px + 7, py + 4, 3, 4)
+        qx += 12 + (n % 5)
+        idx += 1
+
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
 lm__BAKERS = {
     "arch": lm__bake_arch,
     "stadium": lm__bake_stadium,
+    "ted_drewes": lm__bake_ted_drewes,
     "brewery": lm__bake_brewery,
     "forest_park": lm__bake_forest_park,
     "central_west_end": lm__bake_cwe,
@@ -6254,22 +6603,54 @@ class Job:
         return Job(a, b)
 
 
+class Frenzy:
+    """A GTA1 Kill Frenzy: grab the icon, the screen screams a target and a
+    clock, and you go berserk for a fat score payout and a free multiplier."""
+
+    # kind -> (banner, target count, completion bonus)
+    KINDS = {
+        'ped': ("MOW DOWN {n} LOCALS", 14, 3500),
+        'car': ("WRECK {n} MOTORS", 8, 6000),
+    }
+
+    def __init__(self, kind):
+        banner, target, bonus = self.KINDS[kind]
+        self.kind = kind
+        self.target = target
+        self.remaining = target
+        self.bonus = bonus
+        self.steps_left = FRENZY_SECONDS * FPS
+        self.banner = banner.replace("{n}", str(target))
+
+
 class Camera:
     def __init__(self):
         self.x = 0
         self.y = 0
+        # Smoothed look-ahead: the view leads the car in its direction of
+        # travel so you see where you are going instead of sitting dead
+        # centre. Eased toward the target so it never snaps.
+        self.lead_x = 0.0
+        self.lead_y = 0.0
+        # Impact shake. Set by draw() from Game.shake each frame, folded into
+        # apply()/apply_pos() only - center_on never touches it, so the sim and
+        # the camera-pan tests read a stable self.x / self.y.
+        self.shake_ox = 0.0
+        self.shake_oy = 0.0
 
-    def center_on(self, rect):
-        self.x = rect.centerx - SCREEN_WIDTH // 2
-        self.y = rect.centery - SCREEN_HEIGHT // 2
+    def center_on(self, rect, lead=(0.0, 0.0)):
+        self.lead_x += (lead[0] - self.lead_x) * 0.08
+        self.lead_y += (lead[1] - self.lead_y) * 0.08
+        self.x = int(rect.centerx + self.lead_x) - SCREEN_WIDTH // 2
+        self.y = int(rect.centery + self.lead_y) - SCREEN_HEIGHT // 2
         self.x = max(0, min(MAP_WIDTH - SCREEN_WIDTH, self.x))
         self.y = max(0, min(MAP_HEIGHT - SCREEN_HEIGHT, self.y))
 
     def apply(self, rect):
-        return rect.move(-self.x, -self.y)
+        return rect.move(-self.x + int(self.shake_ox), -self.y + int(self.shake_oy))
 
     def apply_pos(self, pos):
-        return (pos[0] - self.x, pos[1] - self.y)
+        return (pos[0] - self.x + int(self.shake_ox), pos[1] - self.y + int(self.shake_oy))
 
     def visible_tile_range(self):
         start_col = max(0, self.x // TILE_SIZE - 1)
@@ -6313,6 +6694,21 @@ class Car:
         self.pinned = 0          # consecutive steps making no headway
         self.reverse_timer = 0   # steps left of a back-out manoeuvre
         self.reverse_side = 1
+        # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
+        # counting down) then explodes. Trucks soak more, the scooter is paper.
+        self.max_hp = {'bus': 170.0, 'garbage_truck': 155.0, 'box_truck': 120.0,
+                       'vespa': 26.0}.get(self.variant, 80.0)
+        self.hp = self.max_hp
+        self.burn = 0            # >0 = on fire, steps until it goes up
+
+    def damage(self, amount):
+        """Take `amount` of impact damage; light the fuse at zero HP."""
+        if self.burn > 0 or amount <= 0:
+            return
+        self.hp -= amount
+        if self.hp <= 0.0:
+            self.hp = 0.0
+            self.burn = int(FPS * 1.4)   # ~1.4s of smoking before the blast
 
     def move_forward_check(self, dx, dy):
         temp = self.rect.move(int(dx), int(dy))
@@ -6338,16 +6734,32 @@ class Car:
             reverse = -1 if self.velocity < 0 else 1
             self.steer_angle += self.input_steer * self.max_steer * reverse
             self.steer_angle = max(-self.max_steer * 2.2, min(self.max_steer * 2.2, self.steer_angle))
-            self.angle += self.steer_angle * (abs(self.velocity) / self.max_speed)
+            speed_frac = abs(self.velocity) / self.max_speed
+            # The player keeps usable steering authority at parking speeds so a
+            # car can be lined up with a gap in a tight street; AI traffic keeps
+            # the old pure speed-proportional turn so its lane-following is
+            # unchanged.
+            turn_scale = (0.45 + 0.55 * speed_frac) if self.driver == 'player' else speed_frac
+            self.angle += self.steer_angle * min(1.0, turn_scale)
         if self.input_steer == 0:
             self.steer_angle *= 0.8
 
         dx = math.cos(self.angle) * self.velocity
         dy = math.sin(self.angle) * self.velocity
-        if not self.move_forward_check(dx, dy):
-            self.velocity *= -0.35
-            return True  # collided
-        return False
+        if self.move_forward_check(dx, dy):
+            return False
+        # Blocked head-on. Try each axis alone so the car slides along the wall
+        # instead of dead-stopping on every kerb graze - that stop-and-bounce
+        # was most of what made the narrow streets feel undriveable. An axis
+        # only counts as a slide if it actually had travel in it: hitting a
+        # wall square-on (one axis ~0) is a real thunk, not a free slide.
+        slid_x = abs(dx) >= 1.0 and self.move_forward_check(dx, 0.0)
+        slid_y = abs(dy) >= 1.0 and self.move_forward_check(0.0, dy)
+        if slid_x or slid_y:
+            self.velocity *= 0.86      # scrub a little speed on the scrape
+            return False
+        self.velocity *= -0.18         # true head-on: soft stop, faint kickback
+        return True  # collided
 
     def at_intersection(self):
         """True when the car is near the middle of a crossing tile.
@@ -6566,29 +6978,121 @@ class Pedestrian:
         self.facing = 2
         self.anim = 0.0
         self.follower = Follower('dog') if peds_has_dog(self.kind) else None
+        # Reaction state machine: calm -> alarmed/flee (scatter from a threat)
+        # / gawk (stop and stare at a fresh body) / down (bowled over, sprawled
+        # a beat). This is the loudest 'the city is alive' signal there is.
+        self.mood = 'calm'
+        self.mood_timer = 0
+        self.threat = None                 # unit (dx, dy) pointing away from danger
+        self.knock = pygame.Vector2()      # decaying shove from being hit
+        self.down_timer = 0
 
-    def update(self):
+    def _sense(self, game):
+        """Look for a reason to run. First hit wins; keeps it cheap."""
+        ax, ay = game.active_rect().center
+        cx, cy = self.rect.centerx, self.rect.centery
+        if game.driving is not None and abs(game.driving.velocity) > 2.4:
+            dx, dy = cx - ax, cy - ay
+            if dx * dx + dy * dy < 96 * 96:
+                self._flee((dx, dy), random.randint(70, 110))
+                return
+        if game.wanted_level >= 1:
+            dx, dy = cx - ax, cy - ay
+            if dx * dx + dy * dy < 150 * 150:
+                self._flee((dx, dy), random.randint(50, 90))
+                return
+        for cop in game.police:
+            dx, dy = cx - cop.rect.centerx, cy - cop.rect.centery
+            if dx * dx + dy * dy < 72 * 72:
+                self._flee((dx, dy), random.randint(45, 75))
+                return
+
+    def _flee(self, away, ticks):
+        n = math.hypot(away[0], away[1]) or 1.0
+        self.threat = (away[0] / n, away[1] / n)
+        self.mood = 'flee'
+        self.mood_timer = ticks
+
+    def gawk_at(self, spot, ticks):
+        dx, dy = spot[0] - self.rect.centerx, spot[1] - self.rect.centery
+        n = math.hypot(dx, dy) or 1.0
+        self.threat = (dx / n, dy / n)
+        self.mood = 'gawk'
+        self.mood_timer = ticks
+
+    def _try_move(self, dx, dy):
+        temp = self.rect.move(int(dx), int(dy))
+        if not is_blocked(temp):
+            self.rect.topleft = temp.topleft
+            return True
+        return False
+
+    def update(self, game=None):
+        # 1. knockback from being hit, always applied first
+        if self.knock.length_squared() > 0.06:
+            if not self._try_move(self.knock.x, self.knock.y):
+                self.knock *= 0.4
+            self.knock *= 0.80
+            self.anim += 0.5
+        else:
+            self.knock.update(0, 0)
+
+        # 2. sprawled on the ground - just tick the timer
+        if self.down_timer > 0:
+            self.down_timer -= 1
+            if self.bump_cooldown > 0:
+                self.bump_cooldown -= 1
+            return
+
+        if self.bump_cooldown > 0:
+            self.bump_cooldown -= 1
+
+        if game is not None and self.mood not in ('flee', 'gawk'):
+            self._sense(game)
+
+        if self.mood in ('flee', 'gawk'):
+            self.mood_timer -= 1
+            if self.mood_timer <= 0:
+                self.mood = 'calm'
+                self.threat = None
+
+        if self.mood == 'gawk':
+            if self.threat:
+                self.facing = peds_dir_index(self.threat[0], self.threat[1])
+            return
+
+        if self.mood == 'flee' and self.threat:
+            spd = self.speed * 2.1
+            fx, fy = self.threat[0] * spd, self.threat[1] * spd
+            self.facing = peds_dir_index(fx, fy)
+            self.anim += 0.34
+            if not self._try_move(fx, fy):
+                # sidestep along the threat instead of stalling into the wall
+                if not self._try_move(-fy, fx):
+                    self._try_move(fy, -fx)
+            self._update_dog()
+            return
+
+        # 3. calm wander (original behaviour)
         self.retarget_timer -= 1
         if self.retarget_timer <= 0:
             self.dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
             self.retarget_timer = random.randint(60, 180)
-        if self.bump_cooldown > 0:
-            self.bump_cooldown -= 1
         dx, dy = self.dir[0] * self.speed, self.dir[1] * self.speed
         if dx or dy:
             self.facing = peds_dir_index(dx, dy)
             self.anim += 0.16          # ~8fps walk cycle at 60fps
-        temp = self.rect.move(int(dx), int(dy))
-        if is_blocked(temp):
+        if not self._try_move(dx, dy):
             self.dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
-        else:
-            self.rect.topleft = temp.topleft
-        if self.follower:
-            # dog trails ~15px behind the walker's heading
-            hx = self.dir[0] if (self.dir[0] or self.dir[1]) else 0
-            hy = self.dir[1] if (self.dir[0] or self.dir[1]) else 1
-            self.follower.update(self.rect.centerx - hx * 15 - 6,
-                                 self.rect.centery - hy * 15)
+        self._update_dog()
+
+    def _update_dog(self):
+        if not self.follower:
+            return
+        hx = self.dir[0] if (self.dir[0] or self.dir[1]) else 0
+        hy = self.dir[1] if (self.dir[0] or self.dir[1]) else 1
+        self.follower.update(self.rect.centerx - hx * 15 - 6,
+                             self.rect.centery - hy * 15)
 
     def draw(self, screen, camera):
         pos = camera.apply_pos(self.rect.center)
@@ -6597,8 +7101,11 @@ class Pedestrian:
         if self.follower:
             self.follower.draw(screen, camera)
         px, py = int(pos[0]), int(pos[1])
-        sprite, shadow = ped_sprite(self.kind, self.facing,
-                                    self.dir[0] or self.dir[1], self.anim)
+        moving = self.dir[0] or self.dir[1] or self.mood == 'flee'
+        sprite, shadow = ped_sprite(self.kind, self.facing, moving, self.anim)
+        if self.down_timer > 0:                 # sprawled: lay the sprite over
+            sprite = pygame.transform.rotate(sprite, 78)
+            shadow = pygame.transform.rotate(shadow, 78)
         rect = sprite.get_rect(center=(px, py))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
@@ -6614,10 +7121,30 @@ class Toast:
 # Game
 # ============================================================
 class Game:
-    def __init__(self):
+    def __init__(self, start_fullscreen=True):
         pygame.init()
         pygame.font.init()
-        self.window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        # Headless (CI / smoke tests) runs on the dummy SDL driver: keep the
+        # plain fixed-size surface there. A real window opens borderless
+        # fullscreen by default, scaled to the display; SCALED means SDL does
+        # the aspect-correct letterboxing and toggle_fullscreen() is reliable,
+        # RESIZABLE lets the window be dragged to any size. F11 toggles it.
+        self._headless = os.environ.get("SDL_VIDEODRIVER") == "dummy"
+        self.fullscreen = False
+        if self._headless:
+            self.window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        else:
+            flags = pygame.RESIZABLE | pygame.SCALED
+            if start_fullscreen:
+                flags |= pygame.FULLSCREEN
+            try:
+                self.window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), flags)
+                self.fullscreen = bool(start_fullscreen)
+            except pygame.error:
+                # Some drivers refuse SCALED/FULLSCREEN at create time; a plain
+                # resizable window still plays fine and F11 can try again later.
+                self.window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT),
+                                                      pygame.RESIZABLE)
         pygame.display.set_caption("STL-GTA: St. Louis Sandbox")
         self.screen = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         self.clock = pygame.time.Clock()
@@ -6637,8 +7164,15 @@ class Game:
         px, py = random_open_spawn()
         self.player_rect = pygame.Rect(0, 0, PLAYER_SIZE, PLAYER_SIZE)
         self.player_rect.center = (px, py)
+        # Sub-pixel position. The rect is integer-only, so walking used to run
+        # through int() every step: a 0.707 diagonal at speed 4.2 truncated
+        # 2.97 to 2, and any fraction was thrown away entirely. Keeping the
+        # real position here and rounding into the rect fixes both.
+        self.player_fx = float(self.player_rect.centerx)
+        self.player_fy = float(self.player_rect.centery)
         self.player_dir = [0, 0]
         self.player_facing = 2
+        self.player_aim = 0.0        # radians; where a punch / shot goes
         self.player_anim = 0.0
         self.driving = None  # Car instance the player is currently driving, or None
 
@@ -6691,11 +7225,48 @@ class Game:
         # earned by finishing delivery runs, score is the chaos counter.
         self.wanted_level = 0
         self.score = 0
+        self.best_score = 0
         self.cash = 200          # seed float so the first bail is survivable
         self.discovered = set()
         self.toasts = []
         self.busted_flash = 0
+        self.wasted_flash = 0
         self.running = True
+
+        # --- chaos multiplier + combo ----------------------------------
+        self.multiplier = 1
+        self.mult_prog = 0.0
+        self.mult_decay = 0
+        self.combo = 0            # consecutive ped hits in a short window
+        self.combo_timer = 0
+
+        # --- kill frenzy ---------------------------------------------------
+        self.frenzy = None           # active Frenzy, or None
+        self.frenzy_icon = None      # (x, y, kind) pickup on the map, or None
+        self.frenzy_cooldown = FPS * 5
+
+        # --- juice: shake / hitstop / particles / pops / callouts --------
+        self.shake = 0.0             # camera shake amplitude, decays to 0
+        self.freeze = 0              # hitstop: whole sim steps to skip
+        self.hit_flash = 0           # white screen flash, frames
+        self.fx = []                 # particle pool (capped)
+        self.pops = []               # world-space rising numbers (capped)
+        self.callouts = []           # big centre-screen shouts (capped)
+        self.decals = []             # ground stains: blood, scorch (capped)
+        self.player_hp = PLAYER_MAX_HP
+
+        # --- combat -------------------------------------------------------
+        self.weapon = 'fists'
+        self.ammo = 0
+        self.attack_cd = 0           # steps until the next punch / shot
+        self.punch_timer = 0         # >0 while the swing is on screen
+        self.bullets = []
+        # Pistol crates scattered on reachable ground; they come back on a
+        # timer so the map always has one to hunt for.
+        self.weapon_pickups = []
+        for _ in range(WEAPON_PICKUP_COUNT):
+            wx, wy = random_open_spawn()
+            self.weapon_pickups.append({'x': wx, 'y': wy, 'taken': 0})
 
         # --- jobs ---------------------------------------------------------
         self.job = Job.generate()
@@ -6715,6 +7286,8 @@ class Game:
         self.state = STATE_PLAYING
         self.accumulator = 0.0
         self.show_debug = False
+        self.show_map = False        # full-city map overlay (M / TAB)
+        self.map_overview = None     # lazily baked static map surface
         self.fps_now = 0.0
         self.sim_steps = 1
         self.hud_left_y = 8
@@ -6774,6 +7347,448 @@ class Game:
     def active_rect(self):
         return self.driving.rect if self.driving else self.player_rect
 
+    # ---------------- feedback: score / pops / callouts ----------------
+    def add_score(self, base, world_pos=None, mult=True):
+        """Single funnel for every point the game awards. Chaos points run
+        through the multiplier and feed it; delivery bonuses pass mult=False
+        so the careful loop stays flat. Spawns a floating +N where it happened
+        and a MULTIPLIER X? callout when a rung is crossed."""
+        factor = self.multiplier if mult else 1
+        gain = int(base * factor)
+        self.score += gain
+        if world_pos is not None:
+            self.add_pop(world_pos, f"+{gain}",
+                         hud_HUD_GOLD if mult and factor > 1 else hud_HUD_GREEN)
+        if mult and base > 0:
+            self.mult_prog += base
+            self.mult_decay = 0
+            rose = False
+            while self.mult_prog >= MULT_RUNG and self.multiplier < MULT_MAX:
+                self.mult_prog -= MULT_RUNG
+                self.multiplier += 1
+                rose = True
+            if rose:                    # one callout for the landing rung, not each
+                self.add_callout(f"MULTIPLIER X{self.multiplier}", hud_HUD_GOLD, scale=2)
+        return gain
+
+    def bump_multiplier(self, rungs):
+        self.multiplier = min(MULT_MAX, self.multiplier + rungs)
+        self.mult_decay = 0
+
+    def reset_multiplier(self):
+        if self.multiplier > 1:
+            self.add_callout("MULTIPLIER LOST", hud_HUD_RED)
+        self.multiplier = 1
+        self.mult_prog = 0.0
+        self.mult_decay = 0
+
+    def update_multiplier(self):
+        """Park and the multiplier bleeds away - keeps you moving and reckless."""
+        if self.multiplier <= 1 and self.mult_prog <= 0.0:
+            self.mult_decay = 0
+            return
+        self.mult_decay += 1
+        if self.mult_decay < MULT_DECAY_GRACE:
+            return
+        if (self.mult_decay - MULT_DECAY_GRACE) % MULT_DECAY_STEP == 0:
+            if self.mult_prog > 0.0:
+                self.mult_prog = 0.0
+            elif self.multiplier > 1:
+                self.multiplier -= 1
+
+    def add_pop(self, world_pos, text, col):
+        self.pops.append({'x': float(world_pos[0]), 'y': float(world_pos[1]),
+                          'text': text, 'col': col, 'born': self.frame})
+        if len(self.pops) > 48:
+            del self.pops[:len(self.pops) - 48]
+
+    def add_callout(self, text, col=None, ttl=None, scale=2):
+        self.callouts.append({'text': text, 'col': col or hud_HUD_GOLD,
+                              'born': self.frame, 'ttl': ttl or FPS * 2,
+                              'scale': scale})
+        if len(self.callouts) > 3:
+            self.callouts.pop(0)
+
+    # ---------------- feedback: impact juice ----------------
+    def kick(self, amp, freeze=0, flash=0):
+        """One call for 'something just hit': camera shake + optional hitstop
+        + optional white flash. All render-side or a whole-step skip, so the
+        sim stays frame-rate-independent and the invariants stay trivially
+        satisfied on a frozen step."""
+        self.shake = min(10.0, self.shake + amp)
+        if freeze > self.freeze:
+            self.freeze = min(4, freeze)
+        if flash > self.hit_flash:
+            self.hit_flash = min(6, flash)
+
+    def spawn_burst(self, world_pos, n, kinds=('spark',), spd=2.5):
+        """A puff of 1-2px particles. Jitter is seeded per burst from the frame
+        and position, so ordering between bursts can never matter."""
+        rng = random.Random(self.frame * 9173 + int(world_pos[0]) * 31
+                            + int(world_pos[1]) * 7 + len(self.fx))
+        for _ in range(n):
+            ang = rng.uniform(0, math.tau)
+            v = rng.uniform(0.3, 1.0) * spd
+            self.fx.append({'x': float(world_pos[0]), 'y': float(world_pos[1]),
+                            'vx': math.cos(ang) * v, 'vy': math.sin(ang) * v,
+                            'life': rng.randint(11, 26),
+                            'kind': kinds[rng.randrange(len(kinds))]})
+        if len(self.fx) > 240:
+            del self.fx[:len(self.fx) - 240]
+
+    def update_fx(self):
+        for p in self.fx:
+            p['x'] += p['vx']
+            p['y'] += p['vy']
+            if p['kind'] == 'smoke':
+                p['vy'] -= 0.05
+                p['vx'] *= 0.93
+                p['vy'] *= 0.95
+            else:
+                p['vy'] += 0.13
+                p['vx'] *= 0.90
+                p['vy'] *= 0.92
+            p['life'] -= 1
+        if self.fx:
+            self.fx = [p for p in self.fx if p['life'] > 0]
+        if self.shake > 0.0:
+            self.shake *= 0.85
+            if self.shake < 0.4:
+                self.shake = 0.0
+        if self.hit_flash > 0:
+            self.hit_flash -= 1
+
+    # ---------------- gore + ground stains ----------------
+    def add_decal(self, world_pos, kind='blood', size=1.0):
+        """A permanent-ish stain on the road. Deterministic per decal from the
+        frame + position, so a captured frame is reproducible."""
+        self.decals.append({'x': float(world_pos[0]), 'y': float(world_pos[1]),
+                            'kind': kind, 'size': size,
+                            'seed': (self.frame * 2654435761
+                                     + int(world_pos[0]) * 40503
+                                     + int(world_pos[1])) & 0x7fffffff})
+        if len(self.decals) > DECAL_MAX:
+            del self.decals[:len(self.decals) - DECAL_MAX]
+
+    def splatter_ped(self, ped, impulse, score=True):
+        """Kill a pedestrian: gore, a stain that stays, and a replacement
+        walker somewhere else so the street never empties out."""
+        pos = ped.rect.center
+        self.add_decal(pos, 'blood', 1.0)
+        self.spawn_burst(pos, 9, ('blood', 'blood', 'debris'), 2.6)
+        self.kick(2.2)
+        if ped in self.pedestrians:
+            self.pedestrians.remove(ped)
+            nx, ny = random_open_spawn()
+            self.pedestrians.append(Pedestrian(nx, ny, self._ped_kind_for(nx, ny)))
+        if score:
+            self.combo += 1
+            self.combo_timer = FPS * 2
+            self.add_score(12 * min(self.combo, 12), pos)
+            self.frenzy_hit('ped')
+            self.wanted_bump(1, 'pedestrian')
+            if self.combo in COMBO_SHOUTS:
+                self.add_callout(COMBO_SHOUTS[self.combo], hud_HUD_RED, scale=2)
+                self.bump_multiplier(1)
+            if self.combo == 12:
+                self.wanted_level = max(self.wanted_level, 3)
+                self.add_callout("YOU MONSTER", hud_HUD_RED)
+        # everyone who saw it runs
+        for other in self.pedestrians:
+            ox = other.rect.centerx - pos[0]
+            oy = other.rect.centery - pos[1]
+            if ox * ox + oy * oy < 130 * 130 and other.down_timer <= 0:
+                other._flee((ox, oy), random.randint(80, 140))
+
+    # ---------------- combat ----------------
+    def aim_angle(self):
+        """Where an attack goes: the way you last walked, or drove."""
+        if self.driving is not None:
+            return self.driving.angle
+        return self.player_aim
+
+    def player_attack(self):
+        """SPACE: swing fists, or fire the pistol if you are carrying one."""
+        if self.state != STATE_PLAYING or self.show_map:
+            return
+        if self.driving is not None:
+            self.add_toast("Get out to fight")
+            return
+        if self.attack_cd > 0:
+            return
+        if self.weapon == 'pistol' and self.ammo > 0:
+            self.fire_pistol()
+        else:
+            self.throw_punch()
+
+    def throw_punch(self):
+        self.attack_cd = PUNCH_COOLDOWN
+        self.punch_timer = 8
+        ang = self.aim_angle()
+        px, py = self.player_rect.center
+        tip = (px + math.cos(ang) * PUNCH_RANGE * 0.8,
+               py + math.sin(ang) * PUNCH_RANGE * 0.8)
+        self.spawn_burst(tip, 2, ('debris',), 1.0)
+        hit_any = False
+        for ped in list(self.pedestrians):
+            if not self._in_arc(ped.rect.center, ang, PUNCH_RANGE):
+                continue
+            hit_any = True
+            kb = pygame.Vector2(math.cos(ang), math.sin(ang)) * 6.5
+            if ped.down_timer > 0:
+                self.splatter_ped(ped, kb)          # finishing a downed ped
+            else:
+                ped.knock = kb
+                ped.mood = 'down'
+                ped.down_timer = random.randint(50, 90)
+                self.add_score(6, ped.rect.center)
+                self.wanted_bump(1, 'pedestrian')
+                self.spawn_burst(ped.rect.center, 3, ('debris',), 1.6)
+            self.kick(1.4)
+            break
+        if not hit_any:
+            for car in list(self.cars) + list(self.police):
+                if not self._in_arc(car.rect.center, ang, PUNCH_RANGE + 6):
+                    continue
+                car.damage(PUNCH_DAMAGE)
+                self.spawn_burst(car.rect.center, 4, ('spark', 'glass'), 2.0)
+                self.kick(1.6)
+                if car in self.police:
+                    self.wanted_bump(1, 'cop')
+                break
+
+    def fire_pistol(self):
+        self.attack_cd = SHOOT_COOLDOWN
+        self.ammo -= 1
+        ang = self.aim_angle()
+        px, py = self.player_rect.center
+        mx = px + math.cos(ang) * 12
+        my = py + math.sin(ang) * 12
+        self.bullets.append({'x': float(mx), 'y': float(my),
+                             'vx': math.cos(ang) * BULLET_SPEED,
+                             'vy': math.sin(ang) * BULLET_SPEED,
+                             'life': BULLET_LIFE})
+        self.spawn_burst((mx, my), 3, ('spark',), 2.2)
+        self.kick(0.8)
+        self.wanted_bump(1, 'gunfire')
+        if self.ammo <= 0:
+            self.weapon = 'fists'
+            self.add_toast("Out of ammo")
+
+    def _in_arc(self, target, ang, reach):
+        px, py = self.player_rect.center
+        dx, dy = target[0] - px, target[1] - py
+        if dx * dx + dy * dy > reach * reach:
+            return False
+        diff = (math.atan2(dy, dx) - ang + math.pi) % math.tau - math.pi
+        return abs(diff) <= PUNCH_ARC
+
+    def update_bullets(self):
+        if not self.bullets:
+            return
+        live = []
+        for b in self.bullets:
+            b['x'] += b['vx']
+            b['y'] += b['vy']
+            b['life'] -= 1
+            if b['life'] <= 0:
+                continue
+            if not (0 <= b['x'] < MAP_WIDTH and 0 <= b['y'] < MAP_HEIGHT):
+                continue
+            hit = pygame.Rect(0, 0, 4, 4)
+            hit.center = (int(b['x']), int(b['y']))
+            if is_blocked(hit):
+                self.spawn_burst(hit.center, 3, ('spark',), 1.8)
+                continue
+            struck = False
+            for ped in list(self.pedestrians):
+                if ped.rect.inflate(4, 4).colliderect(hit):
+                    self.splatter_ped(ped, pygame.Vector2(b['vx'], b['vy']) * 0.35)
+                    struck = True
+                    break
+            if struck:
+                continue
+            for car in list(self.cars) + list(self.police):
+                if car is self.driving or not car.rect.colliderect(hit):
+                    continue
+                car.damage(BULLET_DAMAGE)
+                self.spawn_burst(hit.center, 4, ('spark', 'glass'), 2.2)
+                if car in self.police:
+                    self.wanted_bump(1, 'cop')
+                struck = True
+                break
+            if struck:
+                continue
+            live.append(b)
+        self.bullets = live
+
+    def update_weapon_pickups(self):
+        pr = self.active_rect()
+        for w in self.weapon_pickups:
+            if w['taken']:
+                if self.frame - w['taken'] >= WEAPON_RESPAWN:
+                    w['taken'] = 0
+                continue
+            if math.hypot(pr.centerx - w['x'], pr.centery - w['y']) < 26:
+                w['taken'] = self.frame
+                self.weapon = 'pistol'
+                self.ammo = min(99, self.ammo + PISTOL_AMMO)
+                self.add_callout("PISTOL", hud_HUD_GOLD, ttl=FPS, scale=1)
+                self.add_pop((w['x'], w['y']), f"+{PISTOL_AMMO}", hud_HUD_GOLD)
+
+    # ---------------- wrecks + explosions ----------------
+    def update_wrecks(self):
+        """Tick every burning car's fuse; detonate the ones that reach zero."""
+        pool = list(self.cars) + list(self.police)
+        if self.driving is not None:
+            pool.append(self.driving)
+        going = []
+        for car in pool:
+            if car.burn > 0:
+                car.burn -= 1
+                if car.burn % 3 == 0:
+                    self.spawn_burst(car.rect.center, 1, ('smoke',), 0.7)
+                if car.burn == 0:
+                    going.append(car)
+        for car in going:
+            self.explode(car)
+
+    def explode(self, car):
+        pos = car.rect.center
+        self.spawn_burst(pos, 28, ('spark', 'spark', 'smoke', 'debris'), 4.6)
+        self.add_decal(pos, 'scorch', 1.5)
+        self.kick(7.5, freeze=2, flash=5)
+        self.add_score(60, pos, mult=True)
+        for ped in self.pedestrians:
+            dx, dy = ped.rect.centerx - pos[0], ped.rect.centery - pos[1]
+            if dx * dx + dy * dy < 62 * 62 and ped.down_timer <= 0:
+                ped.mood = 'down'
+                ped.down_timer = random.randint(50, 90)
+                n = math.hypot(dx, dy) or 1.0
+                ped.knock = pygame.Vector2(dx / n, dy / n) * 5.0
+        for other in list(self.cars) + list(self.police):
+            if other is car:
+                continue
+            dx, dy = other.rect.centerx - pos[0], other.rect.centery - pos[1]
+            if dx * dx + dy * dy < 72 * 72:
+                other.damage(46)                 # may light its own fuse -> chain
+                other.velocity += 2.0
+        is_player = car is self.driving
+        self.frenzy_hit('car')
+        if car in self.police:
+            self.police.remove(car)              # update_police re-tops this step
+        elif car in self.cars:
+            self.cars.remove(car)
+            cx, cy = random_open_spawn(road_only=True)
+            fresh = Car(cx, cy)
+            traffic_init_car(fresh)
+            fresh.angle = traffic_aligned_spawn_angle(fresh)
+            self.cars.append(fresh)
+        if is_player:
+            self.wasted()
+
+    def wasted(self):
+        """Killed - lose the multiplier and the cargo, wake up on the pavement.
+        Mirrors busted() so the police-count invariant stays trivial."""
+        self.add_toast("WASTED - wreck totalled")
+        self.wasted_flash = FPS * 2
+        self.reset_multiplier()
+        self.wanted_level = 0
+        self.police = []
+        self.bust_meter = 0
+        self.heat_timer = 0
+        if self.driving is not None:
+            self.driving.driver = None
+            self.driving = None                  # it is a wreck; do not hand it back
+        pr = self.player_rect
+        spot = (free_point_near(pr.centerx, pr.centery, PLAYER_SIZE, PLAYER_SIZE, max_rings=10)
+                or free_point_near(self.police_station[0], self.police_station[1],
+                                   PLAYER_SIZE, PLAYER_SIZE, max_rings=10)
+                or random_open_spawn())
+        self.player_rect.center = spot
+        self.player_hp = PLAYER_MAX_HP
+        if self.job is not None and self.job.collected:
+            self.fail_job("Wreck - cargo lost")
+
+    def check_roadkill_risk(self):
+        """On foot, a car doing real speed that hits you can put you down."""
+        pr = self.player_rect
+        for car in list(self.cars) + list(self.police):
+            if abs(car.velocity) > 4.0 and car.rect.colliderect(pr.inflate(2, 2)):
+                self.player_hp -= abs(car.velocity) * 4.5
+                kb = pygame.Vector2(pr.centerx - car.rect.centerx,
+                                    pr.centery - car.rect.centery)
+                if kb.length() > 0:
+                    kb = kb.normalize() * 6
+                    mv = pr.move(int(kb.x), int(kb.y))
+                    if not is_blocked(mv):
+                        self.player_rect.topleft = mv.topleft
+                self.kick(2.4)
+                self.spawn_burst(pr.center, 5, ('debris',), 2.2)
+                if self.player_hp <= 0:
+                    self.wasted()
+                return
+
+    # ---------------- kill frenzy ----------------
+    def spawn_frenzy_icon(self):
+        """Drop a frenzy pickup on a road tile within reach but off-screen."""
+        active = self.active_rect()
+        for _ in range(50):
+            ang = random.uniform(0, math.tau)
+            dist = random.uniform(360, 900)
+            x = active.centerx + math.cos(ang) * dist
+            y = active.centery + math.sin(ang) * dist
+            col, row = int(x) // TILE_SIZE, int(y) // TILE_SIZE
+            if not (2 <= col < MAP_TILES_W - 2 and 2 <= row < MAP_TILES_H - 2):
+                continue
+            if tile_type_at(col, row) != TILE_ROAD:
+                continue
+            spot = free_point_near(col * TILE_SIZE + TILE_SIZE // 2,
+                                   row * TILE_SIZE + TILE_SIZE // 2,
+                                   PLAYER_SIZE, PLAYER_SIZE, max_rings=1)
+            if spot is not None:
+                kind = 'ped' if (self.frame // 7) % 2 == 0 else 'car'
+                self.frenzy_icon = (spot[0], spot[1], kind)
+                return
+
+    def update_frenzy(self):
+        if self.frenzy is not None:
+            self.frenzy.steps_left -= 1
+            if self.frenzy.steps_left <= 0:
+                self.add_callout("FRENZY OVER", hud_HUD_GREY_DIM)
+                self.frenzy = None
+                self.frenzy_cooldown = FRENZY_COOLDOWN
+            return
+        if self.frenzy_icon is None:
+            if self.frenzy_cooldown > 0:
+                self.frenzy_cooldown -= 1
+            else:
+                self.spawn_frenzy_icon()
+            return
+        ix, iy, kind = self.frenzy_icon
+        a = self.active_rect()
+        if math.hypot(a.centerx - ix, a.centery - iy) <= JOB_MARKER_RADIUS:
+            self.frenzy = Frenzy(kind)
+            self.frenzy_icon = None
+            self.add_callout("KILL FRENZY!", hud_HUD_RED, ttl=int(FPS * 2.5), scale=3)
+            self.add_callout(self.frenzy.banner, hud_HUD_GOLD, ttl=int(FPS * 2.5), scale=1)
+            self.bump_multiplier(1)
+
+    def frenzy_hit(self, kind):
+        f = self.frenzy
+        if f is None or f.kind != kind or f.remaining <= 0:
+            return
+        f.remaining -= 1
+        self.add_score(40, mult=True)
+        if f.remaining <= 0:
+            self.add_score(f.bonus, self.active_rect().center, mult=False)
+            self.add_callout(f"FRENZY DONE +{f.bonus}", hud_HUD_GREEN, scale=2)
+            self.bump_multiplier(2)
+            self.frenzy = None
+            self.frenzy_cooldown = FRENZY_COOLDOWN
+        else:
+            self.add_callout(f"{f.remaining} LEFT", hud_HUD_GOLD, ttl=FPS, scale=2)
+
     @staticmethod
     def _ped_kind_for(x, y):
         """Bias a few pedestrians to their turf: ballplayers by the stadium,
@@ -6801,9 +7816,9 @@ class Game:
             elif event.type == pygame.KEYDOWN:
                 self.handle_keydown(event.key)
 
-        if self.state != STATE_PLAYING:
-            # Paused: hold everything still rather than letting the last
-            # throttle value keep the car rolling behind the menu.
+        if self.state != STATE_PLAYING or self.show_map:
+            # Paused or reading the map: hold everything still rather than
+            # letting the last throttle value keep the car rolling behind it.
             if self.driving:
                 self.driving.input_throttle = 0.0
                 self.driving.input_steer = 0.0
@@ -6847,6 +7862,20 @@ class Game:
         confirmation and no autosave, and Q sits right next to WASD. Quitting
         now only happens from the pause menu.
         """
+        if key == pygame.K_F11:
+            self.toggle_fullscreen()
+            return
+
+        if self.show_map:
+            if key in (pygame.K_m, pygame.K_TAB, pygame.K_ESCAPE):
+                self.show_map = False
+            return
+
+        if key in (pygame.K_m, pygame.K_TAB):
+            if self.state == STATE_PLAYING:
+                self.show_map = True
+            return
+
         if key in (pygame.K_ESCAPE, pygame.K_p, pygame.K_F1):
             self.toggle_pause()
             return
@@ -6860,7 +7889,9 @@ class Game:
                 self.load_game()
             return
 
-        if key == pygame.K_e:
+        if key in (pygame.K_SPACE, pygame.K_f):
+            self.player_attack()
+        elif key == pygame.K_e:
             self.toggle_enter_exit()
         elif key == pygame.K_F5:
             self.save_game()
@@ -6873,6 +7904,21 @@ class Game:
 
     def toggle_pause(self):
         self.state = STATE_PLAYING if self.state == STATE_PAUSED else STATE_PAUSED
+
+    def toggle_fullscreen(self):
+        """F11: swap between borderless fullscreen and a resizable window.
+
+        With the SCALED display flag pygame's toggle_fullscreen() is stable and
+        keeps the aspect ratio (SDL letterboxes), so there is nothing to
+        rebuild here - present() already scales into whatever size it is given.
+        """
+        if self._headless:
+            return
+        try:
+            pygame.display.toggle_fullscreen()
+            self.fullscreen = not self.fullscreen
+        except pygame.error as e:
+            self.add_toast(f"Fullscreen failed: {e}")
 
     def exit_vehicle(self):
         """Step out onto real ground, or refuse.
@@ -6923,44 +7969,130 @@ class Game:
         best.parked = False
         best.max_speed = PLAYER_CAR_MAX_SPEED
         self.driving = best
-        self.add_toast("Jacked a ride!")
-        self.score += 20
+        self.add_callout("JACKED!", hud_HUD_GOLD, ttl=FPS, scale=1)
+        self.add_score(20, best.rect.center)
+
+    # ---------------- on-foot movement ----------------
+    def sync_player_float(self):
+        """Re-seat the sub-pixel position on the rect after anything teleports
+        the player (bust, wreck, load, stepping out of a car, a test)."""
+        if (abs(self.player_fx - self.player_rect.centerx) > 1.5
+                or abs(self.player_fy - self.player_rect.centery) > 1.5):
+            self.player_fx = float(self.player_rect.centerx)
+            self.player_fy = float(self.player_rect.centery)
+
+    def move_player_on_foot(self):
+        """Walk with sub-pixel precision and wall sliding.
+
+        The old version moved int(dx), int(dy) as one all-or-nothing step, so
+        diagonals lost a third of their speed to truncation and clipping any
+        corner stopped you dead. Now each axis resolves on its own against the
+        float position: brush a building and you slide along it.
+        """
+        self.sync_player_float()
+        dx = self.player_dir[0] * PLAYER_SPEED
+        dy = self.player_dir[1] * PLAYER_SPEED
+        if dx == 0.0 and dy == 0.0:
+            return
+        self.player_aim = math.atan2(dy, dx)
+        probe = self.player_rect.copy()
+        for ax, ay in ((dx, 0.0), (0.0, dy)):
+            if ax == 0.0 and ay == 0.0:
+                continue
+            nx, ny = self.player_fx + ax, self.player_fy + ay
+            probe.center = (int(round(nx)), int(round(ny)))
+            if (probe.left < 0 or probe.top < 0
+                    or probe.right > MAP_WIDTH or probe.bottom > MAP_HEIGHT):
+                continue
+            if is_blocked(probe):
+                continue
+            self.player_fx, self.player_fy = nx, ny
+            self.player_rect.center = probe.center
 
     # ---------------- update ----------------
     def update(self):
         """One fixed 1/60s simulation step."""
         self.frame += 1
+        # Hitstop: freeze the whole sim for a frame or two on a big impact.
+        # step_sim only ever calls update() in whole SIM_DT slices, so N frozen
+        # steps is exactly N/60s on any machine, and nothing changed this step
+        # so every invariant is trivially still true.
+        if self.freeze > 0:
+            self.freeze -= 1
+            return
         if self.driving:
             # Scraping a wall used to raise your wanted level. Bouncing off a
             # kerb is not a crime; only the offences in handle_collisions are.
-            self.driving.physics_step()
+            pre_speed = abs(self.driving.velocity)
+            hit = self.driving.physics_step()
+            if hit and pre_speed > 3.0:
+                self.kick(min(6.0, pre_speed * 0.7), freeze=1 if pre_speed > 6.5 else 0)
+                self.spawn_burst(self.driving.rect.center, int(2 + pre_speed),
+                                 ('spark', 'spark', 'debris'), pre_speed * 0.5)
+                if pre_speed > 4.0:
+                    self.driving.damage(pre_speed * 1.1)
         else:
-            dx = self.player_dir[0] * PLAYER_SPEED
-            dy = self.player_dir[1] * PLAYER_SPEED
-            temp = self.player_rect.move(int(dx), int(dy))
-            if not is_blocked(temp):
-                self.player_rect.topleft = temp.topleft
+            self.move_player_on_foot()
 
-        self.camera.center_on(self.active_rect())
+        if self.driving:
+            v = self.driving.velocity
+            lead = (math.cos(self.driving.angle) * v * 8.0,
+                    math.sin(self.driving.angle) * v * 8.0)
+        else:
+            lead = (self.player_dir[0] * 26.0, self.player_dir[1] * 26.0)
+        self.camera.center_on(self.active_rect(), lead)
 
         for car in self.cars:
             if car.driver is None and not car.parked:
                 traffic_drive(car, self.cars)
+            elif car.parked and abs(car.velocity) > 0.05:
+                # shunted at the kerb: let it coast to a stop instead of
+                # absorbing the hit and sitting there like scenery
+                car.input_throttle = 0.0
+                car.input_steer = 0.0
+                car.physics_step()
 
         for ped in self.pedestrians:
-            ped.update()
+            ped.update(self)
 
         for rv in self.rail:
             rv.update()
 
         self.handle_collisions()
+        if not self.driving:
+            self.check_roadkill_risk()
+        self.update_bullets()
+        self.update_weapon_pickups()
+        if self.attack_cd > 0:
+            self.attack_cd -= 1
+        if self.punch_timer > 0:
+            self.punch_timer -= 1
+        self.update_wrecks()
         self.update_police()
         self.update_wanted_decay()
         self.update_job()
+        self.update_frenzy()
+        self.update_multiplier()
         self.check_landmark_discovery()
+        self.update_fx()
+
+        if self.combo_timer > 0:
+            self.combo_timer -= 1
+            if self.combo_timer == 0:
+                self.combo = 0
+        self.callouts = [c for c in self.callouts
+                         if self.frame - c['born'] < c['ttl']]
+        self.pops = [p for p in self.pops if self.frame - p['born'] < 46]
+        if self.score > self.best_score:
+            self.best_score = self.score
+        if not self.driving and self.player_hp < PLAYER_MAX_HP:
+            self.player_hp = min(PLAYER_MAX_HP, self.player_hp + PLAYER_HP_REGEN)
+
         self.toasts = [t for t in self.toasts if pygame.time.get_ticks() < t.expires]
         if self.busted_flash > 0:
             self.busted_flash -= 1
+        if self.wasted_flash > 0:
+            self.wasted_flash -= 1
 
     # ---------------- jobs ----------------
     def update_job(self):
@@ -6997,12 +8129,14 @@ class Game:
         if near:
             paid = self.job.payout(self.streak)
             self.cash += paid
-            self.score += 50
+            self.add_score(50, mult=False)         # the careful loop stays flat
             self.jobs_done += 1
             self.streak += 1
             self.best_streak = max(self.best_streak, self.streak)
             tail = f" (x{self.streak} streak)" if self.streak > 1 else ""
             self.add_toast(f"Delivered! ${paid}{tail}")
+            self.add_callout("DELIVERED!", hud_HUD_GREEN, scale=2)
+            self.add_pop(active.center, f"+${paid}", hud_HUD_GREEN)
             self.job = None
             self.job_cooldown = FPS * 2
 
@@ -7034,36 +8168,122 @@ class Game:
         if self.wanted_level > was and self.wanted_level == 1:
             self.add_toast("Wanted! Lose them or get busted")
 
+    def barge_pedestrians(self):
+        """On foot you are a solid object too: shoulder people out of the way
+        instead of ghosting straight through them."""
+        pr = self.player_rect
+        for ped in self.pedestrians:
+            if ped.down_timer > 0 or not pr.colliderect(ped.rect.inflate(2, 2)):
+                continue
+            push = pygame.Vector2(ped.rect.centerx - pr.centerx,
+                                  ped.rect.centery - pr.centery)
+            if push.length() == 0:
+                push = pygame.Vector2(1, 0)
+            ped.knock = push.normalize() * 2.4
+            if ped.mood == 'calm':
+                ped._flee((push.x, push.y), random.randint(40, 70))
+
     def handle_collisions(self):
         if not self.driving:
+            self.barge_pedestrians()
             return
         speed = abs(self.driving.velocity)
-        for ped in self.pedestrians:
+        for ped in list(self.pedestrians):
             if ped.bump_cooldown <= 0 and self.driving.rect.colliderect(ped.rect.inflate(6, 6)):
                 ped.bump_cooldown = 90
-                push = pygame.Vector2(ped.rect.centerx - self.driving.rect.centerx,
-                                       ped.rect.centery - self.driving.rect.centery)
-                if push.length() > 0:
-                    push = push.normalize() * 24
-                    moved = ped.rect.move(int(push.x), int(push.y))
-                    if not is_blocked(moved):
-                        ped.rect.topleft = moved.topleft
+                # Knockback along a blend of the car's heading and the radial,
+                # scaled by speed - a 9.5 clip launches, a 1.0 nudge stumbles.
+                heading = pygame.Vector2(math.cos(self.driving.angle),
+                                         math.sin(self.driving.angle))
+                radial = pygame.Vector2(ped.rect.centerx - self.driving.rect.centerx,
+                                        ped.rect.centery - self.driving.rect.centery)
+                radial = radial.normalize() if radial.length() > 0 else heading
+                mag = 2.5 + min(9.5, speed) * 1.5
+                kb = heading * 0.6 + radial * 0.7
+                kb = kb.normalize() * mag if kb.length() > 0 else radial * mag
+                if speed >= SPLAT_SPEED:
+                    # Hit at real speed: they do not get back up.
+                    self.kick(1.3 + min(3.0, speed * 0.28))
+                    self.splatter_ped(ped, kb)
+                    continue
+                ped.knock = kb
+                if speed > 2.0:
+                    ped.mood = 'down'
+                    ped.down_timer = random.randint(45, 80)
+                    ped.mood_timer = 0
                 # Chaos pays in score, never in cash - the delivery loop is the
-                # only thing that puts money in your pocket.
-                self.score += 5
+                # only thing that puts money in your pocket. Combo stacks the
+                # per-hit value; GTA1's GOURANGA lives here.
+                self.combo += 1
+                self.combo_timer = FPS * 2
+                self.add_score(5 * min(self.combo, 12), ped.rect.center)
                 self.wanted_bump(1, 'pedestrian')
-                self.add_toast("Yikes! +5")
+                self.kick(1.3 + min(3.0, speed * 0.28))
+                self.spawn_burst(ped.rect.center, 4, ('debris',), 1.8)
+                self.frenzy_hit('ped')
+                for other in self.pedestrians:
+                    if other is ped or other.mood in ('flee', 'down'):
+                        continue
+                    ox = other.rect.centerx - ped.rect.centerx
+                    oy = other.rect.centery - ped.rect.centery
+                    if ox * ox + oy * oy < 82 * 82:
+                        other.gawk_at(ped.rect.center, random.randint(90, 150))
+                if self.combo in COMBO_SHOUTS:
+                    self.add_callout(COMBO_SHOUTS[self.combo], hud_HUD_RED, scale=2)
+                    self.bump_multiplier(1)
+                if self.combo == 12:
+                    self.wanted_level = max(self.wanted_level, 3)
+                    self.add_callout("YOU MONSTER", hud_HUD_RED)
         for car in self.cars:
             if car is self.driving or car.driver == 'player':
                 continue
             if self.driving.rect.colliderect(car.rect):
+                self.shunt(car, speed)
                 # A nudge in traffic is not a crime; a real shunt is.
                 if speed > 4.5:
-                    self.score += 2
+                    self.add_score(2, car.rect.center)
                     self.wanted_bump(1, 'traffic')
+                    self.kick(min(5.0, speed * 0.55), freeze=1 if speed > 7.5 else 0)
+                    self.spawn_burst(car.rect.center, int(2 + speed),
+                                     ('spark', 'glass'), speed * 0.5)
+                    self.driving.damage(speed * 0.7)
+                    car.damage(speed * 1.6)
         for cop in self.police:
-            if self.driving.rect.colliderect(cop.rect) and speed > 4.5:
-                self.wanted_bump(1, 'cop')
+            if self.driving.rect.colliderect(cop.rect):
+                self.shunt(cop, speed)
+                if speed > 4.5:
+                    self.wanted_bump(1, 'cop')
+                    self.kick(min(5.0, speed * 0.55))
+                    self.spawn_burst(cop.rect.center, int(2 + speed),
+                                     ('spark', 'glass'), speed * 0.5)
+                    self.driving.damage(speed * 0.6)
+                    cop.damage(speed * 1.3)
+
+    def shunt(self, other, speed):
+        """Momentum transfer into a rammed car: shove it down the contact
+        normal, yaw it away from an off-centre hit, and bleed the matching
+        speed off you. Traffic used to absorb a 9.5 broadside without so much
+        as twitching, which made ramming feel like driving through a poster."""
+        me = self.driving
+        if me is None or speed < 0.4:
+            return
+        normal = pygame.Vector2(other.rect.centerx - me.rect.centerx,
+                                other.rect.centery - me.rect.centery)
+        if normal.length() == 0:
+            normal = pygame.Vector2(math.cos(me.angle), math.sin(me.angle))
+        normal = normal.normalize()
+        heading = pygame.Vector2(math.cos(other.angle), math.sin(other.angle))
+        # how much of the shove lands along the victim's own axis vs sideways
+        along = heading.dot(normal)
+        mass_ratio = max(0.35, min(2.2, me.max_hp / max(1.0, other.max_hp)))
+        push = min(6.0, speed * 0.55 * mass_ratio)
+        other.velocity = max(-other.max_speed, min(other.max_speed,
+                                                   other.velocity + push * along))
+        # sideways component spins it: cross product sign picks the direction
+        cross = heading.x * normal.y - heading.y * normal.x
+        other.angle += cross * push * 0.055
+        other.steer_angle *= 0.4
+        me.velocity *= max(0.45, 1.0 - 0.06 * mass_ratio)
 
     # ---------------- police ----------------
     def cop_spawn_point(self):
@@ -7142,6 +8362,7 @@ class Game:
         bail = min(self.cash, BAIL_COST)
         self.cash -= bail
         self.add_toast(f"BUSTED! Bail ${bail}")
+        self.reset_multiplier()
         self.busted_flash = FPS * 2
         self.wanted_level = 0
         self.police = []
@@ -7178,15 +8399,22 @@ class Game:
         if self.wanted_decay_timer >= WANTED_DECAY_STEPS:
             self.wanted_decay_timer = 0
             self.wanted_level = max(0, self.wanted_level - 1)
+            # Shed a cop with the star, this same step, so the police count
+            # never disagrees with the star display even for one frame. (A far
+            # cop that update_police wouldn't trim on count alone.)
+            trimmed = COP_COUNT_BY_STAR[self.wanted_level]
+            while len(self.police) > trimmed:
+                self.police.pop()
             if self.wanted_level == 0:
-                self.add_toast("Lost them")
-                self.score += 100
+                self.add_callout("LOST 'EM", hud_HUD_GOLD)
+                self.add_score(100, self.active_rect().center, mult=False)
 
     def check_landmark_discovery(self):
         name = landmark_at(self.active_rect())
         if name and name not in self.discovered:
             self.discovered.add(name)
-            self.score += 150
+            self.add_score(150, self.active_rect().center, mult=False)
+            self.add_callout("NEW TURF", hud_HUD_GOLD, scale=1)
             self.add_toast(f"Discovered: {name}!")
 
     # ---------------- drawing ----------------
@@ -7437,42 +8665,142 @@ class Game:
         storefront = commercial or kind <= 3
         win_y = top_y + 6
         if storefront:
-            awn = _AWNING_COLORS[n % len(_AWNING_COLORS)]
-            pygame.draw.rect(self.screen, _blend(awn, (0, 0, 0), 0.3),
-                             (rect.left + 2, win_y - 5, TILE_SIZE - 4, 6))
-            pygame.draw.rect(self.screen, awn, (rect.left + 2, win_y - 5, TILE_SIZE - 4, 4))
-            sw = pygame.Rect(rect.left + 5, win_y + 2, TILE_SIZE - 26, rect.bottom + SKIRT - win_y - 3)
+            self._facade_storefront(rect, c, r, n, top_y, win_y, SKIRT, trim)
+        else:
+            self._facade_house(rect, c, r, n, top_y, win_y, WALL_H, SKIRT,
+                               base, wall, course, trim)
+
+    # -- named St. Louis storefronts ---------------------------------------
+    def _facade_storefront(self, rect, c, r, n, top_y, win_y, SKIRT, trim):
+        """A shop with a real sign on it. Half the character of a St. Louis
+        street is the names over the doors, and the HUD font can spell them."""
+        name, sign_bg, sign_fg = hood_pick_sign(c, r, n)
+        awn = _AWNING_COLORS[n % len(_AWNING_COLORS)]
+
+        # sign board across the top of the shopfront
+        sb = pygame.Rect(rect.left + 2, top_y + 1, TILE_SIZE - 4, 9)
+        pygame.draw.rect(self.screen, _blend(sign_bg, (0, 0, 0), 0.45), sb.move(1, 1))
+        pygame.draw.rect(self.screen, sign_bg, sb)
+        pygame.draw.rect(self.screen, _blend(sign_bg, (255, 255, 255), 0.30), sb, 1)
+        tw = hud_text_width(name, 1)
+        if tw <= sb.width:
+            hud_text(self.screen, name, sb.x + (sb.width - tw) // 2, sb.y + 1,
+                     sign_fg, False, 1)
+        if name == "FOX":                                    # marquee bulbs
+            for bx in range(sb.left + 2, sb.right - 1, 5):
+                self.screen.fill((248, 226, 150), (bx, sb.bottom, 2, 2))
+
+        # awning, glass, door
+        ay = sb.bottom + 2
+        pygame.draw.rect(self.screen, _blend(awn, (0, 0, 0), 0.35),
+                         (rect.left + 2, ay, TILE_SIZE - 4, 5))
+        pygame.draw.rect(self.screen, awn, (rect.left + 2, ay, TILE_SIZE - 4, 3))
+        for sx in range(rect.left + 4, rect.right - 4, 8):   # awning stripes
+            self.screen.fill(_blend(awn, (255, 255, 255), 0.35), (sx, ay, 3, 3))
+        sw = pygame.Rect(rect.left + 5, ay + 6, TILE_SIZE - 26,
+                         rect.bottom + SKIRT - ay - 7)
+        if sw.height > 3:
             pygame.draw.rect(self.screen, (44, 52, 60), sw)
             pygame.draw.rect(self.screen, (120, 150, 168) if n & 8 else (150, 120, 70),
-                             sw.inflate(-4, -6))            # lit shop glass
-            pygame.draw.rect(self.screen, (26, 22, 24),
-                             (rect.right - 17, win_y, 12, rect.bottom + SKIRT - win_y))  # door
-            pygame.draw.rect(self.screen, trim, (rect.right - 17, win_y, 12, 2))
+                             sw.inflate(-4, -4))            # lit shop glass
+        pygame.draw.rect(self.screen, (26, 22, 24),
+                         (rect.right - 17, ay + 5, 12, rect.bottom + SKIRT - ay - 5))
+        pygame.draw.rect(self.screen, trim, (rect.right - 17, ay + 5, 12, 2))
+
+    # -- St. Louis housing stock -------------------------------------------
+    _PAINTED_LADY = ((132, 108, 156), (86, 122, 132), (168, 132, 96),
+                     (150, 96, 104), (104, 128, 100), (176, 156, 112))
+
+    def _facade_house(self, rect, c, r, n, top_y, win_y, WALL_H, SKIRT,
+                      base, wall, course, trim):
+        """Four real St. Louis house types instead of one generic wall: the
+        Second Empire mansard rowhouse, a gabled brick two-flat, a painted
+        lady, and a south-city shotgun."""
+        style = hood_pick_house(c, r, n)
+        dark = _blend(base, (0, 0, 0), 0.45)
+
+        if style == 'painted_lady':
+            body = self._PAINTED_LADY[(n >> 5) % len(self._PAINTED_LADY)]
+            pygame.draw.rect(self.screen, body,
+                             (rect.left, top_y, TILE_SIZE, WALL_H + SKIRT))
+            wall = body
+            trim = _blend(body, (255, 255, 255), 0.55)
+            course = _blend(body, (0, 0, 0), 0.30)
+
+        if style in ('gable_brick', 'painted_lady', 'shotgun'):
+            # a peaked roofline poking above the cornice
+            peak = 7 if style != 'shotgun' else 4
+            apex = (rect.centerx, top_y - 2 - peak)
+            pygame.draw.polygon(self.screen, _blend(wall, (0, 0, 0), 0.35),
+                                [(rect.left + 2, top_y), apex, (rect.right - 2, top_y)])
+            pygame.draw.polygon(self.screen, COLOR_OUTLINE,
+                                [(rect.left + 2, top_y), apex, (rect.right - 2, top_y)], 1)
+            if style == 'gable_brick' and (n & 32):          # chimney
+                pygame.draw.rect(self.screen, dark, (rect.right - 14, top_y - 10, 5, 9))
+        elif style == 'mansard':
+            # steep slate mansard with two dormers
+            pygame.draw.rect(self.screen, (58, 60, 68), (rect.left, top_y - 8, TILE_SIZE, 9))
+            pygame.draw.rect(self.screen, (44, 46, 54), (rect.left, top_y - 1, TILE_SIZE, 2))
+            for dx in (rect.left + 13, rect.right - 22):
+                pygame.draw.rect(self.screen, (72, 74, 82), (dx, top_y - 11, 9, 8))
+                lit = _noise(c, r, 311 + dx - rect.left) % 3 == 0
+                pygame.draw.rect(self.screen, (206, 178, 116) if lit else (38, 44, 56),
+                                 (dx + 2, top_y - 9, 5, 5))
+                pygame.draw.rect(self.screen, COLOR_OUTLINE, (dx, top_y - 11, 9, 8), 1)
+
+        # windows: tall pairs on the rowhouses, one wide light on a shotgun
+        if style == 'shotgun':
+            xs, ww, wh = (rect.left + 8,), 20, 12
+        elif style == 'mansard':
+            xs, ww, wh = (rect.left + 8, rect.left + 26), 12, 15
         else:
-            xs = (rect.left + 12, rect.left + 40) if kind in (4, 5) else \
-                 (rect.left + 7, rect.left + 26, rect.left + 45)
-            for wx in xs:
-                lit = _noise(c, r, wx) % 3 == 0
-                glass = (210, 184, 120) if lit else (44, 52, 64)
-                pygame.draw.rect(self.screen, (18, 16, 20), (wx - 1, win_y - 1, 15, 15))
-                pygame.draw.rect(self.screen, glass, (wx, win_y, 13, 13))
-                pygame.draw.line(self.screen, (18, 16, 20), (wx + 6, win_y), (wx + 6, win_y + 12))
-                pygame.draw.line(self.screen, trim, (wx - 1, win_y + 13), (wx + 13, win_y + 13))
-            if kind in (6, 7):                              # zig-zag fire escape
-                for k in range(3):
-                    fy = top_y + 4 + k * 7
-                    pygame.draw.line(self.screen, COLOR_OUTLINE,
-                                     (rect.left + 6, fy), (rect.right - 6, fy))
-            pygame.draw.rect(self.screen, trim, (rect.centerx - 7, rect.bottom, 14, SKIRT))
-            pygame.draw.rect(self.screen, (26, 22, 24), (rect.centerx - 4, rect.bottom - 6, 8, 6))
+            xs, ww, wh = (rect.left + 7, rect.left + 25), 13, 13
+        for wi, wx in enumerate(xs):
+            # Salt on the window's index within the tile, never on wx:
+            # wx is a screen coordinate, so keying the noise off it re-rolled
+            # every window on every camera move and the lights flickered as
+            # you walked. (c, r, wi) is fixed to the building.
+            lit = _noise(c, r, 137 + wi * 41) % 3 == 0
+            glass = (210, 184, 120) if lit else (44, 52, 64)
+            pygame.draw.rect(self.screen, (18, 16, 20), (wx - 1, win_y - 1, ww + 2, wh + 2))
+            pygame.draw.rect(self.screen, glass, (wx, win_y, ww, wh))
+            pygame.draw.line(self.screen, (18, 16, 20),
+                             (wx + ww // 2, win_y), (wx + ww // 2, win_y + wh - 1))
+            pygame.draw.rect(self.screen, trim, (wx - 2, win_y + wh, ww + 4, 2))
+            if style in ('mansard', 'painted_lady'):          # stone lintel
+                pygame.draw.rect(self.screen, trim, (wx - 2, win_y - 3, ww + 4, 2))
+
+        # front door + stoop: the thing every one of these houses has
+        door_x = rect.right - 20
+        door_h = rect.bottom + SKIRT - win_y - 2
+        pygame.draw.rect(self.screen, dark, (door_x, win_y + 2, 13, door_h))
+        pygame.draw.rect(self.screen, (30, 24, 26), (door_x + 2, win_y + 4, 9, door_h - 2))
+        pygame.draw.rect(self.screen, trim, (door_x, win_y + 2, 13, 2))
+        if style == 'shotgun':                               # full-width porch
+            pygame.draw.rect(self.screen, trim, (rect.left + 3, win_y - 3, TILE_SIZE - 6, 3))
+            for px in (rect.left + 5, rect.right - 8):
+                pygame.draw.rect(self.screen, trim, (px, win_y, 2, door_h + 2))
+        # stone steps down to the pavement
+        for k in range(3):
+            pygame.draw.rect(self.screen, _blend(trim, (0, 0, 0), 0.12 * k),
+                             (door_x - k, rect.bottom + k * 2, 13 + k * 2, 3))
 
     def draw(self):
         self.screen.fill(COLOR_SKY_BG)
+        # Impact shake: a frame-driven jitter folded into the camera for the
+        # world + entity passes only. Zero at rest, so it never perturbs the
+        # camera-pan test.
+        if self.shake > 0.0:
+            self.camera.shake_ox = math.sin(self.frame * 2.7) * self.shake
+            self.camera.shake_oy = math.cos(self.frame * 3.1) * self.shake
+        else:
+            self.camera.shake_ox = self.camera.shake_oy = 0.0
         start_col, end_col, start_row, end_row = self.camera.visible_tile_range()
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):
                 self.draw_tile(c, r)
         self.draw_landmark_art()
+        self.draw_decals()          # stains sit on the ground, under everything
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):
                 self.draw_props(c, r)
@@ -7523,23 +8851,165 @@ class Game:
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
             self.screen.blit(sprite, rect)
 
+        self.draw_punch()
+        self.draw_bullets()
+        self.draw_fx()
+        self.draw_weapon_pickups()
+        self.draw_frenzy_icon()
         self.draw_job_marker()
+        self.draw_pops()
+        # White flash on a big hit, one or two frames.
+        if self.hit_flash > 0:
+            fl = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+            fl.fill((255, 255, 255, int(70 * self.hit_flash / 6)))
+            self.screen.blit(fl, (0, 0))
         self.draw_hud()
-        if self.busted_flash > FPS:
+        self.draw_callouts()
+        if self.busted_flash > FPS or self.wasted_flash > FPS:
+            wrecked = self.wasted_flash > FPS
             flash_surf = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
             flash_surf.fill((255, 0, 0, 60))
             self.screen.blit(flash_surf, (0, 0))
-            bw = hud_text_width("BUSTED!", 3)
-            hud_text(self.screen, "BUSTED!", (SCREEN_WIDTH - bw) // 2,
+            word = "WASTED" if wrecked else "BUSTED!"
+            bw = hud_text_width(word, 3)
+            hud_text(self.screen, word, (SCREEN_WIDTH - bw) // 2,
                      SCREEN_HEIGHT // 2 - 10, hud_HUD_RED, True, 3)
 
         if self.show_debug:
             self.draw_debug()
         if self.state == STATE_PAUSED:
             self.draw_pause()
+        if self.show_map:
+            self.draw_map_screen()
 
         self.postfx.present(self.screen, self.window)
         pygame.display.flip()
+
+    # ---------------- feedback rendering ----------------
+    _DECAL_COLORS = {
+        'blood': ((104, 18, 24), (74, 12, 18), (140, 34, 34)),
+        'scorch': ((30, 27, 26), (18, 16, 16), (52, 46, 42)),
+    }
+
+    def draw_decals(self):
+        """Ground stains, drawn on the road under everything that moves. A
+        splatter you can still see two blocks later is the whole point."""
+        clip_w, clip_h = SCREEN_WIDTH, SCREEN_HEIGHT
+        for d in self.decals:
+            sx, sy = self.camera.apply_pos((d['x'], d['y']))
+            if not (-24 < sx < clip_w + 24 and -24 < sy < clip_h + 24):
+                continue
+            mid, dark, lite = self._DECAL_COLORS.get(d['kind'],
+                                                     self._DECAL_COLORS['blood'])
+            n = d['seed']
+            bx, by = int(sx), int(sy)
+            scale = d['size']
+            for i in range(7):
+                n = (n * 1103515245 + 12345) & 0x7fffffff
+                ox = ((n >> 4) % 21) - 10
+                oy = ((n >> 11) % 21) - 10
+                rad = 2 + ((n >> 18) % 3)
+                col = dark if i % 3 == 0 else mid
+                pygame.draw.circle(self.screen, col,
+                                   (bx + int(ox * scale), by + int(oy * scale)),
+                                   max(1, int(rad * scale)))
+            n = (n * 1103515245 + 12345) & 0x7fffffff
+            self.screen.fill(lite, (bx + ((n >> 6) % 9) - 4,
+                                    by + ((n >> 13) % 9) - 4, 2, 2))
+
+    def draw_bullets(self):
+        for b in self.bullets:
+            sx, sy = self.camera.apply_pos((b['x'], b['y']))
+            if not (0 <= sx < SCREEN_WIDTH and 0 <= sy < SCREEN_HEIGHT):
+                continue
+            tx = sx - b['vx'] * 0.45
+            ty = sy - b['vy'] * 0.45
+            pygame.draw.line(self.screen, (255, 236, 168),
+                             (int(tx), int(ty)), (int(sx), int(sy)), 2)
+
+    def draw_weapon_pickups(self):
+        bob = (self.frame // 8) % 2
+        for w in self.weapon_pickups:
+            if w['taken']:
+                continue
+            sx, sy = self.camera.apply_pos((w['x'], w['y']))
+            if not (-16 < sx < SCREEN_WIDTH + 16 and -16 < sy < SCREEN_HEIGHT + 16):
+                continue
+            x, y = int(sx) - 6, int(sy) - 5 - bob
+            self.screen.fill((26, 24, 26), (x + 1, y + 8, 12, 3))     # shadow
+            self.screen.fill((58, 56, 62), (x, y, 12, 7))             # crate
+            self.screen.fill((92, 90, 98), (x, y, 12, 2))
+            self.screen.fill(hud_HUD_GOLD, (x + 4, y + 2, 4, 3))      # brass
+
+    def draw_punch(self):
+        """A two-frame arc where the fist lands, so a swing reads on screen."""
+        if self.punch_timer <= 0 or self.driving is not None:
+            return
+        ang = self.aim_angle()
+        px, py = self.camera.apply_pos(self.player_rect.center)
+        r = PUNCH_RANGE * (0.55 + 0.45 * (8 - self.punch_timer) / 8.0)
+        col = hud_HUD_WHITE if self.punch_timer > 4 else hud_HUD_GREY_DIM
+        for k in (-0.5, 0.0, 0.5):
+            ex = px + math.cos(ang + k) * r
+            ey = py + math.sin(ang + k) * r
+            pygame.draw.line(self.screen, col, (int(px), int(py)),
+                             (int(ex), int(ey)), 1)
+        fx = px + math.cos(ang) * r
+        fy = py + math.sin(ang) * r
+        pygame.draw.circle(self.screen, col, (int(fx), int(fy)), 3)
+
+    def draw_fx(self):
+        for p in self.fx:
+            sx, sy = self.camera.apply_pos((p['x'], p['y']))
+            if not (0 <= sx < SCREEN_WIDTH and 0 <= sy < SCREEN_HEIGHT):
+                continue
+            x, y = int(sx), int(sy)
+            k = p['kind']
+            if k == 'spark':
+                col = (255, 232, 150) if p['life'] > 9 else (224, 122, 40)
+                self.screen.fill(col, (x, y, 2, 2))
+            elif k == 'glass':
+                self.screen.fill((150, 172, 184), (x, y, 1, 2))
+            elif k == 'smoke':
+                g = min(150, 54 + p['life'] * 4)
+                self.screen.fill((g, g, g), (x, y, 2, 2))
+            elif k == 'blood':
+                self.screen.fill((132, 24, 28) if p['life'] > 10 else (86, 16, 20),
+                                 (x, y, 2, 2))
+            else:  # debris
+                self.screen.fill((88, 82, 74), (x, y, 2, 2))
+
+    def draw_pops(self):
+        for p in self.pops:
+            age = self.frame - p['born']
+            sx, sy = self.camera.apply_pos((p['x'], p['y'] - age * 0.8))
+            if -40 < sx < SCREEN_WIDTH + 40 and -20 < sy < SCREEN_HEIGHT + 20:
+                hud_text(self.screen, p['text'],
+                         int(sx) - hud_text_width(p['text'], 1) // 2, int(sy),
+                         p['col'], True, 1)
+
+    def draw_callouts(self):
+        y = 34
+        for c in self.callouts:
+            sc = c['scale']
+            if self.frame - c['born'] < 5 and sc > 1:   # scale-punch on spawn
+                sc -= 1
+            w = hud_text_width(c['text'], sc)
+            hud_text(self.screen, c['text'], (SCREEN_WIDTH - w) // 2, y,
+                     c['col'], True, sc)
+            y += hud_text_height(c['text'], sc) + 5
+
+    def draw_frenzy_icon(self):
+        if self.frenzy_icon is None:
+            return
+        ix, iy, _kind = self.frenzy_icon
+        sx, sy = self.camera.apply_pos((ix, iy))
+        pulse = (self.frame // 5) % 3
+        if -20 < sx < SCREEN_WIDTH + 20 and -20 < sy < SCREEN_HEIGHT + 20:
+            for i, rad in enumerate((14 + pulse, 9 + pulse)):
+                pygame.draw.circle(self.screen, hud_HUD_RED if i == 0 else (250, 210, 90),
+                                   (int(sx), int(sy)), rad, 2)
+            hud_text(self.screen, "!", int(sx) - 2, int(sy) - 6, hud_HUD_WHITE, True, 1)
 
     # ---------------- objective rendering ----------------
     JOB_MARKER_COLORS = ((250, 214, 78), (196, 150, 34))
@@ -7585,6 +9055,9 @@ class Game:
     PAUSE_LINES = (
         ("WASD / ARROWS", "MOVE OR DRIVE"),
         ("E", "ENTER / EXIT VEHICLE"),
+        ("SPACE / F", "PUNCH OR SHOOT"),
+        ("M / TAB", "FULL CITY MAP"),
+        ("F11", "FULLSCREEN"),
         ("ESC / P", "PAUSE"),
         ("F5 / F9", "SAVE / LOAD"),
         ("F2", "CRT FILTER"),
@@ -7619,6 +9092,103 @@ class Game:
         stat = f"RUNS {self.jobs_done}  LOST {self.jobs_failed}  BEST X{self.best_streak}"
         hud_text(self.screen, stat, px + (pw - hud_text_width(stat, 1)) // 2,
                  py + ph - 16, hud_HUD_GREY_DIM, True, 1)
+
+    # ---------------- full-city map (M / TAB) ----------------
+    def build_map_overview(self):
+        """Bake the whole 100x100 tile grid down to one MAP_OVERVIEW_SIZE
+        square, with every landmark footprint outlined and numbered. Static,
+        so it is built once and cached, same as the HUD radar."""
+        mv = MAP_OVERVIEW_SIZE
+        surf = pygame.Surface((mv, mv))
+        surf.fill((12, 12, 16))
+        s = mv / float(MAP_WIDTH)
+        cell = max(1, int(math.ceil(TILE_SIZE * s)))
+        for r in range(MAP_TILES_H):
+            row = GAME_MAP[r]
+            py = int(r * TILE_SIZE * s)
+            for c in range(MAP_TILES_W):
+                surf.fill(row[c]['color'], (int(c * TILE_SIZE * s), py, cell, cell))
+        for i, (lx, ly, lw, lh, _kind, _name, color) in enumerate(LANDMARKS, 1):
+            rx, ry = int(lx * TILE_SIZE * s), int(ly * TILE_SIZE * s)
+            rw = max(4, int(lw * TILE_SIZE * s))
+            rh = max(4, int(lh * TILE_SIZE * s))
+            pygame.draw.rect(surf, _blend(color, (255, 255, 255), 0.55),
+                             (rx, ry, rw, rh), 1)
+            tag = str(i)
+            hud_text(surf, tag, rx + (rw - hud_text_width(tag, 1)) // 2,
+                     ry + (rh - 7) // 2, hud_HUD_WHITE, True, 1)
+        return surf
+
+    def draw_map_screen(self):
+        """Full-screen city map: where you are, where the job is, where the
+        heat is. Freezes the sim while it is up (see run() / handle_events)."""
+        mv = MAP_OVERVIEW_SIZE
+        if self.map_overview is None:
+            self.map_overview = self.build_map_overview()
+
+        # Full opaque repaint - the map owns the screen, and a translucent
+        # scrim let the bright HUD ghost through underneath it.
+        self.screen.fill((8, 9, 13))
+        panel = pygame.Rect(12, 8, SCREEN_WIDTH - 24, SCREEN_HEIGHT - 16)
+        hud_draw_panel(self.screen, panel, alpha=255)
+
+        title = "ST. LOUIS"
+        hud_text(self.screen, title, (SCREEN_WIDTH - hud_text_width(title, 2)) // 2,
+                 panel.top + 7, hud_HUD_GOLD, True, 2)
+
+        mx, my = panel.left + 14, panel.top + 28
+        self.screen.blit(self.map_overview, (mx, my))
+        pygame.draw.rect(self.screen, hud_HUD_GREY_DIM, (mx - 1, my - 1, mv + 2, mv + 2), 1)
+        s = mv / float(MAP_WIDTH)
+
+        def to_map(wx, wy):
+            return mx + int(wx * s), my + int(wy * s)
+
+        stx, sty = to_map(*self.police_station)
+        pygame.draw.circle(self.screen, (90, 150, 240), (stx, sty), 3)
+        pygame.draw.circle(self.screen, (12, 16, 28), (stx, sty), 3, 1)
+
+        if self.job is not None:
+            for pos, col, active in (
+                    (self.job.pickup_pos, hud_HUD_GOLD, not self.job.collected),
+                    (self.job.drop_pos, hud_HUD_GREEN, self.job.collected)):
+                jx, jy = to_map(*pos)
+                if active:
+                    pulse = 5 + (self.frame // 6) % 3
+                    pygame.draw.circle(self.screen, col, (jx, jy), 4)
+                    pygame.draw.circle(self.screen, hud_HUD_WHITE, (jx, jy), pulse, 1)
+                else:
+                    pygame.draw.circle(self.screen, col, (jx, jy), 3, 1)
+
+        for cop in self.police:
+            cx, cy = to_map(cop.rect.centerx, cop.rect.centery)
+            pygame.draw.circle(self.screen, hud_HUD_RED, (cx, cy), 2)
+
+        active = self.active_rect()
+        ppx, ppy = to_map(active.centerx, active.centery)
+        pygame.draw.circle(self.screen, hud_HUD_WHITE, (ppx, ppy), 3)
+        pygame.draw.circle(self.screen, (0, 0, 0), (ppx, ppy), 3, 1)
+        if self.driving:
+            pygame.draw.line(self.screen, hud_HUD_WHITE, (ppx, ppy),
+                             (ppx + int(math.cos(self.driving.angle) * 10),
+                              ppy + int(math.sin(self.driving.angle) * 10)), 2)
+
+        lx, ly = mx + mv + 18, my
+        for i, (_a, _b, _c, _d, _kind, name, color) in enumerate(LANDMARKS, 1):
+            self.screen.fill(_blend(color, (255, 255, 255), 0.3), (lx, ly + 1, 6, 6))
+            hud_text(self.screen, f"{i} {name}", lx + 11, ly, hud_HUD_WHITE, True, 1)
+            ly += 12
+        ly += 8
+        for col, name in (((232, 232, 232), "YOU"), (hud_HUD_GOLD, "PICKUP"),
+                          (hud_HUD_GREEN, "DROP-OFF"), (hud_HUD_RED, "POLICE"),
+                          ((90, 150, 240), "POLICE STATION")):
+            self.screen.fill(col, (lx, ly + 1, 6, 6))
+            hud_text(self.screen, name, lx + 11, ly, hud_HUD_WHITE, True, 1)
+            ly += 12
+
+        hint = "M / TAB / ESC  CLOSE MAP"
+        hud_text(self.screen, hint, (SCREEN_WIDTH - hud_text_width(hint, 1)) // 2,
+                 panel.bottom - 13, hud_HUD_GREY_DIM, True, 1)
 
     def draw_debug(self):
         """F3 readout. Frame budget, sim steps and world state in one place -
@@ -7686,14 +9256,51 @@ class Game:
             jx, jy = self.job.target_pos
             pygame.draw.circle(self.screen, jc,
                                (int(rx + jx * scale), int(ry + jy * scale)), 2)
+        if self.frenzy_icon is not None:
+            pygame.draw.circle(self.screen, hud_HUD_RED,
+                               (int(rx + self.frenzy_icon[0] * scale),
+                                int(ry + self.frenzy_icon[1] * scale)), 2)
         hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
+
+        # chaos multiplier + its progress bar, under the radar
+        cy0 = ry + RADAR_SIZE + 9
+        if self.multiplier > 1 or self.mult_prog > 0:
+            mtxt = f"X{self.multiplier}"
+            hud_text(self.screen, mtxt, right - hud_text_width(mtxt, 2), cy0,
+                     hud_HUD_GOLD, True, 2)
+            fr = 1.0 if self.multiplier >= MULT_MAX else self.mult_prog / MULT_RUNG
+            pygame.draw.rect(self.screen, (30, 30, 38), (rx, cy0 + 17, RADAR_SIZE, 3))
+            pygame.draw.rect(self.screen, hud_HUD_GOLD,
+                             (rx, cy0 + 17, int(RADAR_SIZE * max(0.0, min(1.0, fr))), 3))
+        if self.frenzy is not None:
+            ft = f"FRENZY {self.frenzy.remaining}  {self.frenzy.steps_left // FPS}S"
+            hud_text(self.screen, ft, right - hud_text_width(ft, 1), cy0 + 24,
+                     hud_HUD_RED, True, 1)
 
         self.hud_left_y = self.draw_objective()
         self.draw_bust_meter()
 
-        # mode readout, bottom left
+        # damage / health bar, bottom left above the toasts
+        hp_frac, hlabel = None, None
+        if self.driving is not None:
+            hp_frac, hlabel = self.driving.hp / self.driving.max_hp, "DAMAGE"
+        elif self.player_hp < PLAYER_MAX_HP - 0.5:
+            hp_frac, hlabel = self.player_hp / PLAYER_MAX_HP, "HEALTH"
+        if hp_frac is not None and hp_frac < 0.999:
+            by = SCREEN_HEIGHT - 72
+            pygame.draw.rect(self.screen, (30, 30, 38), (12, by, 78, 4))
+            hcol = (hud_HUD_GREEN if hp_frac > 0.5
+                    else hud_HUD_GOLD if hp_frac > 0.25 else hud_HUD_RED)
+            pygame.draw.rect(self.screen, hcol, (12, by, int(78 * max(0.0, hp_frac)), 4))
+            hud_text(self.screen, hlabel, 12, by - 10, hud_HUD_GREY_DIM, True, 1)
+
+        # mode + weapon readout, bottom left
         mode = "DRIVING" if self.driving else "ON FOOT"
         hud_text(self.screen, mode, 12, SCREEN_HEIGHT - 18, hud_HUD_GOLD, True, 1)
+        arm = f"PISTOL {self.ammo}" if self.weapon == 'pistol' and self.ammo > 0 else "FISTS"
+        hud_text(self.screen, arm, 12 + hud_text_width(mode, 1) + 12,
+                 SCREEN_HEIGHT - 18,
+                 hud_HUD_WHITE if self.weapon == 'pistol' else hud_HUD_GREY_DIM, True, 1)
 
         # toasts stack above the mode readout
         for i, toast in enumerate(reversed(self.toasts[-3:])):
@@ -7790,9 +9397,10 @@ class Game:
         print("  STL-GTA: St. Louis Open-World Sandbox")
         print("=" * 60)
         print("  Deliver cargo between landmarks for cash. Cops want a word.")
+        print("  M / TAB - Full city map    F11 - Fullscreen")
         print("  ESC / P - Pause (full controls listed there)")
         print("=" * 60)
-        self.add_toast("Press ESC for controls")
+        self.add_toast("M for the map  -  ESC for controls")
 
         self.accumulator = 0.0
         while self.running:
@@ -7801,10 +9409,10 @@ class Game:
             self.handle_events()
             if not self.running:
                 break
-            if self.state == STATE_PLAYING:
+            if self.state == STATE_PLAYING and not self.show_map:
                 self.step_sim(elapsed)
             else:
-                self.accumulator = 0.0      # do not bank time while paused
+                self.accumulator = 0.0      # do not bank time while paused / mapping
                 self.sim_steps = 0
             self.draw()
 
@@ -7859,9 +9467,19 @@ class Game:
             return f"negative cash: {self.cash}"
         if self.score < 0:
             return f"negative score: {self.score}"
+        if not 1 <= self.multiplier <= MULT_MAX:
+            return f"multiplier out of range: {self.multiplier}"
+        if not finite(self.player_hp) or self.player_hp > PLAYER_MAX_HP + 0.5:
+            return f"player hp out of range: {self.player_hp}"
+        if self.frenzy is not None and self.frenzy.steps_left < 0:
+            return "frenzy timer went negative"
+        if len(self.fx) > 240 or len(self.pops) > 48 or len(self.callouts) > 3:
+            return "a feedback pool grew unbounded"
         for car in self.cars + self.police:
-            if not finite(car.angle, car.velocity):
+            if not finite(car.angle, car.velocity, car.hp):
                 return f"car physics went non-finite: {car.variant}"
+            if not -1.0 <= car.hp <= car.max_hp + 0.5:
+                return f"car hp out of range: {car.hp}/{car.max_hp}"
             if not (-TILE_SIZE <= car.rect.centerx <= MAP_WIDTH + TILE_SIZE
                     and -TILE_SIZE <= car.rect.centery <= MAP_HEIGHT + TILE_SIZE):
                 return f"car left the map at {car.rect.center}"
@@ -7883,6 +9501,8 @@ def main(argv=None):
     parser.add_argument("--shot", metavar="PATH",
                         help="save a PNG of the final headless frame")
     parser.add_argument("--seed", type=int, help="seed the RNG for a repeatable run")
+    parser.add_argument("--windowed", action="store_true",
+                        help="start in a resizable window instead of fullscreen (F11 toggles either way)")
     args = parser.parse_args(argv)
 
     if args.headless:
@@ -7892,7 +9512,7 @@ def main(argv=None):
     if args.seed is not None:
         random.seed(args.seed)
 
-    game = Game()
+    game = Game(start_fullscreen=not args.windowed)
     if args.headless:
         code = game.run_headless(args.frames, args.shot, args.seed)
         pygame.quit()
