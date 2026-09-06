@@ -449,7 +449,7 @@ COLOR_PLAZA_SEAM = (104, 100, 94)    # paving joints on landmark ground
 COLOR_TREE_SHADOW = (16, 22, 14)
 COLOR_OUTLINE = (18, 16, 18)
 COLOR_BUILDING_WALL = (46, 34, 34)   # warm brick-shadow on exposed side walls
-COLOR_SHADOW = (0, 0, 0)
+COLOR_SHADOW = (24, 20, 22)
 COLOR_LOT = (74, 74, 78)             # surface parking / vacant asphalt
 
 # St. Louis is a brick city: red, brown, buff and limestone masonry. Block
@@ -470,11 +470,33 @@ _AWNING_COLORS = [
     (150, 66, 58), (74, 104, 92), (72, 92, 128), (170, 132, 70),
     (110, 78, 120), (86, 110, 76),
 ]
-# Landmark districts whose street level should always read as shopfronts.
+# Landmark districts whose street level should usually read as shopfronts.
 _COMMERCIAL_LANDMARKS = {
     "Delmar Loop", "Grand Center Arts District", "Central West End",
     "The Hill", "Downtown", "Soulard Farmers Market", "Cherokee Street",
 }
+_FABRIC_LANDMARKS = {
+    "Delmar Loop", "Grand Center Arts District", "Central West End", "The Hill",
+}
+
+
+def facade_is_storefront(landmark, kind):
+    """Choose mixed-use frontage without letting an entire district become a
+    shopping-mall texture. The Hill keeps businesses on roughly half of its
+    exposed tiles; its two-family flats get to exist between them."""
+    if landmark == "The Hill":
+        return kind in (1, 2, 3, 4)
+    return landmark in _COMMERCIAL_LANDMARKS or kind <= 3
+
+
+def building_art_color(c, r, tile):
+    """Break district-sized landmark rectangles back into individual brick
+    buildings. Bespoke landmarks stay coherent; neighborhood fabric varies."""
+    base = tile['color']
+    if tile.get('landmark') in _FABRIC_LANDMARKS:
+        local = CITY_BRICKS[_noise(c, r, 607) % len(CITY_BRICKS)]
+        return _blend(base, local, 0.76)
+    return base
 
 PLAYER_COLOR = (206, 92, 110)
 POLICE_COLOR = (46, 64, 152)
@@ -1013,11 +1035,13 @@ HOOD_HOUSES = {
     'grand': ('mansard', 'gable_brick', 'painted_lady'),
     'grove': ('gable_brick', 'gable_brick', 'shotgun', 'mansard'),
     'downtown': ('mansard', 'mansard', 'gable_brick', 'painted_lady'),
-    'soulard': ('gable_brick', 'gable_brick', 'mansard', 'shotgun'),
-    'hill': ('shotgun', 'shotgun', 'gable_brick', 'gable_brick', 'mansard'),
-    'cherokee': ('gable_brick', 'painted_lady', 'shotgun', 'mansard'),
+    'soulard': ('flat_front', 'gable_brick', 'gable_brick', 'mansard', 'shotgun'),
+    'hill': ('flat_front', 'flat_front', 'shotgun', 'shotgun', 'gable_brick',
+             'gable_brick', 'mansard'),
+    'cherokee': ('flat_front', 'gable_brick', 'painted_lady', 'shotgun', 'mansard'),
     'north': ('gable_brick', 'mansard', 'gable_brick', 'shotgun'),
-    'south': ('shotgun', 'gable_brick', 'gable_brick', 'painted_lady', 'mansard'),
+    'south': ('flat_front', 'flat_front', 'shotgun', 'gable_brick', 'gable_brick',
+              'painted_lady', 'mansard'),
 }
 
 
@@ -3589,6 +3613,7 @@ props_TILE_ROAD = TILE_ROAD
 props_TILE_WATER = TILE_WATER
 props_TILE_BUILDING = TILE_BUILDING
 props_TILE_PARK = TILE_PARK
+props_TILE_PLAZA = TILE_PLAZA
 
 # Road grid: ROAD_LINES = set(range(4, MAP_TILES_W, 8)), so index i carries a
 # road when (i - ROAD_ORIGIN) % ROAD_STEP == 0.
@@ -3642,11 +3667,11 @@ props_PROPS = [
     'streetlight', 'hydrant', 'hydrant_hill', 'trafficlight', 'dumpster',
     'trashcan',
     'bench', 'mailbox', 'phonebooth', 'bus_stop', 'manhole', 'roadcone',
-    'planter', 'newsbox',
+    'planter', 'newsbox', 'chainlink', 'above_pool', 'tub_madonna',
 ]
 
 # Props that never cast a shadow (flat on the ground).
-props__FLAT = frozenset(('manhole',))
+props__FLAT = frozenset(('manhole', 'above_pool'))
 
 # Ground anchor of each sprite, measured from its top-left pixel.
 props__ANCHORS = {
@@ -3664,6 +3689,9 @@ props__ANCHORS = {
     'roadcone': (3, 8),
     'planter': (5, 10),
     'newsbox': (4, 9),
+    'chainlink': (10, 11),
+    'above_pool': (11, 13),
+    'tub_madonna': (5, 13),
 }
 
 props__SPRITES = {}
@@ -3861,6 +3889,56 @@ def props__build_newsbox():
     return s
 
 
+def props__build_chainlink():
+    """A single backyard fence panel. At this scale the alternating diagonals
+    read more clearly than a literal wire mesh, especially while moving."""
+    s = props__surf(21, 12)
+    wire = (142, 146, 142)
+    wire_hi = (188, 190, 178)
+    # Steel posts and top/bottom rails.
+    props__rect(s, 0, 0, 2, 12, props_C_METAL_DARK)
+    props__rect(s, 19, 0, 2, 12, props_C_METAL_DARK)
+    props__rect(s, 1, 1, 19, 1, wire_hi)
+    props__rect(s, 1, 10, 19, 1, wire)
+    for x in range(2, 19, 5):
+        pygame.draw.line(s, wire, (x, 2), (min(x + 5, 19), 10))
+        pygame.draw.line(s, wire_hi, (x, 10), (min(x + 5, 19), 2))
+    return s
+
+
+def props__build_above_pool():
+    """The blue oval that occupies half of a South City postage-stamp yard."""
+    s = props__surf(23, 14)
+    pygame.draw.ellipse(s, props_C_OUT, (0, 1, 23, 13))
+    pygame.draw.ellipse(s, (164, 170, 164), (1, 2, 21, 11))
+    pygame.draw.ellipse(s, (48, 120, 154), (3, 3, 17, 8))
+    pygame.draw.arc(s, (116, 190, 210), (4, 4, 15, 6), 0.2, 2.8, 1)
+    # Tiny white ladder on the east rim.
+    props__rect(s, 19, 3, 1, 8, (220, 218, 202))
+    props__rect(s, 21, 4, 1, 8, (220, 218, 202))
+    for y in (5, 8, 11):
+        props__rect(s, 19, y, 3, 1, (220, 218, 202))
+    return s
+
+
+def props__build_tub_madonna():
+    """A bathtub shrine: sincere, specific, and instantly South City."""
+    s = props__surf(11, 14)
+    stone = (210, 204, 188)
+    stone_lo = (146, 140, 130)
+    # Half-buried tub shell and the dark niche inside it.
+    pygame.draw.ellipse(s, props_C_OUT, (0, 0, 11, 14))
+    pygame.draw.ellipse(s, stone, (1, 1, 9, 12))
+    pygame.draw.ellipse(s, (54, 50, 54), (3, 3, 5, 9))
+    props__rect(s, 0, 10, 11, 4, stone_lo)
+    props__rect(s, 1, 10, 9, 2, stone)
+    # Blue robe, pale face, one gold votive pixel.
+    props__rect(s, 4, 5, 3, 6, (54, 86, 146))
+    props__rect(s, 5, 3, 2, 2, (220, 184, 144))
+    props__rect(s, 2, 10, 1, 1, (224, 170, 58))
+    return s
+
+
 props__BUILDERS = {
     'streetlight': props__build_streetlight,
     'hydrant': props__build_hydrant,
@@ -3876,6 +3954,9 @@ props__BUILDERS = {
     'roadcone': props__build_roadcone,
     'planter': props__build_planter,
     'newsbox': props__build_newsbox,
+    'chainlink': props__build_chainlink,
+    'above_pool': props__build_above_pool,
+    'tub_madonna': props__build_tub_madonna,
 }
 
 
@@ -3970,7 +4051,7 @@ props_MANHOLE_CHANCE = 3     # percent of road tiles
 props_CONE_CHANCE = 2        # percent of road tiles
 
 
-def props_props_for_tile(c, r, tile_type, is_sidewalk):
+def props_props_for_tile(c, r, tile_type, is_sidewalk, district=None):
     """Deterministic list of (name, offset_x, offset_y) for tile (c, r).
 
     Offsets are the prop's ground anchor in pixels inside the 64x64 tile.
@@ -3995,6 +4076,20 @@ def props_props_for_tile(c, r, tile_type, is_sidewalk):
             if vertical:
                 return [props__place('roadcone', 14 + (n >> 11) % 8, 12 + (n >> 5) % 40)]
             return [props__place('roadcone', 12 + (n >> 5) % 40, 14 + (n >> 11) % 8)]
+        return []
+
+    # --- South City postage-stamp yards ---------------------------------
+    # The block generator uses non-kerbside plaza tiles for alleys and tiny
+    # courtyards. They are walkable, so these stay visual-only and sparse.
+    if tile_type == props_TILE_PLAZA and not is_sidewalk and district in ('hill', 'south'):
+        n = props__noise(c, r, 149)
+        phase = n % 53
+        if phase < 3:
+            return [props__place('chainlink', 14 + ((n >> 8) % 34), 18 + ((n >> 13) % 28))]
+        if phase == 7:
+            return [props__place('above_pool', 18 + ((n >> 9) % 28), 22 + ((n >> 15) % 22))]
+        if phase == 19:
+            return [props__place('tub_madonna', 12 + ((n >> 10) % 40), 20 + ((n >> 16) % 24))]
         return []
 
     # --- Everything else is furniture, sidewalks only ---
@@ -4192,14 +4287,17 @@ def roofs_style_for(c, r, landmark_name):
     """Deterministic style pick. A landmark hashes on its NAME so every
     tile of the same building shares one style and the block reads as a
     single structure."""
-    key = (c, r, landmark_name)
+    # District labels cover many unrelated buildings. Hash their roofs per
+    # address; only actual single landmarks should share one roof treatment.
+    style_landmark = None if landmark_name in _FABRIC_LANDMARKS else landmark_name
+    key = (c, r, style_landmark)
     s = roofs__STYLE_CACHE.get(key)
     if s is not None:
         return s
-    if landmark_name:
-        h = roofs__name_hash(landmark_name)
+    if style_landmark:
+        h = roofs__name_hash(style_landmark)
         # helipad is reserved for tall downtown-ish landmarks, and rare
-        if (h % 5) == 0 and roofs__is_tall(landmark_name):
+        if (h % 5) == 0 and roofs__is_tall(style_landmark):
             s = 'helipad'
         else:
             s = roofs__LANDMARK_POOL[(h >> 14) % len(roofs__LANDMARK_POOL)]
@@ -11640,7 +11738,7 @@ class Game:
         is_sidewalk = ttype != TILE_ROAD and (
             tile_type_at(c - 1, r) == TILE_ROAD or tile_type_at(c + 1, r) == TILE_ROAD or
             tile_type_at(c, r - 1) == TILE_ROAD or tile_type_at(c, r + 1) == TILE_ROAD)
-        items = props_props_for_tile(c, r, ttype, is_sidewalk)
+        items = props_props_for_tile(c, r, ttype, is_sidewalk, hood_at(c, r))
         if not items:
             return
         base = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
@@ -11652,7 +11750,7 @@ class Game:
             if name == 'hydrant' and hood_at(c, r) == 'hill':
                 name = 'hydrant_hill'
             ax, ay = props_anchor_offset(name)
-            x, y = base.left + ox + ax, base.top + oy + ay
+            x, y = base.left + ox - ax, base.top + oy - ay
             shadow = props_get_shadow(name)
             if shadow is not None:
                 self.screen.blit(shadow, (x + SHADOW_DX, y + SHADOW_DY))
@@ -11710,8 +11808,8 @@ class Game:
         if tile['type'] != TILE_BUILDING or self.landmark_has_art(tile):
             return
         rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
-        base = tile['color']
-        roof_col = _blend(base, (0, 0, 0), 0.34)
+        base = building_art_color(c, r, tile)
+        roof_col = _blend(base, (0, 0, 0), 0.20)
         darker = tuple(int(v * 0.55) for v in base)
 
         pygame.draw.rect(self.screen, COLOR_BUILDING_WALL, rect)
@@ -11737,19 +11835,24 @@ class Game:
         if rect.right < 0 or rect.left > SCREEN_WIDTH or rect.bottom < -8 or rect.top > SCREEN_HEIGHT:
             return
 
-        base = tile['color']
+        base = building_art_color(c, r, tile)
         wall = _blend(base, COLOR_SIDEWALK, 0.22)          # lit front, brighter than roof
         wall_lo = _blend(base, (0, 0, 0), 0.28)
         course = _blend(base, (0, 0, 0), 0.34)
         trim = _blend(base, COLOR_SIDEWALK, 0.55)
         n = _noise(c, r, 71)
-        WALL_H, SKIRT = 24, 7
+        WALL_H, SKIRT = 32, 8
         top_y = rect.bottom - WALL_H
 
         pygame.draw.rect(self.screen, wall, (rect.left, top_y, TILE_SIZE, WALL_H + SKIRT))
         pygame.draw.rect(self.screen, trim, (rect.left, top_y - 2, TILE_SIZE, 3))          # cornice
         for yy in range(top_y + 5, rect.bottom + SKIRT, 6):
             pygame.draw.line(self.screen, course, (rect.left, yy), (rect.right - 1, yy))
+            # Staggered vertical joints turn stripes into brickwork without
+            # making the moving scene buzz with one-pixel noise.
+            offset = 4 if ((yy - top_y) // 6) % 2 else 10
+            for xx in range(rect.left + offset, rect.right, 16):
+                pygame.draw.line(self.screen, course, (xx, yy - 4), (xx, yy - 1))
         pygame.draw.rect(self.screen, wall_lo, (rect.left, rect.bottom - 2, TILE_SIZE, SKIRT + 2))
         pygame.draw.line(self.screen, COLOR_OUTLINE, (rect.left, rect.bottom + SKIRT - 1),
                          (rect.right - 1, rect.bottom + SKIRT - 1))
@@ -11759,8 +11862,7 @@ class Game:
             if n & 16:                                      # ...with a downspout
                 pygame.draw.rect(self.screen, course, (rect.left + 30, top_y, 2, WALL_H))
             return
-        commercial = tile['landmark'] in _COMMERCIAL_LANDMARKS
-        storefront = commercial or kind <= 3
+        storefront = facade_is_storefront(tile['landmark'], kind)
         win_y = top_y + 6
         if storefront:
             self._facade_storefront(rect, c, r, n, top_y, win_y, SKIRT, trim)
@@ -11811,7 +11913,7 @@ class Game:
 
     def _facade_house(self, rect, c, r, n, top_y, win_y, WALL_H, SKIRT,
                       base, wall, course, trim):
-        """Four real St. Louis house types instead of one generic wall: the
+        """Five real St. Louis house types instead of one generic wall: the
         Second Empire mansard rowhouse, a gabled brick two-flat, a painted
         lady, and a south-city shotgun."""
         style = hood_pick_house(c, r, n)
@@ -11824,6 +11926,50 @@ class Game:
             wall = body
             trim = _blend(body, (255, 255, 255), 0.55)
             course = _blend(body, (0, 0, 0), 0.30)
+
+        if style == 'flat_front':
+            # The South City two-family flat: paired doors, limestone window
+            # caps, bracketed cornice and just enough gingerbread brick to be
+            # recognizable from a moving car. The shared stoop is the punchline.
+            limestone = _blend(trim, (238, 230, 204), 0.45)
+            brick_hi = _blend(wall, (210, 142, 110), 0.20)
+            cornice_y = top_y - 3
+            pygame.draw.rect(self.screen, dark,
+                             (rect.left, cornice_y, TILE_SIZE, 5))
+            pygame.draw.rect(self.screen, limestone,
+                             (rect.left + 2, cornice_y, TILE_SIZE - 4, 2))
+            for bx in range(rect.left + 5, rect.right - 5, 9):
+                pygame.draw.rect(self.screen, brick_hi, (bx, top_y + 1, 4, 3))
+                pygame.draw.rect(self.screen, dark, (bx + 1, top_y + 4, 2, 2))
+
+            # Four tall upper windows, deliberately narrow like the real stock.
+            for wi, wx in enumerate((rect.left + 6, rect.left + 20,
+                                     rect.left + 37, rect.left + 51)):
+                lit = _noise(c, r, 701 + wi * 19) % 4 == 0
+                glass = (214, 180, 112) if lit else (42, 54, 66)
+                pygame.draw.rect(self.screen, limestone, (wx - 2, top_y + 6, 12, 2))
+                pygame.draw.rect(self.screen, COLOR_OUTLINE, (wx - 1, top_y + 8, 10, 10))
+                pygame.draw.rect(self.screen, glass, (wx, top_y + 9, 8, 8))
+                pygame.draw.line(self.screen, dark, (wx + 4, top_y + 9),
+                                 (wx + 4, top_y + 16))
+                pygame.draw.rect(self.screen, limestone, (wx - 2, top_y + 18, 12, 2))
+
+            # Mirrored entrances with transoms and individual colored doors.
+            doors_y = top_y + 21
+            for di, dx in enumerate((rect.centerx - 14, rect.centerx + 1)):
+                door_col = ((76, 104, 90), (112, 58, 52))[(n + di) & 1]
+                pygame.draw.rect(self.screen, limestone, (dx - 2, doors_y - 2, 15, 3))
+                pygame.draw.rect(self.screen, COLOR_OUTLINE, (dx - 1, doors_y, 13, 18))
+                pygame.draw.rect(self.screen, door_col, (dx, doors_y + 1, 11, 16))
+                pygame.draw.rect(self.screen, (190, 202, 194), (dx + 2, doors_y + 2, 7, 3))
+                pygame.draw.rect(self.screen, limestone, (dx + 4, doors_y - 5, 5, 3))
+                self.screen.fill((224, 188, 92), (dx + 8, doors_y + 10, 1, 1))
+            # One broad limestone stoop serving both halves.
+            for k in range(4):
+                pygame.draw.rect(self.screen, _blend(limestone, dark, 0.10 * k),
+                                 (rect.centerx - 17 - k, rect.bottom + k * 2,
+                                  35 + k * 2, 3))
+            return
 
         if style in ('gable_brick', 'painted_lady', 'shotgun'):
             # a peaked roofline poking above the cornice

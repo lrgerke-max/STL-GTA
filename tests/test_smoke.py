@@ -985,8 +985,45 @@ def test_neighbourhoods_pick_their_own_character():
     assert loop & {"TIVOLI", "PAGEANT", "FITZ'S", "RECORDS", "VINTAGE"}, loop
     assert M.hood_at(30, 62) == 'hill'
     assert M.hood_at(70, 45) == 'downtown'
-    for style in ('shotgun', 'gable_brick', 'mansard', 'painted_lady'):
+    for style in ('shotgun', 'gable_brick', 'mansard', 'painted_lady', 'flat_front'):
         assert any(style in pool for pool in M.HOOD_HOUSES.values())
+    assert M.HOOD_HOUSES['hill'].count('flat_front') >= 2
+    assert M.HOOD_HOUSES['south'].count('flat_front') >= 2
+    hill_frontages = {M.facade_is_storefront('The Hill', kind) for kind in range(1, 10)}
+    assert hill_frontages == {False, True}, "The Hill should be mixed-use, not wall-to-wall shops"
+
+
+def test_south_city_yards_have_local_micro_landmarks_only():
+    """Tiny yard jokes belong behind South City buildings, never downtown."""
+    expected = {'chainlink', 'above_pool', 'tub_madonna'}
+    seen = set()
+    for r in range(M.MAP_TILES_H):
+        for c in range(M.MAP_TILES_W):
+            items = M.props_props_for_tile(c, r, M.TILE_PLAZA, False, 'south')
+            seen.update(name for name, _x, _y in items)
+            assert not M.props_props_for_tile(c, r, M.TILE_PLAZA, False, 'downtown')
+    assert expected <= seen, seen
+    M.props_bake()
+    assert set(M.props_PROPS) == set(M.props__BUILDERS) == set(M.props__ANCHORS)
+    for name in expected:
+        sprite = M.props_get(name)
+        assert sprite.get_width() >= 10 and sprite.get_height() >= 10
+        assert sprite.get_bounding_rect().width > 0
+        assert M.props_get_shadow(name).get_size() == sprite.get_size()
+
+    # More importantly, each joke must occur in the actual generated Hill,
+    # not just somewhere in a theoretical coordinate scan.
+    actual_hill = set()
+    for r, row in enumerate(M.GAME_MAP):
+        for c, tile in enumerate(row):
+            if M.hood_at(c, r) != 'hill' or tile['type'] != M.TILE_PLAZA:
+                continue
+            kerbside = any(M.tile_type_at(c + dc, r + dr) == M.TILE_ROAD
+                           for dc, dr in ((-1, 0), (1, 0), (0, -1), (0, 1)))
+            if not kerbside:
+                actual_hill.update(name for name, _x, _y in
+                                   M.props_props_for_tile(c, r, tile['type'], False, 'hill'))
+    assert expected <= actual_hill, actual_hill
 
 
 def test_the_fox_is_in_grand_center_and_nowhere_else():
