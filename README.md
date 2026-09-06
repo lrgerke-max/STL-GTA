@@ -1,7 +1,8 @@
 # STL-GTA: St. Louis Open-World Sandbox
 
 A top-down open-world driving game inspired by the original GTA, set in St. Louis, Missouri.
-Everything you see is procedurally baked pixel art — there are no image assets in this repo.
+Everything used at runtime is procedurally baked pixel art — the reference sheets in
+`sprites/` are inspiration only and are never loaded by the game.
 
 **The loop:** a dispatcher marks a pickup at one St. Louis landmark and a drop at another.
 Get there, grab the cargo, and the clock starts. Deliver on time for cash and a streak
@@ -16,15 +17,31 @@ pip install -r requirements.txt && python main.py
 
 ## 🎮 Features
 
-- **A city laid out like St. Louis**: the Gateway Arch on the riverfront with downtown and the ballpark just inland, Soulard and the Anheuser-Busch brewery south along the river, a midtown spine (Grand Center → Central West End) running west to a big Forest Park, the Delmar Loop up in the north-west, and The Hill, **Ted Drewes** and Tower Grove Park down in the south. Compressed and not to scale, but recognisable in the hand — 10 landmarks, each discoverable for score.
+- **A real front door**: a procedural title screen leads into a character creator with six
+  baked looks and the only profile question St. Louis truly needs: **where'd you go to high
+  school?** The searchable picker contains 162 verified schools across the core Missouri
+  and Metro East counties (campuses under 100 students are omitted), understands aliases
+  such as `SLUH`, `CBC`, `FHN`, `FZW` and `ESTL`, and saves your answer for strangers to judge.
+
+- **A city laid out like St. Louis**: the Gateway Arch on the riverfront with downtown and the ballpark just inland, Soulard and the Anheuser-Busch brewery south along the river, a midtown spine (Grand Center → Central West End) running west to a big Forest Park, the Delmar Loop up in the north-west, and The Hill, **Ted Drewes** and Tower Grove Park down in the south. Compressed and not to scale, but recognisable in the hand — dozens of landmarks and named park features, each discoverable for score.
 - **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is a hard-walled bowl with one gate corridor into the field. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
 - **Neighbourhoods that read differently**: shop signs and housing stock are picked per block from the neighbourhood you're in. The Hill gets `DELI`, `PIZZERIA`, `BAKERY`, `IMO'S` over brick shotguns; the Loop and Grand Center get `FOX` (with marquee bulbs), `THE GROVE`, `RECORDS` over Second Empire mansard rowhouses and painted ladies; downtown and Soulard get `OYSTER BAR`, `SLINGERS`, `CROWN`; south city gets `ANTIQUES` and `PORK STEAK`.
 - **A real brick city between the roads**: every block is filled with St. Louis masonry — red / brown / buff brick and limestone — rendered in a hybrid view: dark top-down roofs with a lit south **facade**. Four real housing types: the mansard rowhouse with slate dormers, the gabled brick two-flat with its chimney, the painted lady, and the south-city shotgun with a full-width porch. Parks, surface lots and tree-lined sidewalks fill the rest.
-- **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts and a **Cardinals player** by the ballpark. 90 pedestrians, each a figure with a front / back / profile walk cycle.
+- **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts, foam-finger crowds around Busch, and South City hoosiers with mullets and tallboys. The streamed population retypes itself by neighborhood as you travel instead of carrying downtown commuters into every district forever.
 - **Busy streets, via population streaming**: the viewport sees 0.56% of the map, so a population scattered over the whole city is one you never meet — 40 pedestrians measured **0.0 visible on average**. Raising the raw count can't fix that (you'd need ~1800). Instead the pool stays modest and anything that drifts out of earshot is recycled into a ring hugging the screen edge, biased toward the way you're travelling so traffic arrives in the windscreen rather than the mirror. Measured **~15 pedestrians and ~8 cars on screen while driving**, for about 5% of the frame budget.
-- **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, a box truck, a school bus and a Hill delivery Vespa — each with its own size and handling. Ambient **MetroLink** light-rail trains and a **Loop trolley** run their lines through downtown and the Loop.
+- **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, box truck, school bus,
+  blue/red **Route 70 MetroBus**, Hill delivery Vespa, and a rare black Trans Am with a gold
+  hood bird and the radio permanently stuck on KSHE — each with its own size and handling.
+  Ambient **MetroLink** trains, a **Loop trolley**, and the Clydesdales run their own lines.
+- **The $50,000 Arch Job**: bank enough money and a real multi-stage finale opens under the
+  Arch: borrow a cutter from City Museum, bring a getaway car, strap 43 pounds of visible
+  stainless steel to it, survive a forced five-star run to The Hill, and lose the cops in
+  the gangways. Death, arrest, timeout and body-shop cheese all fail it cleanly; winning gets
+  a full-screen victory beat before ordinary St. Louis starts moving again.
 - **Courier jobs**: the actual game. Pick up at one landmark, deliver to another before the clock runs out. Payout scales with distance and with the time you had left, and consecutive on-time drops build a streak multiplier. An on-screen marker and an edge-of-screen chevron always point at the objective, so you are never lost on a 100×100-tile map.
-- **Cash vs. score**: two separate currencies that mean different things. **Cash** only comes from finished runs and only leaves via bail. **Score** is the chaos counter. Playing carefully and playing recklessly are now genuinely different strategies.
+- **Cash vs. score**: two separate currencies that mean different things. **Cash** comes from
+  finished runs, can be banked safely beneath the Arch, and leaves via bail or a body-shop
+  respray. **Score** is the chaos counter. Playing carefully and playing recklessly are genuinely different strategies.
 - **Chaos multiplier (x1–x8)**: every reckless act — a hit, a shunt, a wreck — feeds a running multiplier that scales every point of score you earn. Park and it bleeds away; get **busted** or **wasted** and it's gone. The screen shouts each rung.
 - **Kill Frenzy**: a pulsing icon drops on the map. Touch it and a clock starts — `MOW DOWN 14 LOCALS`, `WRECK 8 MOTORS` — for a fat score payout and free multiplier rungs. Pure GTA1 "just one more go".
 - **Combo kills & a reactive crowd**: bowl a line of pedestrians and the per-hit value stacks (`GOURANGA!` at 5). Peds see a speeding car coming and scatter, dive clear, bolt when the stars light up, and knot around a fresh body. Clip one below `SPLAT_SPEED` and they go down and get back up — hit them at speed and they **don't**, leaving a stain on the road that's still there next lap.
@@ -114,7 +131,7 @@ exactly the same with no pad attached.
 | `X` / `B` | Punch or shoot |
 | `Y` / `Back` | Full city map |
 | `Start` | Pause (and back out of the map) |
-| D-pad | Steer / walk fallback |
+| D-pad | Navigate title/character/school menus; steer / walk fallback in play |
 
 Keyboard and pad are live at the same time — the pad only overrides an axis while
 you're actually pushing it, so you can swap mid-game.
@@ -189,7 +206,7 @@ resizable window on its own.
 
 ## ⚠️ Known debt
 
-`main.py` is ~8,700 lines. The would-be modules are already there in spirit — the
+`main.py` is ~14,000 lines. The would-be modules are already there in spirit — the
 `gfx_*`, `traffic_`, `parking_`, `hud_` and `lm_` prefixes are hand-mangled namespaces
 from when these *were* separate files — and splitting them back out is the next
 structural job. It is deliberately not bundled with the gameplay work in this pass:
@@ -203,11 +220,11 @@ canonical constants, with a test pinning them together.
 
 - [x] Mission / job system (GTA1 had phone-booth and special-car missions)
 - [ ] Split `main.py` back into modules
-- [ ] Gamepad support
-- [ ] Bespoke landmark art for the remaining districts (Ted Drewes, Imo's, Soulard Market, the Old Courthouse, Fox Theatre, City Museum, the Piasa Bird)
-- [ ] Rails drawn under the MetroLink / trolley; a proper river bend with a bridge
+- [x] Gamepad support, including front-end navigation
+- [x] Bespoke landmark art for the major districts and local businesses
+- [x] Rails drawn under the MetroLink / trolley; a proper river bend with a bridge
 - [ ] Day/night cycle
-- [ ] Sound effects and music
+- [x] Procedural sound effects and ambient city audio
 
 ---
 
