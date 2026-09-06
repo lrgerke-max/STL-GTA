@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import tempfile
+from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -493,8 +494,8 @@ def test_every_hud_string_is_renderable():
     draws as a filled box, so cargo names and landmark names have to stay
     inside the charset."""
     ok = set(M.hud_CHARSET)
-    # "+", "(" and ")" were missing and live strings already used them.
-    assert {"+", "(", ")"} <= ok, "callout / streak text needs + ( )"
+    # These all appear in live menus/dialogue; a missing glyph is a solid box.
+    assert {"+", "(", ")", ">", '"'} <= ok, "live UI punctuation is incomplete"
     strings = list(M.Job.CARGO)
     strings += [lm[5] for lm in M.LANDMARKS]
     strings += [s for pair in M.Game.PAUSE_LINES for s in pair]
@@ -923,6 +924,61 @@ def test_population_streams_toward_the_player():
         assert d < M.POP_KEEP_RADIUS + M.TILE_SIZE or ped.down_timer > 0
     assert M.POP_RESPAWN_MIN > math.hypot(M.SCREEN_WIDTH / 2, M.SCREEN_HEIGHT / 2), \
         "respawn ring must sit outside the viewport corner"
+
+
+def test_population_retypes_to_the_neighborhood_it_streams_into():
+    g = game()
+    busch = next(lm for lm in M.LANDMARKS if lm[5] == "Busch Stadium")
+    bx = (busch[0] + busch[2] // 2) * M.TILE_SIZE
+    by = (busch[1] + busch[3] // 2) * M.TILE_SIZE
+    ped = M.Pedestrian(6000, 6000, "dog_walker#0")
+    old_pedestrians = g.pedestrians
+    g.pedestrians = [ped]
+    teleport(g, (200, 200))
+    g.sync_player_float()
+    try:
+        with patch.object(M, "ring_spawn_near", return_value=(bx, by)), \
+                patch.object(M.random, "random", return_value=0.0), \
+                patch.object(M.random, "randrange", return_value=1):
+            g.update_population()
+        assert ped.kind == "cards_fan#1"
+        assert ped.speed == 0.8 * M.peds_gait(ped.kind)
+        assert ped.follower is None, "retyping left a dog ghost behind"
+    finally:
+        g.pedestrians = old_pedestrians
+
+
+def test_busch_fans_and_south_city_hoosiers_are_local_flavor():
+    assert all(lm[5] != "Downtown & Busch Stadium" for lm in M.LANDMARKS)
+    busch = next(lm for lm in M.LANDMARKS if lm[5] == "Busch Stadium")
+    bx = (busch[0] + busch[2] // 2) * M.TILE_SIZE
+    by = (busch[1] + busch[3] // 2) * M.TILE_SIZE
+    with patch.object(M.random, "random", return_value=0.0), \
+            patch.object(M.random, "randrange", return_value=2):
+        assert M.Game._ped_kind_for(bx, by) == "cards_fan#2"
+        assert M.Game._ped_kind_for(10 * M.TILE_SIZE, 90 * M.TILE_SIZE) == "hoosier#2"
+        assert M.Game._ped_kind_for(68 * M.TILE_SIZE, 30 * M.TILE_SIZE) is None
+    assert M.peds_ARCHETYPES["cards_fan"]["w"] == 0
+    assert M.peds_ARCHETYPES["hoosier"]["w"] == 0
+    assert "mullet" in M.peds__resolve("hoosier#0")["acc"]
+
+
+def test_the_rare_black_trans_am_has_its_own_art_and_handling():
+    g = game()  # ensures the eager sprite cache exists
+    assert M.CIVILIAN_WEIGHTED.count("trans_am") == 1
+    assert M.PARKED_VARIANTS_WEIGHTED.count("trans_am") == 1
+    assert len(M.PARKED_VARIANTS_WEIGHTED) >= 20
+    car = M.Car(300, 300, color=M.CAR_COLORS[0], variant="trans_am")
+    assert car.color == M.cars_TRANS_AM_BODY
+    assert (car.width, car.height) == (M.VEHICLE_DEFAULT_W, M.VEHICLE_DEFAULT_H)
+    assert car.max_speed > M.Car(300, 300, variant="sedan").max_speed
+    frames, shadows = M.CAR_SPRITES[("trans_am", M.cars_TRANS_AM_BODY)]
+    assert len(frames) == len(shadows) == M.cars_ANGLE_STEPS
+    colors = {tuple(frames[0].get_at((x, y))[:3])
+              for y in range(frames[0].get_height())
+              for x in range(frames[0].get_width())}
+    assert M.cars_TRANS_AM_BODY in colors
+    assert M.cars_TRANS_AM_GOLD in colors
 
 
 def test_the_streets_are_actually_populated():
@@ -2393,6 +2449,11 @@ def test_taking_the_next_run_quickly_pays_more():
     by distance alone and prove nothing."""
     def deliver(hot):
         g = game()
+        # The shared game reset intentionally generates a fresh job. Re-roll
+        # from the same seed so this comparison varies only the hot flag, not
+        # the randomly selected endpoints and their distance-based payout.
+        random.seed(41370)
+        g.job = M.Job.generate()
         g.streak = 0
         job = g.job
         teleport(g, job.pickup_pos)

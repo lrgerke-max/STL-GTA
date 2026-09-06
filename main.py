@@ -751,14 +751,19 @@ LANDMARK_FEATURES = (
     ("Forest Park", "The Jewel Box", 0.470, 0.760, 0.110, 0.090, False),
 )
 
-CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi']
+CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi', 'trans_am']
+
+# Kerbside cars use their own weighting: the black Trans Am should be the car
+# you tell somebody about seeing, not one sixth of every block.
+PARKED_VARIANTS_WEIGHTED = (['sedan'] * 8 + ['coupe'] * 5 + ['van'] * 4
+                            + ['pickup'] * 4 + ['taxi'] * 2 + ['trans_am'])
 
 # What ambient traffic / parked cars roll from. The St. Louis service vehicles
 # (a City refuse truck, a box truck, a school bus, a Hill delivery scooter) are
 # in the mix but rare, so the streets still read as mostly ordinary cars.
 CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 3
-                     + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
-                     + ['bus'] * 1 + ['garbage_truck'] * 1)
+                      + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
+                      + ['bus'] * 1 + ['garbage_truck'] * 1 + ['trans_am'] * 1)
 
 # Default car collider. The kerbside parking layout is sized against this, so
 # it is a named constant both places can assert on rather than a loose 34/18.
@@ -794,6 +799,7 @@ VEHICLE_TUNING = {
     'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.78),
     'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.86),
     'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.15),
+    'trans_am':      dict(w=34, h=18, acceleration=0.38, max_steer=0.052, speed_factor=1.12),
 }
 
 # (variant, colour) -> ([sprite] * 24, [shadow] * 24), filled by bake_car_sprites().
@@ -824,14 +830,17 @@ def bake_car_sprites():
         return
     sets = {}
     for variant in CIVILIAN_VARIANTS:
-        # taxi carries a fixed livery, so one bake covers every colour slot
-        colors = [None] if variant == 'taxi' else CAR_COLORS
+        # Fixed-livery cars need one bake, mapped to any colour key a spawner
+        # can hand us. The Trans Am itself stores the fixed black key.
+        colors = [None] if variant in ('taxi', 'trans_am') else CAR_COLORS
         for col in colors:
             frames = _scale_frames(cars_bake_variant(variant, col), SPRITE_SCALE_CAR)
             entry = (frames, [cars_make_shadow(f) for f in frames])
             if col is None:
                 for c in CAR_COLORS:
                     sets[(variant, c)] = entry
+                if variant == 'trans_am':
+                    sets[(variant, cars_TRANS_AM_BODY)] = entry
             else:
                 sets[(variant, col)] = entry
     for variant in cars_POLICE_FLASH_SETS:
@@ -2027,6 +2036,8 @@ cars_TAXI_SIGN_LIT = (222, 206, 148)
 
 cars_POLICE_BODY = (44, 46, 52)
 cars_POLICE_DOOR = (214, 214, 206)
+cars_TRANS_AM_BODY = (30, 29, 32)
+cars_TRANS_AM_GOLD = (206, 154, 54)
 
 cars_SHADOW_ALPHA = 115  # 45% of 255
 
@@ -2057,11 +2068,13 @@ cars__SPECS = {
                    win_inset=4, wheel_len=5, axle_f=5, axle_r=4, bed=True),
     'taxi':   dict(L=34, H=18, nose=2, tail=1, hood=8, ws=4, roof=7, rw=4,
                    win_inset=4, wheel_len=5, axle_f=5, axle_r=5, taxi=True),
+    'trans_am': dict(L=34, H=18, nose=2, tail=2, hood=11, ws=3, roof=5, rw=3,
+                      win_inset=4, wheel_len=5, axle_f=5, axle_r=5, trans_am=True),
     'police': dict(L=35, H=18, nose=2, tail=1, hood=8, ws=4, roof=8, rw=4,
                    win_inset=4, wheel_len=5, axle_f=5, axle_r=5, police=True),
 }
 
-cars_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi', 'police']
+cars_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi', 'trans_am', 'police']
 
 # Extra pre-lit police sets; cars_bake_all() returns these too but they are not
 # meant to be picked as a random traffic car.
@@ -2075,6 +2088,7 @@ cars__DEFAULT_COLOR = {
     'van': cars_BODY_COLORS[3],
     'pickup': cars_BODY_COLORS[1],
     'taxi': cars_TAXI_BODY,
+    'trans_am': cars_TRANS_AM_BODY,
     'police': cars_POLICE_BODY,
 }
 
@@ -2240,6 +2254,16 @@ def cars__build_grid(spec, body):
         cars__fill_rect(grid, cx - 1, cy, cx + 1, cy, cars_TAXI_SIGN_LIT)
     if spec.get('police'):
         cars__draw_lightbar(grid, g, None)
+    if spec.get('trans_am'):
+        # Gold hood bird and a split T-top: three pixels each, but at game
+        # scale they are the unmistakable South City parking-lot silhouette.
+        hc = (g['ws_x1'] + g['nose_x']) // 2
+        cy = (g['by0'] + g['by1']) // 2
+        cars__put(grid, hc, cy, cars_TRANS_AM_GOLD)
+        cars__put(grid, hc - 1, cy - 1, cars_TRANS_AM_GOLD)
+        cars__put(grid, hc - 1, cy + 1, cars_TRANS_AM_GOLD)
+        tc = (g['roof_x0'] + g['roof_x1']) // 2
+        cars__fill_rect(grid, tc, g['win_y0'], tc, g['win_y1'], cars_OUTLINE)
 
     # wheel nubs poking out of both long sides
     fw1 = L - 1 - spec['axle_f']
@@ -2560,7 +2584,7 @@ def cars_bake_variant(name, body_color=None):
     key = 'police' if name in cars_POLICE_FLASH_SETS else name
     spec = cars__SPECS[key]
     body = body_color or cars__DEFAULT_COLOR[key]
-    if key in ('taxi', 'police'):
+    if key in ('taxi', 'police', 'trans_am'):
         body = cars__DEFAULT_COLOR[key]      # liveries keep their own paint
     grid = cars__build_grid(spec, body)
     if name in cars_POLICE_FLASH_SETS:
@@ -2757,6 +2781,12 @@ peds_ARCHETYPES = {
                        sh=(_MAROON, _SLATE, _BRICKY),   pa=(_PA_CHARC, _PA_BROWN, _PA_BLACK)),
     'cardinals':  dict(w=1, gait=1.00, acc=('cap', 'bat'), cap=(176, 42, 44),
                        sh=(_CARDS, _CARDS, _CARDS),     pa=(_PA_CARDS, _PA_CARDS, _PA_CARDS)),
+    # Local-only types (w=0): streamed in on their turf, never sprinkled over
+    # the entire metro area like a theme-park costume.
+    'cards_fan':  dict(w=0, gait=0.92, acc=('cap', 'foam_finger'), cap=(176, 42, 44),
+                       sh=(_MAROON, _CARDS, _BRICKY),   pa=(_PA_DENIM, _PA_KHAKI, _PA_CARDS)),
+    'hoosier':    dict(w=0, gait=0.88, acc=('mullet', 'tallboy'), hair='brown',
+                       sh=(_OFFWHT, _GREYBLUE, _MAROON), pa=(_PA_DENIM, _PA_DENIM, _PA_BLACK)),
 }
 
 peds_COP_KEY = 'cop#0'
@@ -2798,6 +2828,8 @@ def peds__resolve(key):
     elif arch == 'shopper':
         accent = ((182, 92, 72), (74, 132, 150), (204, 172, 82))[v % 3]
         accent_d = peds__dk(accent)
+    elif arch == 'cards_fan':
+        accent, accent_d = (190, 42, 46), (112, 28, 30)
     elif 'bat' in acc:
         accent, accent_d = _BAT, peds__dk(_BAT)
     elif 'jacket' in acc:
@@ -2957,6 +2989,16 @@ def peds__acc(g, view, spec, s):
     if 'hardhat' in acc:
         peds__r(g, 5, 1 + o, 10, 3 + o, M_HAT)
         peds__r(g, 4, 3 + o, 11, 3 + o, M_HAT_D)
+    if 'mullet' in acc:
+        # Business in front, enough party in back to survive a 16px sprite.
+        if view == 'back':
+            peds__r(g, 4, 6 + o, 11, 10 + o, M_HAIR)
+            peds__r(g, 5, 10 + o, 10, 11 + o, M_HAIR)
+        elif view == 'side':
+            peds__r(g, 4, 6 + o, 7, 10 + o, M_HAIR)
+        else:
+            peds__r(g, 4, 6 + o, 5, 9 + o, M_HAIR)
+            peds__r(g, 10, 6 + o, 11, 9 + o, M_HAIR)
     if 'hivis' in acc:
         if view == 'side':
             peds__r(g, 6, 9 + o, 10, 15 + o, M_ACC)
@@ -2988,6 +3030,14 @@ def peds__acc(g, view, spec, s):
     if 'bat' in acc:
         for k in range(7):
             peds__p(g, 10 + k // 2, 9 + o - k, M_ACC)
+    if 'foam_finger' in acc and view != 'back':
+        peds__r(g, 12, 7 + o, 14, 12 + o, M_ACC)
+        peds__r(g, 13, 4 + o, 14, 7 + o, M_ACC)
+        peds__p(g, 12, 5 + o, M_ACC)
+    if 'tallboy' in acc and view != 'back':
+        peds__r(g, 1, 13 + o, 3, 18 + o, M_LT)
+        peds__r(g, 1, 15 + o, 3, 16 + o, M_ACC)
+        peds__r(g, 1, 13 + o, 3, 13 + o, M_OUT)
     if 'jacket' in acc and view == 'front':
         peds__r(g, 5, 9 + o, 10, 14 + o, M_ACC)
         peds__r(g, 7, 9 + o, 8, 14 + o, M_ACC_D)
@@ -3331,6 +3381,8 @@ hud__FONT = {
     "'": "..#..|..#..|..#..|.....|.....|.....|.....",
     "%": "##..#|##..#|...#.|..#..|.#...|#..##|#..##",
     "&": ".##..|#..#.|#.#..|.#...|#.#.#|#..#.|.##.#",
+    ">": "#....|.#...|..#..|...#.|..#..|.#...|#....",
+    "\"": ".#.#.|.#.#.|.#.#.|.....|.....|.....|.....",
     # +, ( and ) were missing: live strings like "+5" and "(x2 streak)" were
     # rendering as filled MISSING boxes in-game. The callout / pop-number layer
     # leans on "+" hard, so they earn their place.
@@ -8802,8 +8854,9 @@ class Car:
     """A drivable vehicle: physics-driven, steerable, cartoon-rendered."""
 
     def __init__(self, x, y, color=None, variant=None):
-        self.color = color or random.choice(CAR_COLORS)
         self.variant = variant or random.choice(CIVILIAN_WEIGHTED)
+        self.color = (cars_TRANS_AM_BODY if self.variant == 'trans_am'
+                      else color or random.choice(CAR_COLORS))
         tune = VEHICLE_TUNING.get(self.variant, {})
         self.width = tune.get('w', VEHICLE_DEFAULT_W)
         self.height = tune.get('h', VEHICLE_DEFAULT_H)
@@ -9182,14 +9235,12 @@ class Pedestrian:
     def __init__(self, x, y, kind=None):
         self.rect = pygame.Rect(0, 0, 14, 14)
         self.rect.center = (x, y)
-        self.kind = kind or peds_random_archetype()
         self.dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
-        self.speed = 0.8 * peds_gait(self.kind)
+        self.set_kind(kind)
         self.retarget_timer = 0
         self.bump_cooldown = 0
         self.facing = 2
         self.anim = 0.0
-        self.follower = Follower('dog') if peds_has_dog(self.kind) else None
         # Reaction state machine: calm -> alarmed/flee (scatter from a threat)
         # / gawk (stop and stare at a fresh body) / down (bowled over, sprawled
         # a beat). This is the loudest 'the city is alive' signal there is.
@@ -9198,6 +9249,16 @@ class Pedestrian:
         self.threat = None                 # unit (dx, dy) pointing away from danger
         self.knock = pygame.Vector2()      # decaying shove from being hit
         self.down_timer = 0
+
+    def set_kind(self, kind=None):
+        """Retype a streamed pedestrian without leaving dog or gait ghosts."""
+        self.kind = kind or peds_random_archetype()
+        self.speed = 0.8 * peds_gait(self.kind)
+        self.follower = Follower('dog') if peds_has_dog(self.kind) else None
+        if self.follower is not None:
+            self.follower.x = float(self.rect.centerx)
+            self.follower.y = float(self.rect.centery)
+            self.follower.placed = True
 
     def _sense(self, game):
         """Look for a reason to run. First hit wins; keeps it cheap."""
@@ -9407,7 +9468,7 @@ class Game:
         for (sx, sy, sangle, _side) in parking_parking_spots(
                 max_count=PARKED_CAR_COUNT, near=(px, py), radius=1400):
             # kerb spots are sized for ordinary cars, so keep the big rigs out
-            car = Car(sx, sy, variant=random.choice(CIVILIAN_VARIANTS))
+            car = Car(sx, sy, variant=random.choice(PARKED_VARIANTS_WEIGHTED))
             car.angle = sangle
             car.parked = True
             car.velocity = 0.0
@@ -10384,6 +10445,7 @@ class Game:
             if spot is None:
                 continue
             ped.rect.center = spot
+            ped.set_kind(self._ped_kind_for(*spot))
             ped.mood = 'calm'
             ped.mood_timer = 0
             ped.down_timer = 0
@@ -10783,10 +10845,12 @@ class Game:
         col, row = x // TILE_SIZE, y // TILE_SIZE
         for (lx, ly, lw, lh, _kind, name, _c) in LANDMARKS:
             if lx - 3 <= col <= lx + lw + 3 and ly - 3 <= row <= ly + lh + 3:
-                if name == "Downtown & Busch Stadium" and random.random() < 0.5:
-                    return f"cardinals#{random.randrange(peds__VARIANTS)}"
+                if name == "Busch Stadium" and random.random() < 0.78:
+                    return f"cards_fan#{random.randrange(peds__VARIANTS)}"
                 if name in ("Grand Center Arts District", "Delmar Loop") and random.random() < 0.4:
                     return f"busker_sax#{random.randrange(peds__VARIANTS)}"
+        if hood_at(col, row) == 'south' and random.random() < 0.18:
+            return f"hoosier#{random.randrange(peds__VARIANTS)}"
         return None
 
     # ---------------- gamepad ----------------
@@ -11256,9 +11320,12 @@ class Game:
             return
         best.driver = 'player'
         best.parked = False
-        best.max_speed = PLAYER_CAR_MAX_SPEED
+        speed_factor = VEHICLE_TUNING.get(best.variant, {}).get('speed_factor', 1.0)
+        best.max_speed = PLAYER_CAR_MAX_SPEED * speed_factor
         self.driving = best
         self.add_callout("JACKED!", hud_HUD_GOLD, ttl=FPS, scale=1)
+        if best.variant == 'trans_am':
+            self.add_toast("THE RADIO IS STUCK ON KSHE")
         self.add_score(20, best.rect.center)
 
     # ---------------- on-foot movement ----------------
