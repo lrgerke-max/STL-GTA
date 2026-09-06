@@ -804,6 +804,35 @@ def test_ramming_a_car_actually_moves_it():
         f"rammed car barely moved: {before} -> {victim.velocity}")
 
 
+def test_gamepad_is_optional_and_never_crashes_without_one():
+    """CI and most desktops have no pad plugged in; every read must degrade
+    to a safe zero rather than raising."""
+    g = game()
+    g.pad = None
+    assert g.pad_axis(M.PAD_AX_LX) == 0.0
+    assert g.pad_trigger(M.PAD_AX_RT) == 0.0
+    assert g.pad_button(M.PAD_A) is False
+    assert g.pad_hat() == (0, 0)
+    # the pad only ever overrides input, never invents it
+    assert g.apply_pad_driving(0.4, -0.2) == (0.4, -0.2)
+    assert g.apply_pad_walking(0.7, 0.7) == (0.7, 0.7)
+    g.open_gamepad()          # no device: must be a quiet no-op
+    g.drop_gamepad()
+    g.handle_pad_button(M.PAD_START)   # routes to ESC -> pause
+    assert g.state == M.STATE_PAUSED
+    g.handle_pad_button(M.PAD_START)
+    assert g.state == M.STATE_PLAYING
+
+
+def test_gamepad_buttons_map_onto_real_keys():
+    keys = {M.pygame.K_e, M.pygame.K_SPACE, M.pygame.K_m, M.pygame.K_ESCAPE}
+    assert set(M.PAD_BUTTON_KEYS.values()) <= keys
+    for essential in (M.PAD_A, M.PAD_X, M.PAD_START):
+        assert essential in M.PAD_BUTTON_KEYS
+    # every mapped button index is a plausible XInput button
+    assert all(0 <= b <= 10 for b in M.PAD_BUTTON_KEYS)
+
+
 def test_shop_signs_fit_on_a_shopfront():
     """A 64px tile leaves a 60px sign board; anything wider silently vanishes."""
     for hood, pool in M.HOOD_SIGNS.items():

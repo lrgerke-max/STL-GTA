@@ -94,6 +94,27 @@ any time.
 | `F9` | Load game |
 | `Q` | Quit — **only from the pause screen** |
 
+### 🎯 Gamepad
+
+An Xbox 360 / XInput controller is picked up automatically if one is plugged in
+(hot-plug works too — no restart needed). Nothing to configure, and the game runs
+exactly the same with no pad attached.
+
+| Control | Action |
+|---------|--------|
+| Right trigger | Accelerate |
+| Left trigger | Brake / reverse |
+| Left stick | Steer, or walk — **analogue**, so a half-deflected stick is a half-speed walk |
+| Right stick | Aim (shoot one way while backing off in another) |
+| `A` / `RB` | Enter or exit a vehicle |
+| `X` / `B` | Punch or shoot |
+| `Y` / `Back` | Full city map |
+| `Start` | Pause (and back out of the map) |
+| D-pad | Steer / walk fallback |
+
+Keyboard and pad are live at the same time — the pad only overrides an axis while
+you're actually pushing it, so you can swap mid-game.
+
 Nothing quits the game outright during play. `Q` sits one key away from `WASD`, and the
 old bindings had both it and `ESC` hard-quitting mid-drive with no confirmation.
 

@@ -62,6 +62,29 @@ RADAR_SIZE = 78             # smaller than the old 110px minimap, GTA1 proportio
 STAR_BLOCK_W = 76           # width of the 6-slot wanted star row
 MAP_OVERVIEW_SIZE = 300     # side of the full-city map drawn by the M / TAB screen
 
+# --- Gamepad (Xbox 360 / XInput layout) ----------------------------------
+# SDL2 reports an XInput pad with this axis and button order; anything that
+# presents the same layout (Xbox One, most XInput clones) works unchanged.
+PAD_DEADZONE = 0.26         # stick slop before we call it input
+PAD_TRIGGER_DEADZONE = 0.12
+PAD_AX_LX, PAD_AX_LY = 0, 1
+PAD_AX_LT = 2
+PAD_AX_RX, PAD_AX_RY = 3, 4
+PAD_AX_RT = 5
+PAD_A, PAD_B, PAD_X, PAD_Y = 0, 1, 2, 3
+PAD_LB, PAD_RB, PAD_BACK, PAD_START = 4, 5, 6, 7
+# Buttons route through the existing keydown handler, so pause / map / save
+# behave identically however you pressed them.
+PAD_BUTTON_KEYS = {
+    PAD_A: pygame.K_e,          # jack / leave a car
+    PAD_RB: pygame.K_e,
+    PAD_X: pygame.K_SPACE,      # punch or shoot
+    PAD_B: pygame.K_SPACE,
+    PAD_Y: pygame.K_m,          # full city map
+    PAD_BACK: pygame.K_m,
+    PAD_START: pygame.K_ESCAPE,  # pause (and back out of the map)
+}
+
 # --- Simulation timing ---------------------------------------------------
 # Every tuning constant in this file (PLAYER_SPEED, accelerations, drag,
 # steer rates) is authored per *simulation step*, not per second. The main
@@ -7292,6 +7315,15 @@ class Game:
         self.sim_steps = 1
         self.hud_left_y = 8
 
+        # --- gamepad -------------------------------------------------------
+        self.pad = None
+        self._pad_trig_rest = {}   # axis -> lowest value seen, to spot the
+        try:                       # -1..+1 trigger convention vs 0..1
+            pygame.joystick.init()
+            self.open_gamepad()
+        except pygame.error:
+            self.pad = None
+
     # ---------------- persistence ----------------
     def save_game(self):
         state = {
@@ -7802,6 +7834,138 @@ class Game:
                     return f"busker_sax#{random.randrange(peds__VARIANTS)}"
         return None
 
+    # ---------------- gamepad ----------------
+    def open_gamepad(self):
+        """Bind the first connected pad, if there is one. Safe to call again
+        on hot-plug; a machine with no pad just keeps self.pad as None."""
+        if not pygame.joystick.get_init():
+            return
+        try:
+            if pygame.joystick.get_count() == 0:
+                self.pad = None
+                return
+            if self.pad is not None:
+                return
+            pad = pygame.joystick.Joystick(0)
+            pad.init()
+        except pygame.error:
+            self.pad = None
+            return
+        self.pad = pad
+        self._pad_trig_rest.clear()
+        try:
+            self.add_toast(f"Pad: {pad.get_name()[:20]}")
+        except pygame.error:
+            pass
+
+    def drop_gamepad(self):
+        self.pad = None
+        self._pad_trig_rest.clear()
+
+    def pad_axis(self, idx, dead=PAD_DEADZONE):
+        """Deadzoned stick axis, 0.0 when there is no pad or no such axis."""
+        if self.pad is None:
+            return 0.0
+        try:
+            if idx >= self.pad.get_numaxes():
+                return 0.0
+            v = self.pad.get_axis(idx)
+        except pygame.error:
+            self.drop_gamepad()
+            return 0.0
+        return 0.0 if abs(v) < dead else max(-1.0, min(1.0, v))
+
+    def pad_trigger(self, idx):
+        """Analogue trigger as 0..1.
+
+        SDL2 usually reports triggers as -1 at rest through +1 fully pressed,
+        but some drivers report a plain 0..1. Rather than guess, remember the
+        lowest value this axis has ever produced: a pad using the signed
+        convention shows about -1 the moment the trigger is released, which is
+        its resting state, so the calibration lands on the first frame.
+        """
+        if self.pad is None:
+            return 0.0
+        try:
+            if idx >= self.pad.get_numaxes():
+                return 0.0
+            v = self.pad.get_axis(idx)
+        except pygame.error:
+            self.drop_gamepad()
+            return 0.0
+        rest = self._pad_trig_rest.get(idx, 0.0)
+        if v < rest:
+            rest = v
+            self._pad_trig_rest[idx] = v
+        if rest <= -0.5:
+            v = (v + 1.0) * 0.5
+        return 0.0 if v < PAD_TRIGGER_DEADZONE else min(1.0, v)
+
+    def pad_button(self, idx):
+        if self.pad is None:
+            return False
+        try:
+            return idx < self.pad.get_numbuttons() and bool(self.pad.get_button(idx))
+        except pygame.error:
+            self.drop_gamepad()
+            return False
+
+    def pad_hat(self):
+        """D-pad as (x, y) with y already flipped to screen coordinates."""
+        if self.pad is None:
+            return (0, 0)
+        try:
+            if self.pad.get_numhats() == 0:
+                return (0, 0)
+            hx, hy = self.pad.get_hat(0)
+        except pygame.error:
+            self.drop_gamepad()
+            return (0, 0)
+        return (hx, -hy)
+
+    def handle_pad_button(self, button):
+        key = PAD_BUTTON_KEYS.get(button)
+        if key is not None:
+            self.handle_keydown(key)
+
+    def apply_pad_driving(self, throttle, steer):
+        """Right trigger accelerates, left brakes/reverses, left stick steers.
+        A / B stand in on a pad whose triggers are digital."""
+        rt, lt = self.pad_trigger(PAD_AX_RT), self.pad_trigger(PAD_AX_LT)
+        if rt or lt:
+            throttle = rt - lt
+        elif self.pad_button(PAD_A):
+            throttle = 1.0
+        elif self.pad_button(PAD_B):
+            throttle = -1.0
+        ax = self.pad_axis(PAD_AX_LX)
+        if ax:
+            steer = ax
+        hx, _hy = self.pad_hat()
+        if hx:
+            steer = float(hx)
+        return throttle, steer
+
+    def apply_pad_walking(self, dx, dy):
+        """Analogue walking: a half-deflected stick is a half-speed walk. The
+        right stick aims, so you can shoot one way while backing off another."""
+        ax, ay = self.pad_axis(PAD_AX_LX), self.pad_axis(PAD_AX_LY)
+        if ax or ay:
+            mag = math.hypot(ax, ay)
+            if mag > 1.0:
+                ax, ay = ax / mag, ay / mag
+            dx, dy = ax, ay
+        else:
+            hx, hy = self.pad_hat()
+            if hx or hy:
+                if hx and hy:
+                    hx, hy = hx * 0.707, hy * 0.707
+                dx, dy = float(hx), float(hy)
+        rx, ry = self.pad_axis(PAD_AX_RX), self.pad_axis(PAD_AX_RY)
+        if rx or ry:
+            self.player_aim = math.atan2(ry, rx)
+        return dx, dy
+
     # ---------------- input ----------------
     def handle_events(self):
         """Pump the OS queue first, then sample held keys.
@@ -7815,6 +7979,13 @@ class Game:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
                 self.handle_keydown(event.key)
+            elif event.type == pygame.JOYBUTTONDOWN:
+                self.handle_pad_button(event.button)
+            elif event.type == pygame.JOYDEVICEADDED:
+                self.open_gamepad()
+            elif event.type == pygame.JOYDEVICEREMOVED:
+                self.drop_gamepad()
+                self.open_gamepad()
 
         if self.state != STATE_PLAYING or self.show_map:
             # Paused or reading the map: hold everything still rather than
@@ -7838,10 +8009,12 @@ class Game:
                 steer -= 1.0
             if keys[pygame.K_d] or keys[pygame.K_RIGHT]:
                 steer += 1.0
-            self.driving.input_throttle = throttle
-            self.driving.input_steer = steer
+            if self.pad is not None:
+                throttle, steer = self.apply_pad_driving(throttle, steer)
+            self.driving.input_throttle = max(-1.0, min(1.0, throttle))
+            self.driving.input_steer = max(-1.0, min(1.0, steer))
         else:
-            dx = dy = 0
+            dx = dy = 0.0
             if keys[pygame.K_w] or keys[pygame.K_UP]:
                 dy -= 1
             if keys[pygame.K_s] or keys[pygame.K_DOWN]:
@@ -7853,6 +8026,8 @@ class Game:
             if dx and dy:
                 dx *= 0.707
                 dy *= 0.707
+            if self.pad is not None:
+                dx, dy = self.apply_pad_walking(dx, dy)
             self.player_dir = [dx, dy]
 
     def handle_keydown(self, key):
@@ -9056,6 +9231,8 @@ class Game:
         ("WASD / ARROWS", "MOVE OR DRIVE"),
         ("E", "ENTER / EXIT VEHICLE"),
         ("SPACE / F", "PUNCH OR SHOOT"),
+        ("GAMEPAD", "RT GO  LT BRAKE  A CAR"),
+        ("", "X HIT  START PAUSE"),
         ("M / TAB", "FULL CITY MAP"),
         ("F11", "FULLSCREEN"),
         ("ESC / P", "PAUSE"),
