@@ -132,6 +132,8 @@ MAX_FRAME_TIME = 0.25       # a stall longer than this is discarded, not caught 
 STATE_PLAYING = 0
 STATE_PAUSED = 1
 STATE_DEAD = 2              # the WASTED / BUSTED ritual, before you respawn
+STATE_TITLE = 3
+STATE_CHARACTER = 4
 
 # --- Death / respawn ------------------------------------------------------
 # Dying used to be a two-second red flash that you played straight through:
@@ -243,6 +245,124 @@ HS_QUESTION = "WHERE'D YOU GO TO HIGH SCHOOL?"
 HS_ANSWERS = ("SLUH", "CBC", "MEHLVILLE", "KIRKWOOD", "VASHON", "ROSATI")
 HS_REPLIES = ("OH.", "OH, OKAY.", "HUH.", "OH, YOU KNOW MY COUSIN.",
               "MY BROTHER WENT THERE.")
+
+# Character-creator list: schools physically in St. Louis City or St. Louis
+# County with current whole-school enrollment >= 100. Public entries were
+# checked against Missouri DESE; private entries against NCES PSS 2023-24 and
+# current school sites. The tag is deliberately compact for the in-game picker.
+STL_HIGH_SCHOOLS = (
+    # County public
+    ("Affton High School", "COUNTY PUBLIC"),
+    ("Bayless Senior High School", "COUNTY PUBLIC"),
+    ("Brentwood High School", "COUNTY PUBLIC"),
+    ("Clayton High School", "COUNTY PUBLIC"),
+    ("Eureka High School", "COUNTY PUBLIC"),
+    ("Hancock High School", "COUNTY PUBLIC"),
+    ("Hazelwood Central High School", "COUNTY PUBLIC"),
+    ("Hazelwood East High School", "COUNTY PUBLIC"),
+    ("Hazelwood West High School", "COUNTY PUBLIC"),
+    ("Jennings High School", "COUNTY PUBLIC"),
+    ("Kirkwood High School", "COUNTY PUBLIC"),
+    ("Ladue Horton Watkins High School", "COUNTY PUBLIC"),
+    ("Lafayette High School", "COUNTY PUBLIC"),
+    ("Lindbergh High School", "COUNTY PUBLIC"),
+    ("Maplewood Richmond Heights High School", "COUNTY PUBLIC"),
+    ("Marquette High School", "COUNTY PUBLIC"),
+    ("McCluer High School", "COUNTY PUBLIC"),
+    ("McCluer North High School", "COUNTY PUBLIC"),
+    ("Mehlville High School", "COUNTY PUBLIC"),
+    ("Normandy High School", "COUNTY PUBLIC"),
+    ("Oakville High School", "COUNTY PUBLIC"),
+    ("Parkway Central High School", "COUNTY PUBLIC"),
+    ("Parkway North High School", "COUNTY PUBLIC"),
+    ("Parkway South High School", "COUNTY PUBLIC"),
+    ("Parkway West High School", "COUNTY PUBLIC"),
+    ("Pattonville High School", "COUNTY PUBLIC"),
+    ("Ritenour High School", "COUNTY PUBLIC"),
+    ("Riverview Gardens High School", "COUNTY PUBLIC"),
+    ("Rockwood Summit High School", "COUNTY PUBLIC"),
+    ("STEAM Academy at McCluer South-Berkeley", "COUNTY PUBLIC"),
+    ("The Innovation School at Cool Valley", "COUNTY PUBLIC"),
+    ("University City High School", "COUNTY PUBLIC"),
+    ("Valley Park High School", "COUNTY PUBLIC"),
+    ("Webster Groves High School", "COUNTY PUBLIC"),
+    # Technical / special district
+    ("North Technical High School", "TECHNICAL"),
+    ("Northview High School", "TECHNICAL"),
+    ("South Technical High School", "TECHNICAL"),
+    # City public
+    ("Beaumont CTE High School", "CITY PUBLIC"),
+    ("Carnahan School of the Future", "CITY PUBLIC"),
+    ("Central Visual and Performing Arts High School", "CITY PUBLIC"),
+    ("Collegiate School of Medicine and Bioscience", "CITY PUBLIC"),
+    ("Gateway STEM High School", "CITY PUBLIC"),
+    ("McKinley Classical Leadership Academy", "CITY PUBLIC"),
+    ("Metro Academic and Classical High School", "CITY PUBLIC"),
+    ("Miller Career Academy", "CITY PUBLIC"),
+    ("Roosevelt High School", "CITY PUBLIC"),
+    ("Soldan International Studies", "CITY PUBLIC"),
+    ("Sumner High School", "CITY PUBLIC"),
+    ("Vashon High School", "CITY PUBLIC"),
+    # City charter
+    ("BELIEVE Academy STL", "CHARTER"),
+    ("Confluence Preparatory Academy", "CHARTER"),
+    ("Gateway Science Academy High School", "CHARTER"),
+    ("Grand Center Arts Academy High School", "CHARTER"),
+    ("Kairos High School", "CHARTER"),
+    ("KIPP St. Louis High School", "CHARTER"),
+    ("Lift for Life Academy High School", "CHARTER"),
+    # Private / parochial
+    ("Al-Salam Day School", "PRIVATE"),
+    ("Bishop DuBourg High School", "PRIVATE"),
+    ("Cardinal Ritter College Prep", "PRIVATE"),
+    ("Chaminade College Preparatory School", "PRIVATE"),
+    ("Christian Academy of Greater St. Louis", "PRIVATE"),
+    ("Christian Brothers College High School", "PRIVATE"),
+    ("Cor Jesu Academy", "PRIVATE"),
+    ("Crossroads College Preparatory School", "PRIVATE"),
+    ("De Smet Jesuit", "PRIVATE"),
+    ("H.F. Epstein Hebrew Academy", "PRIVATE"),
+    ("Incarnate Word Academy", "PRIVATE"),
+    ("John Burroughs School", "PRIVATE"),
+    ("Logos School", "PRIVATE"),
+    ("Lutheran High School North", "PRIVATE"),
+    ("Lutheran High School South", "PRIVATE"),
+    ("MICDS", "PRIVATE"),
+    ("Nerinx Hall", "PRIVATE"),
+    ("North County Christian School", "PRIVATE"),
+    ("Notre Dame High School", "PRIVATE"),
+    ("Principia School", "PRIVATE"),
+    ("Providence Classical Christian Academy", "PRIVATE"),
+    ("Rosati-Kain Academy", "PRIVATE"),
+    ("Saint Louis Priory School", "PRIVATE"),
+    ("St. John Vianney High School", "PRIVATE"),
+    ("St. Joseph's Academy", "PRIVATE"),
+    ("St. Louis University High School", "PRIVATE"),
+    ("St. Mary's South Side Catholic High School", "PRIVATE"),
+    ("The Fulton School", "PRIVATE"),
+    ("Ursuline Academy", "PRIVATE"),
+    ("Villa Duchesne", "PRIVATE"),
+    ("Visitation Academy", "PRIVATE"),
+    ("Westminster Christian Academy", "PRIVATE"),
+    ("Whitfield School", "PRIVATE"),
+)
+HS_SPECIAL_CHOICES = (
+    ("NOT FROM AROUND HERE", "BOLD CHOICE"),
+    ("MY SCHOOL ISN'T LISTED", "TAKE IT UP WITH DESE"),
+)
+HS_SEARCH_ALIASES = {
+    "SLUH": "St. Louis University High School",
+    "CBC": "Christian Brothers College High School",
+    "CVPA": "Central Visual and Performing Arts High School",
+    "MRH": "Maplewood Richmond Heights High School",
+    "MICDS": "MICDS",
+    "VIANNEY": "St. John Vianney High School",
+    "ROSATI": "Rosati-Kain Academy",
+}
+CHARACTER_LOOKS = (
+    "RED JACKET", "TEAL WINDBREAKER", "GOLD HOODIE",
+    "PURPLE SWEATER", "CREAM TEE", "CARDINALS WHITE",
+)
 
 # --- Street names -------------------------------------------------------
 # The grid was already here; it just had no names on it, and a St. Louis
@@ -2628,12 +2748,14 @@ peds_ARCHETYPES = {
 }
 
 peds_COP_KEY = 'cop#0'
-PEDS_PLAYER_KEY = 'player#0'
+PEDS_PLAYER_KEYS = tuple(f'player#{i}' for i in range(len(CHARACTER_LOOKS)))
+PEDS_PLAYER_KEY = PEDS_PLAYER_KEYS[0]
 peds__SPECIAL = {
     'cop':    dict(gait=1.0, acc=('cap',), cap=(40, 48, 78),
                    sh=(_NAVY,), pa=(_PA_NAVY,)),
     'player': dict(gait=1.0, acc=('jacket',),
-                   sh=(((96, 48, 46), (64, 32, 30)),), pa=(_PA_DENIM,)),
+                   sh=(_MAROON, _TEAL, _MUSTARD, _PURPLE, _OFFWHT, _CARDS),
+                   pa=(_PA_DENIM, _PA_BLACK, _PA_BROWN, _PA_GREY, _PA_DENIM, _PA_CARDS)),
 }
 peds__VARIANTS = 3
 
@@ -2932,7 +3054,7 @@ peds__BAKED = None
 
 def peds__all_keys():
     keys = [f"{a}#{v}" for a in peds_ARCHETYPES for v in range(peds__VARIANTS)]
-    keys += [peds_COP_KEY, PEDS_PLAYER_KEY]
+    keys += [peds_COP_KEY] + list(PEDS_PLAYER_KEYS)
     return keys
 
 
@@ -9439,6 +9561,18 @@ class Game:
         self.job_cooldown = 0
         self.chain_until = 0         # frame the hot-streak bonus expires on
 
+        # --- who are you? -------------------------------------------------
+        # This is intentionally lightweight mechanically and extremely heavy
+        # culturally. Your outfit changes the baked player sprite; your high
+        # school follows you into the question every St. Louisan eventually asks.
+        self.character_look = 0
+        self.character_school = "NOT FROM AROUND HERE"
+        self.title_index = 0
+        self.setup_row = 0
+        self.school_open = False
+        self.school_query = ""
+        self.school_cursor = 0
+
         # --- heat ---------------------------------------------------------
         self.infraction_at = {}   # offence key -> sim step it may re-arm at
         self.heat_timer = 0       # steps since the last crime / last cop sighting
@@ -9446,7 +9580,9 @@ class Game:
         self.bust_meter = 0       # sustained cop contact; you get a chance to run
 
         # --- loop / debug --------------------------------------------------
-        self.state = STATE_PLAYING
+        # Tests and scripted captures enter play directly. A human gets a real
+        # front door to the game instead of materializing on Memorial Drive.
+        self.state = STATE_PLAYING if self._headless else STATE_TITLE
         self.accumulator = 0.0
         self.show_debug = False
         self.show_map = False        # full-city map overlay (M / TAB)
@@ -9466,9 +9602,10 @@ class Game:
 
     # ---------------- persistence ----------------
     def save_game(self):
+        here = self.active_rect().center
         state = {
-            'version': 2,
-            'player': {'x': self.player_rect.centerx, 'y': self.player_rect.centery},
+            'version': 3,
+            'player': {'x': here[0], 'y': here[1]},
             'score': self.score,
             'cash': self.cash,
             'banked': self.banked,
@@ -9477,6 +9614,10 @@ class Game:
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
             'best_streak': self.best_streak,
+            'character': {
+                'look': self.character_look,
+                'high_school': self.character_school,
+            },
         }
         try:
             with open("savegame.json", 'w') as f:
@@ -9488,7 +9629,7 @@ class Game:
     def load_game(self):
         if not os.path.exists("savegame.json"):
             self.add_toast("No save file found")
-            return
+            return False
         try:
             with open("savegame.json", 'r') as f:
                 state = json.load(f)
@@ -9498,6 +9639,8 @@ class Game:
                 traffic_hand_back(self.driving)
                 self.driving = None
             self.player_rect.center = (state['player']['x'], state['player']['y'])
+            self.player_fx = float(self.player_rect.centerx)
+            self.player_fy = float(self.player_rect.centery)
             self.score = state.get('score', 0)
             self.cash = state.get('cash', 0)
             self.banked = state.get('banked', 0)
@@ -9506,13 +9649,25 @@ class Game:
             self.jobs_done = state.get('jobs_done', 0)
             self.jobs_failed = state.get('jobs_failed', 0)
             self.best_streak = state.get('best_streak', 0)
+            profile = state.get('character', {})
+            try:
+                look = int(profile.get('look', 0))
+            except (TypeError, ValueError):
+                look = 0
+            self.character_look = max(0, min(len(CHARACTER_LOOKS) - 1, look))
+            valid_schools = {name for name, _group in HS_SPECIAL_CHOICES + STL_HIGH_SCHOOLS}
+            school = str(profile.get('high_school', "NOT FROM AROUND HERE"))
+            self.character_school = school if school in valid_schools else "NOT FROM AROUND HERE"
             self.streak = 0
             self.police = []
             self.bust_meter = 0
             self.job = Job.generate()             # runs are not resumable, redeal
+            self.camera.snap_to(self.player_rect)
             self.add_toast("Game loaded")
+            return True
         except (OSError, json.JSONDecodeError, KeyError) as e:
             self.add_toast(f"Load failed: {e}")
+            return False
 
     # ---------------- helpers ----------------
     def add_toast(self, text):
@@ -10517,6 +10672,12 @@ class Game:
         return (hx, -hy)
 
     def handle_pad_button(self, button):
+        if self.state in (STATE_TITLE, STATE_CHARACTER):
+            if button == PAD_A:
+                self.handle_keydown(pygame.K_RETURN)
+            elif button == PAD_B:
+                self.handle_keydown(pygame.K_ESCAPE)
+            return
         key = PAD_BUTTON_KEYS.get(button)
         if key is not None:
             self.handle_keydown(key)
@@ -10569,6 +10730,127 @@ class Game:
             self.player_aim = math.atan2(ry, rx)
         return dx, dy
 
+    # ---------------- title / character input ----------------
+    def title_options(self):
+        options = ["NEW GAME"]
+        if os.path.exists("savegame.json"):
+            options.insert(0, "CONTINUE")
+        options.append("QUIT")
+        return tuple(options)
+
+    @staticmethod
+    def _school_norm(text):
+        return ''.join(ch for ch in str(text).upper() if ch.isalnum())
+
+    def school_matches(self, query=None):
+        """Searchable combobox rows. Common local abbreviations are indexed too,
+        because nobody in St. Louis types the formal expansion of SLUH."""
+        query = self.school_query if query is None else query
+        needle = self._school_norm(query)
+        tokens = [self._school_norm(part) for part in str(query).split() if part]
+        rows = HS_SPECIAL_CHOICES + STL_HIGH_SCHOOLS
+        if not needle:
+            return list(rows)
+        out = []
+        for row in rows:
+            name = row[0]
+            aliases = ' '.join(alias for alias, target in HS_SEARCH_ALIASES.items()
+                               if target == name)
+            haystack = self._school_norm(name + aliases)
+            if needle in haystack or (tokens and all(token in haystack for token in tokens)):
+                out.append(row)
+        return out
+
+    def handle_title_key(self, key):
+        options = self.title_options()
+        if key in (pygame.K_UP, pygame.K_w):
+            self.title_index = (self.title_index - 1) % len(options)
+        elif key in (pygame.K_DOWN, pygame.K_s):
+            self.title_index = (self.title_index + 1) % len(options)
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_e):
+            choice = options[self.title_index]
+            if choice == "CONTINUE":
+                if self.load_game():
+                    self.state = STATE_PLAYING
+            elif choice == "NEW GAME":
+                self.state = STATE_CHARACTER
+                self.setup_row = 0
+                self.school_open = False
+                self.school_query = ""
+            else:
+                self.running = False
+
+    def _open_school_picker(self):
+        self.school_open = True
+        self.school_query = ""
+        rows = self.school_matches("")
+        self.school_cursor = next((i for i, row in enumerate(rows)
+                                   if row[0] == self.character_school), 0)
+
+    def handle_character_key(self, key, text=""):
+        if self.school_open:
+            rows = self.school_matches()
+            if key == pygame.K_ESCAPE:
+                self.school_open = False
+                self.school_query = ""
+            elif key == pygame.K_UP:
+                self.school_cursor = max(0, self.school_cursor - 1)
+            elif key == pygame.K_DOWN:
+                self.school_cursor = min(max(0, len(rows) - 1), self.school_cursor + 1)
+            elif key == pygame.K_PAGEUP:
+                self.school_cursor = max(0, self.school_cursor - 9)
+            elif key == pygame.K_PAGEDOWN:
+                self.school_cursor = min(max(0, len(rows) - 1), self.school_cursor + 9)
+            elif key == pygame.K_HOME:
+                self.school_cursor = 0
+            elif key == pygame.K_END:
+                self.school_cursor = max(0, len(rows) - 1)
+            elif key == pygame.K_BACKSPACE:
+                self.school_query = self.school_query[:-1]
+                self.school_cursor = 0
+            elif key in (pygame.K_RETURN, pygame.K_KP_ENTER):
+                if rows:
+                    self.character_school = rows[self.school_cursor][0]
+                    self.school_open = False
+                    self.school_query = ""
+            elif text and text.isprintable() and len(self.school_query) < 28:
+                # Search accepts letters, digits, spaces, dots, apostrophes and
+                # hyphens; everything is normalized before matching.
+                if text.isalnum() or text in " .'-":
+                    self.school_query += text.upper()
+                    self.school_cursor = 0
+            return
+
+        if key == pygame.K_ESCAPE:
+            self.state = STATE_TITLE
+            return
+        if key in (pygame.K_UP, pygame.K_w):
+            self.setup_row = (self.setup_row - 1) % 3
+        elif key in (pygame.K_DOWN, pygame.K_s):
+            self.setup_row = (self.setup_row + 1) % 3
+        elif key in (pygame.K_LEFT, pygame.K_a):
+            if self.setup_row == 0:
+                self.character_look = (self.character_look - 1) % len(CHARACTER_LOOKS)
+            elif self.setup_row == 1:
+                self._open_school_picker()
+        elif key in (pygame.K_RIGHT, pygame.K_d):
+            if self.setup_row == 0:
+                self.character_look = (self.character_look + 1) % len(CHARACTER_LOOKS)
+            elif self.setup_row == 1:
+                self._open_school_picker()
+        elif key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE, pygame.K_e):
+            if self.setup_row == 0:
+                self.character_look = (self.character_look + 1) % len(CHARACTER_LOOKS)
+            elif self.setup_row == 1:
+                self._open_school_picker()
+            else:
+                self.state = STATE_PLAYING
+                self.save_game()
+                if self.character_school == "NOT FROM AROUND HERE":
+                    self.add_toast("Welcome anyway. Keep your plates up to date.")
+                else:
+                    self.add_toast("Good. Now everybody knows your business.")
+
     # ---------------- input ----------------
     def handle_events(self):
         """Pump the OS queue first, then sample held keys.
@@ -10581,7 +10863,7 @@ class Game:
             if event.type == pygame.QUIT:
                 self.running = False
             elif event.type == pygame.KEYDOWN:
-                self.handle_keydown(event.key)
+                self.handle_keydown(event.key, getattr(event, 'unicode', ''))
             elif event.type == pygame.JOYBUTTONDOWN:
                 self.handle_pad_button(event.button)
             elif event.type == pygame.JOYDEVICEADDED:
@@ -10641,7 +10923,7 @@ class Game:
                 dx, dy = self.apply_pad_walking(dx, dy)
             self.player_dir = [dx, dy]
 
-    def handle_keydown(self, key):
+    def handle_keydown(self, key, text=""):
         """One-shot keys. ESC pauses; nothing quits outright from play.
 
         The old bindings had ESC *and* Q hard-quitting mid-drive with no
@@ -10650,6 +10932,13 @@ class Game:
         """
         if key == pygame.K_F11:
             self.toggle_fullscreen()
+            return
+
+        if self.state == STATE_TITLE:
+            self.handle_title_key(key)
+            return
+        if self.state == STATE_CHARACTER:
+            self.handle_character_key(key, text)
             return
 
         if self.show_map:
@@ -11144,17 +11433,25 @@ class Game:
                 ped._flee((push.x, push.y), random.randint(40, 70))
 
     def maybe_ask_high_school(self, ped):
-        """The question. Answered for you, because there is no right answer."""
+        """The question. Character creation supplies the only answer you get."""
         if self.hs_cooldown > 0 or self.wanted_level > 0:
             return False
         if random.randrange(HS_CHANCE):
             return False
         self.hs_cooldown = HS_COOLDOWN
         self.hs_asked += 1
-        answer = HS_ANSWERS[(self.hs_asked - 1) % len(HS_ANSWERS)]
-        # Say it three times and somebody finally knows your cousin.
-        reply = (HS_REPLIES[3] if self.hs_asked % 3 == 0
-                 else HS_REPLIES[self.hs_asked % len(HS_REPLIES)])
+        answer = self.character_school
+        # Use the abbreviation locals actually say when one is canonical.
+        answer = next((alias for alias, target in HS_SEARCH_ALIASES.items()
+                       if target == answer), answer)
+        if self.character_school == "NOT FROM AROUND HERE":
+            reply = "OH. THEN WHY ARE YOU HERE?"
+        elif self.character_school == "MY SCHOOL ISN'T LISTED":
+            reply = "HUH. TAKE IT UP WITH DESE."
+        else:
+            # Say it three times and somebody finally knows your cousin.
+            reply = (HS_REPLIES[3] if self.hs_asked % 3 == 0
+                     else HS_REPLIES[self.hs_asked % len(HS_REPLIES)])
         self.add_toast(HS_QUESTION)
         self.add_toast(f"\"{answer}\"  ...  {reply}")
         self.play_sound(f'yell{self.hs_asked % 4}', ped.rect.center,
@@ -12029,7 +12326,221 @@ class Game:
             pygame.draw.rect(self.screen, _blend(trim, (0, 0, 0), 0.12 * k),
                              (door_x - k, rect.bottom + k * 2, 13 + k * 2, 3))
 
+    # ---------------- front-end screens ----------------
+    @staticmethod
+    def _fit_menu_text(text, max_width, scale=1):
+        text = str(text).upper()
+        if hud_text_width(text, scale) <= max_width:
+            return text
+        suffix = "..."
+        while text and hud_text_width(text + suffix, scale) > max_width:
+            text = text[:-1]
+        return text + suffix
+
+    def _draw_title_city(self):
+        """Procedural title backdrop: river, brick skyline, Arch and one car.
+        It is deliberately an illustration of the game's own visual language,
+        not an image file disguised as a loading screen."""
+        self.screen.fill((7, 11, 27))
+        for y in range(0, SCREEN_HEIGHT, 18):
+            col = (8 + y // 30, 13 + y // 38, 31 + y // 24)
+            pygame.draw.rect(self.screen, col, (0, y, SCREEN_WIDTH, 18))
+        # Sodium-orange moon, half hidden by the city.
+        pygame.draw.circle(self.screen, (188, 112, 60), (489, 91), 42)
+        pygame.draw.circle(self.screen, (214, 148, 78), (478, 82), 30)
+
+        # Uneven brick skyline and its few lit windows.
+        x = 0
+        while x < SCREEN_WIDTH:
+            n = _noise(x // 17, 3, 1701)
+            w = 25 + n % 34
+            h = 45 + (n >> 6) % 95
+            top = 276 - h
+            brick = CITY_BRICKS[(n >> 11) % len(CITY_BRICKS)]
+            brick = _blend(brick, (5, 8, 18), 0.42)
+            pygame.draw.rect(self.screen, (10, 8, 14), (x + 4, top + 5, w, h))
+            pygame.draw.rect(self.screen, brick, (x, top, w, h))
+            pygame.draw.line(self.screen, _blend(brick, (255, 255, 255), 0.18),
+                             (x, top), (x + w - 1, top))
+            for wy in range(top + 10, 268, 15):
+                for wx in range(x + 7, x + w - 5, 12):
+                    lit = _noise(wx, wy, 1723) % 7 == 0
+                    pygame.draw.rect(self.screen, (206, 154, 78) if lit else (24, 30, 42),
+                                     (wx, wy, 4, 6))
+            x += w + 3
+
+        # The Arch is a bright, blunt silhouette that reads behind the logo.
+        points = []
+        for i in range(33):
+            t = math.pi * i / 32.0
+            points.append((int(320 + 108 * math.cos(t)),
+                           int(261 - 174 * math.sin(t))))
+        pygame.draw.lines(self.screen, (24, 28, 38), False,
+                          [(x + 5, y + 6) for x, y in points], 15)
+        pygame.draw.lines(self.screen, (164, 174, 180), False, points, 12)
+        pygame.draw.lines(self.screen, (224, 226, 218), False,
+                          [(x - 2, y - 1) for x, y in points], 3)
+
+        # River and freeway ribbon at the bottom.
+        pygame.draw.rect(self.screen, (28, 72, 104), (0, 270, SCREEN_WIDTH, 90))
+        for yy in (279, 293, 337, 350):
+            for xx in range((yy * 7) % 31, SCREEN_WIDTH, 43):
+                pygame.draw.rect(self.screen, (58, 112, 140), (xx, yy, 22, 2))
+        pygame.draw.polygon(self.screen, (37, 38, 44),
+                            [(0, 305), (640, 274), (640, 330), (0, 352)])
+        pygame.draw.lines(self.screen, (198, 170, 80), False,
+                          [(0, 328), (640, 299)], 2)
+        for xx in range(-30, 680, 56):
+            pygame.draw.line(self.screen, (104, 104, 106),
+                             (xx, 339 - xx * 29 // 640),
+                             (xx + 28, 337 - (xx + 28) * 29 // 640), 2)
+
+        entry = CAR_SPRITES.get(('sedan', CAR_COLORS[0]))
+        if entry:
+            car = entry[0][0]
+            car = pygame.transform.scale(car, (car.get_width() * 2, car.get_height() * 2))
+            self.screen.blit(car, (454, 297))
+
+    def draw_title_screen(self):
+        self._draw_title_city()
+        title = "STL GTA"
+        hud_text(self.screen, title,
+                 (SCREEN_WIDTH - hud_text_width(title, 4)) // 2, 25,
+                 hud_HUD_WHITE, True, 4)
+        sub = "A LOVE LETTER WITH A WANTED LEVEL"
+        hud_text(self.screen, sub,
+                 (SCREEN_WIDTH - hud_text_width(sub, 1)) // 2, 66,
+                 hud_HUD_GOLD, True, 1)
+
+        options = self.title_options()
+        self.title_index %= len(options)
+        pw, ph = 176, 22 + len(options) * 25
+        px, py = (SCREEN_WIDTH - pw) // 2, 176
+        hud_draw_panel(self.screen, pygame.Rect(px, py, pw, ph), alpha=226)
+        for i, option in enumerate(options):
+            selected = i == self.title_index
+            if selected:
+                pygame.draw.rect(self.screen, (72, 54, 42),
+                                 (px + 7, py + 8 + i * 25, pw - 14, 18))
+            label = ("> " if selected else "  ") + option
+            hud_text(self.screen, label, px + 17, py + 13 + i * 25,
+                     hud_HUD_GOLD if selected else hud_HUD_WHITE, True, 1)
+        hint = "ARROWS + ENTER"
+        hud_text(self.screen, hint,
+                 (SCREEN_WIDTH - hud_text_width(hint, 1)) // 2, 348,
+                 hud_HUD_GREY_DIM, True, 1)
+
+    def draw_character_screen(self):
+        self.screen.fill((32, 25, 28))
+        # Brick wall, limestone sill and a dark strip of South City pavement.
+        for y in range(0, 274, 12):
+            offset = -16 if (y // 12) % 2 else 0
+            pygame.draw.line(self.screen, (72, 46, 44), (0, y), (SCREEN_WIDTH, y))
+            for x in range(offset, SCREEN_WIDTH, 32):
+                pygame.draw.line(self.screen, (70, 44, 42), (x, y), (x, y + 11))
+        pygame.draw.rect(self.screen, (166, 154, 132), (0, 270, SCREEN_WIDTH, 8))
+        pygame.draw.rect(self.screen, (48, 48, 52), (0, 278, SCREEN_WIDTH, 82))
+
+        title = "MAKE YOUR PERSON"
+        hud_text(self.screen, title, 20, 16, hud_HUD_GOLD, True, 2)
+        hud_text(self.screen, "ST. LOUIS NEEDS TO KNOW TWO THINGS.", 22, 40,
+                 hud_HUD_WHITE, True, 1)
+
+        # Live baked-sprite preview: this is the exact character entering play.
+        key = PEDS_PLAYER_KEYS[self.character_look % len(PEDS_PLAYER_KEYS)]
+        sprite, _shadow = ped_sprite(key, 2, False, 0)
+        preview = pygame.transform.scale(sprite,
+                                         (sprite.get_width() * 6, sprite.get_height() * 6))
+        shadow = pygame.Surface((116, 34), pygame.SRCALPHA)
+        pygame.draw.ellipse(shadow, (0, 0, 0, 105), shadow.get_rect())
+        self.screen.blit(shadow, (58, 230))
+        self.screen.blit(preview, preview.get_rect(center=(116, 172)))
+
+        rows = (
+            ("LOOK", CHARACTER_LOOKS[self.character_look]),
+            ("HIGH SCHOOL", self.character_school),
+            ("", "HIT THE STREET"),
+        )
+        x, w = 205, 410
+        ys = (82, 141, 221)
+        hs = (45, 64, 40)
+        for i, ((label, value), y, h) in enumerate(zip(rows, ys, hs)):
+            selected = i == self.setup_row
+            hud_draw_panel(self.screen, pygame.Rect(x, y, w, h),
+                           fill=(54, 42, 42) if selected else hud_HUD_PANEL,
+                           alpha=235)
+            if label:
+                hud_text(self.screen, label, x + 12, y + 8,
+                         hud_HUD_GOLD if selected else hud_HUD_GREY_DIM, True, 1)
+                shown = self._fit_menu_text(value, w - 30)
+                hud_text(self.screen, shown, x + 12, y + 24,
+                         hud_HUD_WHITE, True, 1)
+            else:
+                prefix = "> " if selected else "  "
+                line = prefix + value
+                hud_text(self.screen, line,
+                         x + (w - hud_text_width(line, 2)) // 2, y + 11,
+                         hud_HUD_GOLD if selected else hud_HUD_WHITE, True, 2)
+        hud_text(self.screen, "UP/DOWN CHOOSE   LEFT/RIGHT CHANGE   ENTER SELECT",
+                 18, 340, hud_HUD_GREY_DIM, True, 1)
+
+        if self.school_open:
+            self.draw_school_picker()
+
+    def draw_school_picker(self):
+        dim = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.SRCALPHA)
+        dim.fill((4, 5, 10, 190))
+        self.screen.blit(dim, (0, 0))
+        panel = pygame.Rect(40, 34, 560, 292)
+        hud_draw_panel(self.screen, panel, alpha=248)
+        hud_text(self.screen, "WHERE'D YOU GO TO HIGH SCHOOL?", 57, 48,
+                 hud_HUD_GOLD, True, 2)
+        query = self.school_query if self.school_query else "TYPE TO FILTER..."
+        hud_draw_panel(self.screen, pygame.Rect(56, 73, 528, 24),
+                       fill=(26, 28, 34), alpha=255)
+        hud_text(self.screen, self._fit_menu_text(query, 505), 65, 82,
+                 hud_HUD_WHITE if self.school_query else hud_HUD_GREY_DIM, True, 1)
+
+        rows = self.school_matches()
+        if rows:
+            self.school_cursor = max(0, min(self.school_cursor, len(rows) - 1))
+            visible = 12
+            start = max(0, min(self.school_cursor - visible // 2,
+                               max(0, len(rows) - visible)))
+            for line, idx in enumerate(range(start, min(len(rows), start + visible))):
+                name, group = rows[idx]
+                y = 106 + line * 16
+                selected = idx == self.school_cursor
+                if selected:
+                    pygame.draw.rect(self.screen, (78, 58, 42), (55, y - 3, 530, 15))
+                lead = ">" if selected else " "
+                shown = self._fit_menu_text(name, 380)
+                hud_text(self.screen, lead + " " + shown, 62, y,
+                         hud_HUD_GOLD if selected else hud_HUD_WHITE, True, 1)
+                tag = self._fit_menu_text(group, 108)
+                hud_text(self.screen, tag, 574 - hud_text_width(tag, 1), y,
+                         hud_HUD_GREY_DIM, True, 1)
+            count = f"{self.school_cursor + 1}/{len(rows)}"
+        else:
+            hud_text(self.screen, "NO MATCH. TRY FEWER LETTERS.", 65, 120,
+                     hud_HUD_RED, True, 1)
+            count = "0/0"
+        hud_text(self.screen, count, 576 - hud_text_width(count, 1), 305,
+                 hud_HUD_GREY_DIM, True, 1)
+        hud_text(self.screen, "ENTER PICK   ESC CANCEL   PGUP/PGDN MOVE",
+                 58, 305, hud_HUD_GREY_DIM, True, 1)
+
     def draw(self):
+        if self.state == STATE_TITLE:
+            self.draw_title_screen()
+            self.postfx.present(self.screen, self.window)
+            pygame.display.flip()
+            return
+        if self.state == STATE_CHARACTER:
+            self.draw_character_screen()
+            self.postfx.present(self.screen, self.window)
+            pygame.display.flip()
+            return
         self.screen.fill(COLOR_SKY_BG)
         # Impact shake: a frame-driven jitter folded into the camera for the
         # world + entity passes only. Zero at rest, so it never perturbs the
@@ -12091,7 +12602,8 @@ class Game:
             if moving:
                 self.player_facing = peds_dir_index(self.player_dir[0], self.player_dir[1])
                 self.player_anim += 0.16
-            sprite, shadow = ped_sprite(PEDS_PLAYER_KEY, self.player_facing,
+            player_key = PEDS_PLAYER_KEYS[self.character_look % len(PEDS_PLAYER_KEYS)]
+            sprite, shadow = ped_sprite(player_key, self.player_facing,
                                         moving, self.player_anim)
             rect = sprite.get_rect(center=(sx, sy))
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))

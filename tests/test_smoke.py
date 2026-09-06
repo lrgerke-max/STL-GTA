@@ -10,9 +10,11 @@ non-finite, the police count disagreeing with the wanted level, a job marker
 that spawns inside a building.
 """
 import math
+import json
 import os
 import random
 import sys
+import tempfile
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -2027,6 +2029,97 @@ def test_somebody_asks_where_you_went_to_high_school():
     # every answer and reply has to be renderable in the bitmap font
     for text in M.HS_ANSWERS + M.HS_REPLIES + (M.HS_QUESTION,):
         assert M.hud_text_width(text, 1) > 0, text
+
+
+def test_character_creator_has_the_whole_local_school_question():
+    names = [name for name, _group in M.STL_HIGH_SCHOOLS]
+    assert len(names) >= 85, "the selector is a sample, not the promised area list"
+    assert len(names) == len(set(names)), "duplicate high-school choice"
+    for expected in ("Vashon High School", "Kirkwood High School",
+                     "Christian Brothers College High School",
+                     "St. Louis University High School", "MICDS"):
+        assert expected in names
+    assert {group for _name, group in M.STL_HIGH_SCHOOLS} >= {
+        "CITY PUBLIC", "COUNTY PUBLIC", "CHARTER", "TECHNICAL", "PRIVATE"
+    }
+
+    g = game()
+    assert [row[0] for row in g.school_matches("sluh")] == [
+        "St. Louis University High School"
+    ]
+    assert [row[0] for row in g.school_matches("cbc")] == [
+        "Christian Brothers College High School"
+    ]
+    assert any(row[0] == "Parkway West High School" for row in g.school_matches("park west"))
+
+
+def test_school_combobox_types_filters_and_selects():
+    g = game()
+    g.state = M.STATE_CHARACTER
+    g.setup_row = 1
+    g.handle_character_key(pygame.K_RETURN)
+    assert g.school_open
+    for ch in "sluh":
+        g.handle_character_key(pygame.key.key_code(ch), ch)
+    assert g.school_query == "SLUH", "W/S/E must type, not navigate, while filtering"
+    rows = g.school_matches()
+    assert len(rows) == 1
+    g.handle_character_key(pygame.K_RETURN)
+    assert not g.school_open
+    assert g.character_school == "St. Louis University High School"
+
+
+def test_character_profile_round_trips_in_v3_save():
+    g = game()
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chdir(td)
+            g.character_look = len(M.CHARACTER_LOOKS) - 1
+            g.character_school = "Vashon High School"
+            g.save_game()
+            with open("savegame.json", "r") as f:
+                raw = json.load(f)
+            assert raw['version'] == 3
+            assert raw['character']['high_school'] == "Vashon High School"
+            g.character_look = 0
+            g.character_school = "NOT FROM AROUND HERE"
+            assert g.load_game()
+            assert g.character_look == len(M.CHARACTER_LOOKS) - 1
+            assert g.character_school == "Vashon High School"
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_title_character_and_picker_render_without_assets():
+    g = game()
+    original_state = g.state
+    try:
+        g.state = M.STATE_TITLE
+        g.draw()
+        assert g.screen.get_at((320, 40)) != (0, 0, 0, 255)
+        g.state = M.STATE_CHARACTER
+        g.character_look = 3
+        g.character_school = "Webster Groves High School"
+        g.draw()
+        g.school_open = True
+        g.school_query = "PARKWAY"
+        g.school_cursor = 2
+        g.draw()
+        assert len(g.school_matches()) == 4
+    finally:
+        g.school_open = False
+        g.school_query = ""
+        g.state = original_state
+
+
+def test_every_character_look_is_a_distinct_baked_sprite():
+    M.bake_ped_sprites()
+    pixels = []
+    for key in M.PEDS_PLAYER_KEYS:
+        sprite, _shadow = M.ped_sprite(key, 2, False, 0)
+        pixels.append(pygame.image.tobytes(sprite, "RGBA"))
+    assert len(set(pixels)) == len(M.CHARACTER_LOOKS)
 
 
 def test_nobody_asks_while_the_police_are_chasing_you():
