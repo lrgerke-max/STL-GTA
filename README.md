@@ -28,7 +28,7 @@ pip install -r requirements.txt && python main.py
 - **Neighbourhoods that read differently**: shop signs and housing stock are picked per block from the neighbourhood you're in. The Hill gets `DELI`, `PIZZERIA`, `BAKERY`, `IMO'S` over brick shotguns; the Loop and Grand Center get `FOX` (with marquee bulbs), `THE GROVE`, `RECORDS` over Second Empire mansard rowhouses and painted ladies; downtown and Soulard get `OYSTER BAR`, `SLINGERS`, `CROWN`; south city gets `ANTIQUES` and `PORK STEAK`.
 - **A real brick city between the roads**: every block is filled with St. Louis masonry — red / brown / buff brick and limestone — rendered in a hybrid view: dark top-down roofs with a lit south **facade**. Four real housing types: the mansard rowhouse with slate dormers, the gabled brick two-flat with its chimney, the painted lady, and the south-city shotgun with a full-width porch. Parks, surface lots and tree-lined sidewalks fill the rest.
 - **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts, foam-finger crowds around Busch, and South City hoosiers with mullets and tallboys. The streamed population retypes itself by neighborhood as you travel instead of carrying downtown commuters into every district forever.
-- **Busy streets, via population streaming**: the viewport sees 0.56% of the map, so a population scattered over the whole city is one you never meet — 40 pedestrians measured **0.0 visible on average**. Raising the raw count can't fix that (you'd need ~1800). Instead the pool stays modest and anything that drifts out of earshot is recycled into a ring hugging the screen edge, biased toward the way you're travelling so traffic arrives in the windscreen rather than the mirror. Measured **~15 pedestrians and ~8 cars on screen while driving**, for about 5% of the frame budget.
+- **Busy streets, via population streaming**: the viewport sees 0.56% of the map, so a population scattered over the whole city is one you never meet — 40 pedestrians measured **0.0 visible on average**. Raising the raw count can't fix that (you'd need ~1800). Instead the pool stays modest and anything that drifts out of earshot is recycled into a ring hugging the screen edge, biased toward the way you're travelling so traffic arrives in the windscreen rather than the mirror. Measured **~10 pedestrians, ~3.5 moving cars and ~3 parked on screen while driving**, for about 5% of the frame budget. That is deliberately *fewer* cars than it used to carry: at 22 moving cars a 64px street measured **3.7 pairs of cars overlapping each other at any moment (11 at worst)** and traffic averaged 1.26 px/step against its own 3.25 cap — a city permanently jammed solid. 13 cars that are actually moving read as a busier city than 22 stacked in a knot.
 - **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, box truck, school bus,
   blue/red **Route 70 MetroBus**, Hill delivery Vespa, and a rare black Trans Am with a gold
   hood bird and the radio permanently stuck on KSHE — each with its own size and handling.
@@ -46,7 +46,15 @@ pip install -r requirements.txt && python main.py
   respray. **Score** is the chaos counter. Playing carefully and playing recklessly are genuinely different strategies.
 - **Chaos multiplier (x1–x8)**: every reckless act — a hit, a shunt, a wreck — feeds a running multiplier that scales every point of score you earn. Park and it bleeds away; get **busted** or **wasted** and it's gone. The screen shouts each rung.
 - **Kill Frenzy**: a pulsing icon drops on the map. Touch it and a clock starts — `MOW DOWN 14 LOCALS`, `WRECK 8 MOTORS` — for a fat score payout and free multiplier rungs. Pure GTA1 "just one more go".
-- **Combo kills & a reactive crowd**: bowl a line of pedestrians and the per-hit value stacks (`GOURANGA!` at 5). Peds see a speeding car coming and scatter, dive clear, bolt when the stars light up, and knot around a fresh body. Clip one below `SPLAT_SPEED` and they go down and get back up — hit them at speed and they **don't**, leaving a stain on the road that's still there next lap.
+- **Rampage streaks**: bowl a line of pedestrians and the per-hit value stacks, scaled by how
+  fast you were going when you did it. The shout ladder runs to fifty (`GOURANGA!`,
+  `SLINGER STREAK`, `TOTAL CARNAGE`, `ST LOUIS HATES YOU`, `MOUND CITY MASSACRE`, ...) and the
+  window that holds a streak together **grows with the streak**, so a run through three blocks
+  of sidewalk stays one run instead of dying in the gap between two crowds. `SPLAT_SPEED` and
+  every other impact threshold is now a *fraction* of the top speed rather than a literal
+  tuned against a top speed the game no longer has — left alone, the old 5.2 would have put
+  splattering at 81% of flat out, i.e. almost never.
+- **A reactive crowd**: (`GOURANGA!` at 5). Peds see a speeding car coming and scatter, dive clear, bolt when the stars light up, and knot around a fresh body. Clip one below `SPLAT_SPEED` and they go down and get back up — hit them at speed and they **don't**, leaving a stain on the road that's still there next lap.
 - **Combat**: `SPACE` swings your fists — a short arc that drops a pedestrian, and finishes one already on the floor. Find a pistol crate on the street and the same key fires it; bullets kill people, punch holes in cars and cop cruisers, and discharging a firearm in public is very much a crime. Punching a car dents it; enough dents and it goes up.
 - **Cars that actually hit each other**: ramming transfers momentum — the struck car gets shoved down the contact normal, yaws away from an off-centre hit, and a parked car knocked at the kerb coasts before it stops. Traffic used to absorb a full-speed broadside without twitching.
 - **Impact juice**: wall slams and collisions land — screen shake, a frame of hitstop on the big ones, a spray of sparks / glass / smoke, a white flash. Floating `+N` / `$N` numbers rise off whatever you just did; big moments get a centre-screen ALL-CAPS callout.
@@ -55,13 +63,71 @@ pip install -r requirements.txt && python main.py
   Either loss gets a readable result card, then automatically returns you beneath the Arch;
   after its opening beat, `ENTER`, `SPACE`, `E`, or gamepad `A` skips straight back to play.
 - **Steal Any Car**: walk up to traffic or a parked car and press `E` to jack it — and it matters which one, because every variant now has its own top speed. The Vespa is 60% faster than the refuse truck.
-- **Handbrake turns**: `LSHIFT` (or gamepad `LB`) locks the back wheels. The car carries momentum sideways through a turn now, so you can stab the brake, let the back step out, rotate while keeping your speed, and power out — instead of braking to a quarter of top speed at every single intersection. Slides leave rubber on the road.
+- **Handbrake turns**: `LSHIFT` (or gamepad `LB`) locks the back wheels. The car carries momentum sideways through a turn now, so you can stab the brake, let the back step out, rotate while keeping your speed, and power out — instead of braking to a quarter of top speed at every single intersection. Slides leave rubber on the road. It is measurably the **fast** line through a 90° grid corner: a scripted driver takes one cleanly at 100% of cruise on the handbrake and exits at 4.7-5.3 px/step, against 85% of cruise and a 1.8-2.7 exit on the brakes alone.
 - **Wanted System**: whole-star wanted levels 0–5. Running someone down or shunting traffic at speed earns stars; scraping a kerb does not. Cops spawn *off-screen near you* rather than across the map, chase with whisker-based obstacle avoidance, and have to hold sustained contact (watch the BUSTING bar) before you are taken. Stars only decay once you are genuinely clear of them — parking and waiting no longer works.
-- **Vehicle Physics**: momentum-based acceleration, braking, steering, and drag, with eased
-  player throttle / steering and a calmer top speed. Walking also ramps into motion instead of
-  jumping to full speed on the first frame. Everything runs on a **fixed 60 Hz timestep** so the
-  game plays identically at 30, 60 or 240 fps.
-- **Scrolling camera** (it leads the car in its direction of travel so you can see where you're going) **+ HUD radar + a full-screen city map** on `M` / `TAB`, across the full 100×100-tile map, with `F5` / `F9` JSON save/load, an in-game pause / controls screen, and an `F3` debug overlay.
+- **Chases you can actually win — or lose on purpose**: every star used to be *faster than your
+  own top speed* (up to 10.8 against 8.6), so a straight-line escape did not exist at any
+  wanted level; a flat-out flee from two stars measured the cruiser closing **274px in ten
+  seconds**. Police pace is now pegged to the player's car: a standard sedan outruns one and
+  two stars, matches three, and is marginally slower than four and five — which is what makes
+  stealing the Trans Am at five stars the right move rather than a cosmetic one. Escalation is
+  numbers, aggression and how long they hold the scent. And **you cannot be pulled out of a
+  moving car**: below `BUST_MAX_SPEED` a cruiser leaning on you is an arrest in progress, above
+  it it is just a ram. One bad corner now costs you your lead, not the run.
+- **Control, calling it in**: a cop with no line of sight used to hunt one stale point and give
+  up, so a chase died the moment you turned a corner — about one second at speed. A car being
+  driven hard down a public street is conspicuous, so units still looking get a periodic radio
+  fix on it. Stop, or get off the road and out of sight, and the radio goes quiet: the hiding
+  mechanic is untouched, because a hidden player broadcasts nothing. Scripted pursuits went
+  from **7-14 seconds** to **25-60 seconds and 4,000-17,000px of driving**, which is a chase
+  across the whole city.
+- **One scrape is one impact**: the three contact-damage sites (a wall, a rammed car, a cruiser
+  leaning on you) each fired *once per simulation step* for as long as the rects overlapped, so
+  a half-second graze was thirty separate hits. Every scripted chase died the same way inside
+  fifteen seconds — WRECK TOTALLED — with the nearest cruiser still five hundred pixels back.
+  Sustained contact is now rate-limited, and the potholes (34 of them, quietly the single
+  largest thing eating a chase car at 46 of 100hp per forty seconds) cost you speed and screen
+  rather than health.
+- **Traffic that goes around things**: kerbside parking used to sit 14-18px off the road's
+  centre line while the driving lane sat at 15px off the *same* line — every parked car was
+  parked in the middle of the lane. Ambient traffic braked to a dead stop behind each one
+  forever, and everything queued up behind it. Parking now hugs the kerb, and traffic **pulls
+  out around anything stopped in its lane** — a parked car, a wreck, a car you shunted into the
+  gutter — refusing the manoeuvre where there is genuinely no room, such as a bridge deck.
+  Overlapping car pairs fell from **3.7 to 0.4**, cars stalled over a second from **1.4 to
+  0.2**, and average traffic speed rose from 1.26 to 2.07.
+- **Vehicle physics that corner like a car**: the player and the police drive a **bicycle
+  model** — yaw is proportional to speed × steering angle, and the steering *lock* fades as
+  speed rises, so the turning circle **opens up the faster you go**: a ~30px radius crawling,
+  ~190px flat out. The old model did the exact opposite (it scaled yaw by `0.45 + 0.55 ×
+  speed_frac`, giving **288°/s and a tightening circle at top speed**), which is what made
+  fast driving read as a twitch rather than a car. On top of that sits a **lateral grip
+  budget**: ask the tyres for more cornering force than they have and the nose washes wide —
+  understeer, not a hidden speed cap. Ambient traffic deliberately keeps the old
+  speed-proportional turn, because `traffic_drive()` and its whole lane geometry are tuned
+  against it.
+- **Sub-pixel travel is carried, not discarded**: `pygame.Rect` holds integers, and
+  `rect.move(int(dx), int(dy))` used to throw away the fraction of *every step*. That was the
+  engine's largest single bug: a car doing 0.9 px/step moved **zero pixels forever** (the lead
+  car of a queue could never leave, so the queue never cleared), a diagonal lost **12% of its
+  speed** against a cardinal heading, and 6.10 and 6.40 px/step both truncated to 6 — which is
+  why a cruiser 0.3 px/step slower than you never actually fell behind. Remainders are banked
+  and spent, so travel is exact over time in every direction for every vehicle.
+- **A calmer, longer top end**: 8.6 px/step crossed the whole 640px viewport in 1.2 seconds.
+  6.4 still crosses the entire 6400px map in seventeen — a real cross-town chase — while
+  leaving you time to read a junction before you are inside it. Power tapers toward the
+  ceiling so the last of the top end has to be worked for, and the speedometer is derived from
+  the top speed rather than a stale constant (85 mph in a sedan, 95 in the Trans Am, 66 in a
+  bus). Walking also ramps into motion instead of jumping to full speed on the first frame.
+  Everything runs on a **fixed 60 Hz timestep** so the game plays identically at 30, 60 or
+  240 fps.
+- **A camera that never loses the car**: it leads in your direction of travel so you can see
+  where you're going, but each axis is now capped as a fraction of *its own* half of the
+  viewport. The previous version scaled the vertical lead **up** by the aspect ratio, producing
+  229px of look-ahead against a 180px half-viewport — driving north or south pushed the car
+  clean off the bottom of the screen, measured at **822 frames out of frame in a 1,920-frame
+  sweep**. It is now 0.32 of the half-viewport at worst, with a hard clamp in
+  `Camera.center_on` as a backstop and a test that sweeps all eight headings. **HUD radar + a full-screen city map** on `M` / `TAB`, across the full 100×100-tile map, with `F5` / `F9` JSON save/load, an in-game pause / controls screen, and an `F3` debug overlay.
 - **Chunky 1997-console look**: everything is procedurally baked hard-pixel art at a 640×360 internal buffer, nearest-neighbour upscaled 2×. Optional CRT scanline / vignette pass on `F2`. No image assets.
 
 ## 🚀 How to Run (Step by Step)
@@ -147,6 +213,27 @@ you're actually pushing it, so you can swap mid-game.
 Nothing quits the game outright during play. `Q` sits one key away from `WASD`, and the
 old bindings had both it and `ESC` hard-quitting mid-drive with no confirmation.
 
+## 📈 Playtest rig
+
+`tools/playtest.py` is the instrument the driving tuning is judged against. It prints
+numbers rather than passing or failing — turning radius against speed, whether the camera
+ever loses the car, whether a straight-line escape exists at each wanted level, how many
+AI cars are overlapping each other, how long a scripted pursuit survives and how far it
+travels. Run it before and after any handling, police or traffic change.
+
+```bash
+python tools/playtest.py            # every probe
+python tools/playtest.py chases     # scripted pursuits at every star
+python tools/playtest.py camera handling corner
+```
+
+The interesting part is `GridDriver`: a scripted driver competent enough that the numbers
+describe the *game* and not a bad autopilot. It holds a lane, checks a corridor is
+actually open before committing to it (landmarks are stamped over the road grid, so
+"it is a road line" does not mean "you can drive down it"), brakes into the corners it
+means to turn at, and backs out when it gets stuck. It drives the grid at **82% of top
+speed with 8 head-on hits in forty seconds**.
+
 ## 🧪 Tests
 
 ```bash
@@ -168,6 +255,7 @@ behaviour suite run on every push via GitHub Actions.
 GTASTL/
 ├── main.py               # All game code (single-file prototype — see Known debt)
 ├── tests/test_smoke.py   # Headless behaviour tests
+├── tools/playtest.py     # Handling / police / traffic measurement rig
 ├── .github/workflows/    # CI: byte-compile, tests, headless play-through
 ├── requirements.txt      # Python dependencies
 ├── savegame.json         # Auto-generated save file
@@ -198,7 +286,19 @@ resizable window on its own.
 - Single-file architecture for simplicity, organized around a `Game` class instead of loose globals
 - All art is procedurally **baked** once at startup into hard-pixel surfaces — no image files. The bakers are grouped by a `gfx_*` prefix: `gfx_cars`, `gfx_peds`, `gfx_followers`, `gfx_props`, `gfx_roofs`, `gfx_lm` (landmarks), `gfx_hud`, `gfx_fx`
 - The map is a road grid with a deterministic brick-block fabric stamped between the roads (`_fill_city_blocks`), then the real landmark footprints stamped on top (`LANDMARKS`, mirrored into the parking and landmark-size tables)
-- Velocity/momentum physics shared by the player car and traffic/police; per-variant handling via `VEHICLE_TUNING`, plus a per-car damage model (`hp` / `burn` fuse → `Game.explode`). A blocked move is retried one axis at a time so a car **slides along a wall** instead of dead-stopping on every kerb graze (a square-on hit still thunks), and the player car keeps usable steering authority at parking speed
+- **Two handling models in one `physics_step`.** Anything with a `driver` — you or a cruiser —
+  gets the bicycle model (`PLAYER_YAW_GAIN`, `PLAYER_LOCK_FADE`, `PLAYER_GRIP`); ambient traffic
+  (`driver is None`) keeps the original speed-proportional turn, because `traffic_drive()`'s
+  lane geometry is tuned against "radius == max_speed / steer_angle" and rewriting the physics
+  under it would put every AI car in the kerb. Per-variant handling via `VEHICLE_TUNING`, plus a
+  per-car damage model (`hp` / `burn` fuse → `Game.explode`) with a `crash_damage()` cooldown
+  for sustained contact. A blocked move is retried one axis at a time so a car **slides along a
+  wall** instead of dead-stopping on every kerb graze (a square-on hit still thunks)
+- **`Car.take_subpixel()` banks fractional travel** between steps, so integer `Rect`
+  coordinates stop silently eating a per-axis slice of every vehicle's speed. Every impact and
+  splatter threshold (`SPLAT_SPEED`, `NUDGE_SPEED`, `IMPACT_*`, `RAM_SPEED`, `HUD_MPH_PER_PX`)
+  is derived from `PLAYER_CAR_MAX_SPEED` rather than written out, so retuning the top speed
+  cannot leave them behind again
 - Feedback layer is one funnel: `Game.add_score()` routes every point through the chaos multiplier, spawns a world-space `+N` pop, and fires a `MULTIPLIER X?` callout on a rung. `add_callout()` / `add_pop()` / `spawn_burst()` / `kick()` are the shared primitives; everything is frame-timed (never `pygame.time.get_ticks()`) so headless capture stays deterministic, and every pool is capped
 - Hitstop is a whole-step skip at the top of `Game.update()`; screen shake is a frame-driven offset folded into `Camera.apply()` only (`center_on` never sees it, so the sim and the camera-pan test read a stable `x`/`y`)
 - Pedestrians run a small state machine (`calm` / `flee` / `gawk` / `down`) with a decaying knockback vector; `Pedestrian.update(game)` senses the player car, cops and the wanted level

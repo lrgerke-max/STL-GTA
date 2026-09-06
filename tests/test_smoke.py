@@ -832,12 +832,204 @@ def test_player_car_throttle_and_steering_have_input_ramp():
     car.input_throttle = 1.0
     car.input_steer = 1.0
     car.physics_step()
-    assert math.isclose(car.velocity, 1.0 + car.acceleration * M.PLAYER_THROTTLE_RESPONSE,
-                        rel_tol=1e-6)
-    assert math.isclose(car.steer_angle,
-                        car.max_steer * M.PLAYER_STEER_RESPONSE, rel_tol=1e-6)
+    gain = (car.acceleration * M.PLAYER_THROTTLE_RESPONSE
+            * (1.0 - M.PLAYER_POWER_FADE * (1.0 / car.max_speed)))
+    assert math.isclose(car.velocity, 1.0 + gain, rel_tol=1e-6)
+    # Steering is rate-limited toward the lock rather than snapping to it: one
+    # step of full input gets you a fraction of the wheel, not all of it. The
+    # lock itself is read after the throttle, off this step's new speed.
+    lock = car.max_steer * (1.0 - M.PLAYER_LOCK_FADE * (car.velocity / car.max_speed))
+    assert 0.0 < car.steer_angle < lock
+    assert math.isclose(car.steer_angle, lock * M.PLAYER_STEER_RATE, rel_tol=1e-6)
     assert M.PLAYER_CAR_MAX_SPEED < 9.5
     g.driving = None
+
+
+def test_the_turning_circle_opens_up_with_speed():
+    """A car corners tighter slowly than it does flat out.
+
+    The old model multiplied yaw by (0.45 + 0.55 * speed_frac), so the car
+    turned HARDER the faster it went - 288 deg/s and a 103px radius at top
+    speed against 43px when crawling. Backwards, and the reason fast driving
+    felt like a twitch rather than a car.
+    """
+    g = game()
+    radii = []
+    for frac in (0.3, 0.65, 1.0):
+        car = _drive(g)
+        car.rect.center = _open_road_point()
+        car.angle = 0.0
+        car.steer_angle = 0.0
+        v = car.max_speed * frac
+        for settle in range(2):
+            a0 = car.angle
+            for _ in range(60):
+                car.rect.center = _open_road_point()   # pure physics, no geometry
+                car.velocity = v
+                car.input_throttle = 0.0
+                car.input_steer = 1.0
+                car.input_handbrake = False
+                car.physics_step()
+            yaw = abs(car.angle - a0)
+        radii.append(v * 60.0 / yaw)
+    assert radii[0] < radii[1] < radii[2], f"radius must grow with speed, got {radii}"
+    assert radii[0] < 60, f"a slow car should still turn tightly, got {radii[0]:.0f}px"
+    assert radii[2] > 140, f"a fast car should sweep wide, got {radii[2]:.0f}px"
+    g.driving = None
+
+
+def test_sub_pixel_travel_is_carried_not_thrown_away():
+    """rect.move(int(dx), int(dy)) used to discard the fraction every step.
+
+    A car doing 0.9px/step moved zero pixels forever - which is how ambient
+    traffic deadlocked - and a diagonal lost 12% of its speed against a
+    cardinal, because the truncation happens per axis.
+    """
+    g = game()
+    car = _drive(g)
+    car.driver = None            # ambient traffic: the case that used to freeze
+    car.parked = False
+    start = _open_road_point()
+    car.rect.center = start
+    car.angle = 0.0
+    for _ in range(120):
+        car.velocity = 0.9
+        car.input_throttle = 0.0
+        car.input_steer = 0.0
+        car.input_handbrake = False
+        car.physics_step()
+    travelled = car.rect.centerx - start[0]
+    assert travelled > 100, f"a 0.9px/step car went nowhere in 2s: {travelled}px"
+
+    # ... and a diagonal covers the same ground as a cardinal. Measured a step
+    # at a time with the car snapped back to open road, so this is the travel
+    # the physics produces and not an argument about where the buildings are.
+    def run(angle):
+        home = _open_road_point()
+        c = M.Car(*home, variant='sedan')
+        c.driver = 'player'
+        c.angle = angle
+        total = 0.0
+        for _ in range(240):
+            c.rect.center = home
+            c.velocity = 3.0
+            c.input_throttle = 0.0
+            c.input_steer = 0.0
+            c.input_handbrake = False
+            c.physics_step()
+            total += math.hypot(c.rect.centerx - home[0], c.rect.centery - home[1])
+        return total
+    east = run(0.0)
+    diag = run(math.pi / 4)
+    assert abs(diag - east) / east < 0.04, f"diagonal {diag:.0f} vs east {east:.0f}"
+    g.driving = None
+
+
+def test_the_camera_never_loses_the_car_it_is_following():
+    """At speed the vertical look-ahead used to be 229px on a 180px half-
+    viewport, so driving north or south pushed the car off the screen."""
+    g = game()
+    car = _drive(g)
+    worst = 0.0
+    for k in range(8):
+        ang = k * math.tau / 8.0
+        x, y = M.MAP_WIDTH // 2, M.MAP_HEIGHT // 2
+        car.angle = ang
+        car.velocity = car.max_speed
+        for i in range(200):
+            car.rect.center = (int(x + math.cos(ang) * car.max_speed * i),
+                               int(y + math.sin(ang) * car.max_speed * i))
+            if not (60 < car.rect.centerx < M.MAP_WIDTH - 60
+                    and 60 < car.rect.centery < M.MAP_HEIGHT - 60):
+                break
+            g.camera.center_on(car.rect, g._camera_lead())
+            sx, sy = g.camera.apply_pos(car.rect.center)
+            assert 20 <= sx <= M.SCREEN_WIDTH - 20, f"car off screen in x at {math.degrees(ang):.0f} deg"
+            assert 20 <= sy <= M.SCREEN_HEIGHT - 20, f"car off screen in y at {math.degrees(ang):.0f} deg"
+            worst = max(worst, abs(sx - M.SCREEN_WIDTH / 2) / (M.SCREEN_WIDTH / 2),
+                        abs(sy - M.SCREEN_HEIGHT / 2) / (M.SCREEN_HEIGHT / 2))
+    assert worst < 0.6, f"the lead eats {worst:.0%} of the half-viewport"
+    g.driving = None
+
+
+def test_the_police_do_not_simply_outrun_every_car_you_can_steal():
+    """Escalation is numbers and aggression, not a speed the player cannot buy.
+
+    Every star used to be faster than the player's own top speed, so a
+    straight-line escape did not exist at any wanted level.
+    """
+    sedan = M.PLAYER_CAR_MAX_SPEED
+    assert M.COP_SPEED_BY_STAR[1] < sedan, "one star should be outrunnable in anything"
+    assert M.COP_SPEED_BY_STAR[2] < sedan
+    fast = M.PLAYER_CAR_MAX_SPEED * M.VEHICLE_TUNING['trans_am']['speed_factor']
+    assert M.COP_SPEED_BY_STAR[M.WANTED_MAX] < fast, (
+        "the fastest car in the game has to beat the top of the ladder, "
+        "or stealing it is decoration")
+    assert M.COP_SPEED_BY_STAR[M.WANTED_MAX] > sedan, (
+        "five stars in a standard sedan should not be a stroll")
+
+
+def test_you_cannot_be_arrested_through_the_window_of_a_moving_car():
+    g = game()
+    car = _drive(g)
+    car.rect.center = _open_road_point()
+    g.wanted_level = 3
+    g.police = []
+    cop = M.Car(*car.rect.center, color=M.POLICE_COLOR, variant='police')
+    cop.driver = 'police'
+    cop.rect.center = car.rect.center
+    g.police = [cop]
+    g.bust_meter = 0
+    car.velocity = M.BUST_MAX_SPEED + 2.0
+    for _ in range(M.BUST_CONTACT_STEPS * 2):
+        cop.rect.center = car.rect.center
+        car.velocity = M.BUST_MAX_SPEED + 2.0
+        g.update_police()
+    assert g.state != M.STATE_DEAD, "busted while driving flat out"
+    assert g.bust_meter == 0
+
+    # Stopped in the same spot, they do take you.
+    g.bust_meter = 0
+    for _ in range(M.BUST_CONTACT_STEPS + 8):
+        cop.rect.center = car.rect.center
+        car.velocity = 0.0
+        g.update_police()
+    assert g.state == M.STATE_DEAD, "a stopped car is an arrest"
+    g.state = M.STATE_PLAYING
+    g.wanted_level = 0
+    g.police = []
+    g.bust_meter = 0
+    g.driving = None
+
+
+def test_traffic_pulls_out_around_a_car_parked_in_its_lane():
+    """A kerbside car used to stop a lane forever: parking sat at 14-18px off
+    the centre line and the driving lane at 15px, so every parked car was an
+    immovable obstacle the follow rule braked to a halt behind."""
+    assert M.parking_KERB_OFFSET_MIN > M.traffic_LANE_OFFSET, (
+        "parked cars must not be parked in the driving lane")
+    g = game()
+    row = sorted(M.ROAD_LINES)[6]
+    y = row * M.TILE_SIZE + M.TILE_SIZE // 2
+    lane = M.traffic__lane_coord(0, row)
+    mover = M.Car(6 * M.TILE_SIZE, int(lane), variant='sedan')
+    mover.rect.center = (6 * M.TILE_SIZE, int(lane))
+    mover.angle = 0.0
+    mover.driver = None
+    mover.parked = False
+    M.traffic_init_car(mover)
+    M.traffic_snap_to_lane(mover)
+    blocker = M.Car(mover.rect.centerx + 150, int(lane), variant='sedan')
+    blocker.rect.center = (mover.rect.centerx + 150, int(lane))
+    blocker.angle = 0.0
+    blocker.velocity = 0.0
+    blocker.parked = True
+    x0 = mover.rect.centerx
+    for _ in range(420):
+        M.traffic_drive(mover, (mover, blocker))
+    assert mover.rect.centerx > blocker.rect.centerx + 40, (
+        f"traffic queued behind a parked car instead of passing it: "
+        f"moved {mover.rect.centerx - x0}px")
 
 
 def test_walking_slides_along_a_wall_instead_of_sticking():

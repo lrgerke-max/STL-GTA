@@ -49,9 +49,15 @@ SPRITE_SCALE_PED = 1.0
 SHADOW_DX = 3               # southeast, matching the building shadows
 SHADOW_DY = 3
 
-PARKED_CAR_COUNT = 30       # kerbside cars available to steal
-MOVING_CAR_COUNT = 22       # ambient traffic actually in motion
-PEDESTRIAN_COUNT = 90       # people on the street
+# Measured at 22 moving cars: a mean of 3.7 pairs of AI cars overlapping each
+# other at any moment, 11 at worst, and ambient traffic averaging 1.26 px/step
+# against its own 3.25 cap - i.e. permanently jammed. A 64px street simply
+# does not have room for that many cars once each one is also braking for its
+# neighbours. Fewer cars, moving properly, read as a busier city than more
+# cars stacked in a knot.
+PARKED_CAR_COUNT = 22       # kerbside cars available to steal
+MOVING_CAR_COUNT = 13       # ambient traffic actually in motion
+PEDESTRIAN_COUNT = 72       # people on the street
 
 # --- Population streaming -------------------------------------------------
 # The map is 100x100 tiles and the viewport sees 0.56% of it, so a population
@@ -79,16 +85,75 @@ POP_OFFSCREEN = 400         # px: past the screen corner, safe to teleport
 # throttle, so it was uncatchable on foot. Traffic speed
 # and lane discipline now live in the traffic_ai section, which owns the
 # tuning constants; wander_ai below is kept only as a fallback.
-PLAYER_CAR_MAX_SPEED = 8.6
-PLAYER_THROTTLE_RESPONSE = 0.72
-PLAYER_STEER_RESPONSE = 0.62
-PLAYER_STEER_LOCK = 1.90
+#
+# 8.6 px/step is 516 px/s across a 640px-wide viewport: you crossed the whole
+# screen in 1.2s and a city block in 1.0s, which is where "everything happens
+# faster than you can react" came from. 6.4 still crosses the entire 6400px
+# map in seventeen seconds - a proper cross-town chase - while leaving time to
+# read a junction before you are in it.
+PLAYER_CAR_MAX_SPEED = 6.4
+PLAYER_THROTTLE_RESPONSE = 0.44   # progressive pedal, not an on/off switch
+# Power tapers as you approach the ceiling, so the top of the range has to be
+# earned and holding it feels like something. Fraction of acceleration lost at
+# top speed.
+PLAYER_POWER_FADE = 0.55
+PLAYER_COAST_DRAG = 0.9885   # lifting off no longer scrubs a third of your speed
+PLAYER_BRAKE = 0.40
+
+# --- Cornering ------------------------------------------------------------
+# The old model integrated steer_angle and then multiplied the yaw by
+# (0.45 + 0.55 * speed_frac), so the car turned *harder* the faster it went:
+# 288 deg/s at top speed, a 103px radius that shrank to 43px when you slowed
+# down. Backwards, and the reason the car felt like it was on rails until it
+# suddenly was not.
+#
+# Now it is a bicycle model: yaw = speed * steer_angle * PLAYER_YAW_GAIN, with
+# the steering *lock* fading as speed rises. Radius therefore grows with
+# speed - 30px crawling, ~190px flat out - so you brake for corners, and yaw
+# peaks in the mid range exactly like a real car.
+PLAYER_YAW_GAIN = 0.74
+PLAYER_LOCK_FADE = 0.82      # fraction of steering lock given up at top speed
+PLAYER_STEER_RATE = 0.115    # of the gap to full lock closed per step
+PLAYER_STEER_RETURN = 0.20   # ... and how fast the wheel self-centres
+# Lateral grip budget, px/step^2. Ask the tyres for more cornering force than
+# this and the nose washes wide instead: carry too much speed into a bend and
+# you understeer into the far kerb, which is the entire skill of the game.
+PLAYER_GRIP = 0.215
+# The handbrake gets a LARGER budget, not a smaller one. Locking the rears
+# does not stop the front tyres steering - it stops the back holding a line,
+# which is the whole point: the nose comes round faster and the car keeps
+# travelling the way it was already going (LAT_RETAIN_HANDBRAKE below is what
+# carries the slide). Setting this below PLAYER_GRIP made pulling the
+# handbrake turn the car *slower* than not pulling it, measured at 89 deg/s
+# against 155.
+PLAYER_GRIP_HANDBRAKE = 0.40
+
+# --- Camera ---------------------------------------------------------------
+# The lead used to be `sin(angle) * v * 15 * aspect` on the vertical, which at
+# top speed is 229px of lead against a 180px half-viewport: driving north or
+# south the camera pushed the car clean off the bottom of the screen. Measured
+# 822 frames out of frame in a 1920-frame sweep. The lead is now expressed as
+# a fraction of each axis' own half-viewport, so it can never do that again -
+# and Camera.center_on clamps it a second time as a backstop.
+CAM_LEAD_STEPS = 16.0        # steps of travel the view tries to look ahead
+CAM_LEAD_MAX_X = 0.34        # of the half-viewport, horizontally
+CAM_LEAD_MAX_Y = 0.30        # ... and vertically, where there is less room
+CAM_LEAD_EASE = 0.075        # how fast the lead follows a change of direction
+CAM_SAFE_MARGIN_X = 96       # px of frame the player may never be pushed into
+CAM_SAFE_MARGIN_Y = 62
+CAM_FOOT_LEAD = 30.0         # on foot: a fixed nudge, there is no speed to read
 # The street grid. Every 8th tile index, starting at 4, is a road line. These
 # two numbers are the single source of truth - the props, parking and traffic
 # sections all derive from them rather than re-hardcoding 4 and 8.
 ROAD_ORIGIN = 4
 ROAD_STEP = 8
 ROAD_LINES = set(range(ROAD_ORIGIN, MAP_TILES_W, ROAD_STEP))
+
+# Speedometer scale. A bare 8.4 was calibrated against a top speed the car no
+# longer has, so the needle topped out at 54 - derive it instead, and a stock
+# sedan reads 85 while a Trans Am reads 95 whatever the tuning does next.
+HUD_TOP_MPH = 85
+HUD_MPH_PER_PX = HUD_TOP_MPH / PLAYER_CAR_MAX_SPEED
 
 RADAR_SIZE = 86             # GTA1 proportions, a shade larger than the old 78
 # The radar shows a WINDOW on the city, not the whole thing. At the old
@@ -164,8 +229,15 @@ INFRACTION_COOLDOWN = {
 }
 COP_SPAWN_MIN = 420         # px: cops arrive from off-screen, not from downtown
 COP_SPAWN_MAX = 900
-BUST_CONTACT_STEPS = 42     # ~0.7s of sustained contact before you get busted
-BUST_RELIEF = 2             # bust meter bleed-off per step once you break away
+BUST_CONTACT_STEPS = 54     # ~0.9s of sustained contact before you get busted
+BUST_RELIEF = 3             # bust meter bleed-off per step once you break away
+# You cannot be pulled out of a moving car. Below this, a cruiser leaning on
+# you counts as an arrest in progress; above it, it is just a ram - it hurts
+# and it shunts you, but the door stays shut. Without this one number a single
+# mistake at speed was terminal: touch a wall, lose your momentum for a second
+# and the chase was simply over, which is the "one error and you're caught"
+# complaint in a nutshell. Now a bad corner costs you your lead, not the run.
+BUST_MAX_SPEED = 2.4        # px/step
 HEAT_GRACE = FPS * 3        # steps clean before the wanted level starts to fall
 # Steps to shed one star, indexed by the level you are shedding *from*. Low
 # stars go fast so a one-star scrape resolves inside a block; high stars are
@@ -186,6 +258,16 @@ COP_SIGHT = 340             # px: reference figure; see COP_SIGHT_BY_STAR
 COP_SIGHT_FOV = 1.10        # radians: reference; see COP_FOV_BY_STAR
 COP_SIGHT_CLOSE = 90        # px: this close they hear you regardless of facing
 COP_SEARCH_STEPS = FPS * 10  # how long a cop hunts your last known position
+# Control, calling it in. A cop with no line of sight used to hunt one stale
+# point and then give up, so a chase died the moment you turned a corner - at
+# 6 px/step that is about a second, and the "chase across the map" never
+# happened. A car being driven hard down a public street is conspicuous:
+# every so often the units still looking get an updated fix on it. Stop, or
+# get off the road and out of sight, and the radio goes quiet - the hiding
+# mechanic is untouched, because hidden players broadcast nothing.
+COP_RADIO_STEPS = FPS * 2    # how often a searching unit gets a fresh fix
+COP_RADIO_SPEED = 3.0        # px/step below which you are not worth calling in
+COP_RADIO_RANGE = 1600       # px: how far the net coordinates over
 COP_SEARCH_WANDER = 150     # px it will cast around that point while searching
 COP_PATROL_STEPS = FPS * 8  # circling the block after the search runs dry
 
@@ -196,7 +278,15 @@ COP_PATROL_STEPS = FPS * 8  # circling the block after the search runs dry
 # chance. Index == wanted level.
 COP_COUNT_BY_STAR = (0, 0, 1, 2, 3, 4)      # cruisers
 COP_FOOT_BY_STAR = (0, 1, 1, 1, 0, 0)       # beat cops on foot
-COP_SPEED_BY_STAR = (0.0, 8.4, 9.0, 9.6, 10.2, 10.8)
+# Every one of these used to sit ABOVE the player's own top speed, so a
+# straight-line flee from two stars closed 274px in ten seconds and there was
+# no such thing as outrunning the police - only outliving them. Escalation is
+# now numbers, aggression and how long they hold the scent; pace is pegged to
+# the player's car. A standard sedan (PLAYER_CAR_MAX_SPEED) outruns one and
+# two stars, matches three, and is marginally slower than four and five -
+# which is what makes stealing a Trans Am (speed_factor 1.12) at five stars
+# the right move rather than a cosmetic one.
+COP_SPEED_BY_STAR = (0.0, 5.8, 6.1, 6.4, 6.7, 7.0)
 # Absolute sight radius in px, NOT a multiple of a base. The screen is only
 # 640x360, so anything over ~300 lets a cop see you from off the edge of the
 # frame, which always reads as cheating however true it is.
@@ -238,6 +328,26 @@ HIDE_ARCH_SCALE = 6.0       # under the span of the Arch, it drains twice again
 # no chance to react. One hit now costs one hit, then you get thrown clear and
 # briefly cannot be hit again.
 HURT_IMMUNE_STEPS = 45      # 0.75s of i-frames after a car hits you on foot
+# One scrape is one impact. The three contact-damage sites (a wall, a rammed
+# car, a cruiser leaning on you) all run once per step for as long as the rects
+# overlap; without this a half-second graze was thirty hits.
+CRASH_DAMAGE_COOLDOWN = 20  # steps between impacts from sustained contact
+# What a crash costs YOU, per px/step of impact speed. The damage you deal is
+# deliberately left alone - ramming a car off the road should still wreck it in
+# a handful of hits - but the car you are sitting in has to survive a chase
+# across the city, and at the old figures forty seconds of hard driving totalled
+# it whether or not the police were anywhere near.
+PLAYER_WALL_DAMAGE = 0.80
+PLAYER_RAM_DAMAGE = 0.45
+# Impact thresholds, as fractions of the player's top speed rather than the
+# literals they used to be. Every one of these was authored against a 9.5 top
+# speed; left as numbers they silently became "only at 70% of flat out" the
+# moment the car got slower, which is how a game quietly stops reacting to
+# anything you do.
+IMPACT_MIN_SPEED = PLAYER_CAR_MAX_SPEED * 0.32   # worth a sound and sparks
+IMPACT_HURT_SPEED = PLAYER_CAR_MAX_SPEED * 0.42  # worth damage
+IMPACT_HEAVY_SPEED = PLAYER_CAR_MAX_SPEED * 0.68  # worth a frame of hitstop
+RAM_SPEED = PLAYER_CAR_MAX_SPEED * 0.50          # a shunt, not a nudge
 ROADKILL_DAMAGE = 3.4       # HP per px/step of closing speed
 ROADKILL_MAX = 30.0         # HP ceiling on a single hit, whatever the speed
 RESPAWN_IMMUNE_STEPS = FPS * 2   # you come to next to live Memorial Drive traffic
@@ -486,7 +596,12 @@ STREET_COLS = {
 # City of St. Louis. One of them has had a cone in it for years, and it is the
 # same cone in the same hole every session, because that is also true.
 POTHOLE_COUNT = 34
-POTHOLE_DAMAGE = 7.0
+# A pothole is a joke and a jolt, not a health bar. At 7.0 the thirty-four of
+# them scattered across the city were quietly the single largest thing eating a
+# chase car - measured at 46 of 100hp over forty seconds of driving, with no
+# police involved at all. It still costs you 12% of your speed and a faceful of
+# screen shake, which in a pursuit is the part that hurts.
+POTHOLE_DAMAGE = 2.5
 POTHOLE_RADIUS = 22
 
 # --- The bank under the Arch ---------------------------------------------
@@ -559,8 +674,20 @@ MULT_DECAY_STEP = FPS * 3  # steps per rung shed after that
 # --- Kill Frenzy -----------------------------------------------------------
 FRENZY_SECONDS = 45
 FRENZY_COOLDOWN = FPS * 10   # after one ends before the next icon appears
+# The streak ladder. It used to stop at 20 and the window that held a streak
+# together was two seconds, which on a 64px street is about one person - so the
+# ladder above ten was decoration nobody ever saw. The window now grows with
+# the streak (COMBO_WINDOW below), and the rungs keep coming.
 COMBO_SHOUTS = {5: "GOURANGA!", 10: "SLINGER STREAK",
-                15: "TOTAL CARNAGE", 20: "ST LOUIS HATES YOU"}
+                15: "TOTAL CARNAGE", 20: "ST LOUIS HATES YOU",
+                25: "MOUND CITY MASSACRE", 30: "CALL THE ARCHBISHOP",
+                40: "SOUTH SIDE IS CLOSED", 50: "GATEWAY TO THE OTHER PLACE"}
+# Steps a streak survives without a fresh hit. Two seconds flat meant a streak
+# died between one crowd and the next; it now stretches as the streak grows, so
+# a run through three blocks of sidewalk stays a single run.
+COMBO_WINDOW_MIN = FPS * 2
+COMBO_WINDOW_MAX = FPS * 5
+COMBO_WINDOW_RUNGS = 14     # streak length at which the window is fully open
 
 # --- On-foot player health ----------------------------------------------
 PLAYER_MAX_HP = 100.0
@@ -568,10 +695,14 @@ PLAYER_HP_REGEN = 0.06      # per step, when not freshly hit
 
 # --- Splatter -------------------------------------------------------------
 # Below this closing speed a pedestrian is knocked down and gets up again;
-# at or above it they do not.
-SPLAT_SPEED = 5.2
+# at or above it they do not. Both of these were authored against a 9.5 top
+# speed (0.55 and 0.26 of it); against the current PLAYER_CAR_MAX_SPEED the old
+# literals would have put splattering at 81% of flat out, i.e. almost never -
+# which is the wrong way round, because running people down is the best thing
+# in the game. Kept as fractions so they cannot drift out of scale again.
+SPLAT_SPEED = PLAYER_CAR_MAX_SPEED * 0.55
 # Below this a car-on-pedestrian contact is a bump, not an offence.
-NUDGE_SPEED = 2.5
+NUDGE_SPEED = PLAYER_CAR_MAX_SPEED * 0.27
 DECAL_MAX = 64              # ground stains kept before the oldest is dropped
 
 # --- Combat ---------------------------------------------------------------
@@ -5031,8 +5162,15 @@ assert (parking_CAR_W, parking_CAR_H) == (VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H),
     "kerb slots are sized for the default car collider"
 
 # --- Parking layout ---
-parking_KERB_OFFSET_MIN = 14        # px from the tile centre line to the car centre
-parking_KERB_OFFSET_MAX = 18
+# Parked cars used to sit 14-18px off the tile centre line while the moving
+# lane sits at traffic_LANE_OFFSET = 15px off the SAME line: every kerbside car
+# was parked in the middle of the driving lane. Ambient traffic therefore had
+# to brake to a dead stop behind each one, forever, and everything behind it
+# queued up - which is where the knots of stacked cars came from. Parking now
+# hugs the kerb (a 34x18 car at 23px still fits inside the 64px road tile), and
+# traffic_drive() pulls out around whatever is left.
+parking_KERB_OFFSET_MIN = 21        # px from the tile centre line to the car centre
+parking_KERB_OFFSET_MAX = 23
 parking_SLOT_SPACING = 38           # 34px car + a 4px bumper gap
 parking_MIN_SLOTS_PER_SEGMENT = 2   # a stub too short for a pair gets no parking
 parking_RUN_MIN = 2                 # cars per unbroken run
@@ -5397,12 +5535,25 @@ traffic_JUNCTION_BOX = 52.0          # radius around a junction centre counted a
 traffic_YIELD_CARE_DIST = 84.0       # only yield once this close to the junction
 traffic_YIELD_CLEAR_DIST = 22.0      # never stop once this deep into the junction
 
-traffic_HALT_PATIENCE = 150          # frames stopped before the anti-deadlock creep
+traffic_HALT_PATIENCE = 75           # frames stopped before the anti-deadlock creep
 traffic_CREEP_FRAMES = 90            # how long a creep lasts
 traffic_CREEP_SPEED = 1.5            # creep pace, slow enough to still read as yielding
 traffic_PROBE_AHEAD = 26             # px in front of the nose checked for a wall
 
 traffic_SEGMENT_SCAN = 9             # tiles scanned ahead when validating an exit
+
+# --- Pulling out around a stopped obstacle --------------------------------
+# A kerbside car, a wreck, a car the player rammed into the gutter: any of
+# them used to stop a lane permanently, because the follow rule brakes for
+# stationary traffic and nothing ever moved it. Real traffic goes around.
+# When something stopped sits in the cone, the lane target shifts toward the
+# centre line by up to traffic_PASS_SHIFT px and the speed floor keeps the car
+# rolling, so it eases out, passes, and tucks back in.
+traffic_PASS_LOOK = 78.0             # px ahead a stopped obstacle triggers a pass
+traffic_PASS_SHIFT = 16.0            # px toward the centre line at full commit
+traffic_PASS_RATE = 0.09             # how fast the lane target slides across
+traffic_PASS_SPEED = 1.45            # speed floor while easing past something
+traffic_PASS_STILL = 0.35            # px/step below which a neighbour is "stopped"
 
 traffic_TILE_ROAD = TILE_ROAD
 
@@ -5501,15 +5652,14 @@ def traffic__lane_coord(d, line):
     return base - hy * traffic_LANE_OFFSET
 
 
-def traffic__lane_clamped(d, line, col, row):
-    """Lane coordinate pulled in so the car's AABB clears a collidable kerb.
+def traffic__lane_bounds(d, line, col, row):
+    """(lo, hi) the lane coordinate may occupy without grazing a kerb.
 
     Car rects never rotate: a car is 34px wide in X whatever way it points, so
     a north/south lane at the full offset would graze a building that abuts the
-    road.  Only tightens the lane, never widens it past the ideal offset.
+    road.
     """
     hx, hy = traffic__DIRS[d]
-    lane = traffic__lane_coord(d, line)
     base = traffic__centre(line)
     half = traffic__TS * 0.5
     if hy == 0:
@@ -5523,9 +5673,28 @@ def traffic__lane_clamped(d, line, col, row):
         hi_open = traffic__is_open(line + 1, row)
     lo = base - half - traffic_LANE_OVERHANG if lo_open else base - half + extent + traffic_LANE_MARGIN
     hi = base + half + traffic_LANE_OVERHANG if hi_open else base + half - extent - traffic_LANE_MARGIN
+    return lo, hi
+
+
+def traffic__lane_clamped(d, line, col, row, shift=0.0):
+    """Lane coordinate pulled in so the car's AABB clears a collidable kerb.
+
+    ``shift`` is the pull-out offset used to pass a stopped obstacle; it is
+    applied before the clamp, so easing around a parked car can never ease the
+    car into a wall instead.  Only tightens the lane, never widens it past the
+    ideal offset.
+    """
+    lane = traffic__lane_coord(d, line) + shift
+    lo, hi = traffic__lane_bounds(d, line, col, row)
     if lo > hi:
-        return base
+        return traffic__centre(line)
     return min(hi, max(lo, lane))
+
+
+def traffic__pass_axis(d):
+    """Sign that converts a "shift right of the heading" into lane coords."""
+    hx, hy = traffic__DIRS[d]
+    return hx if hy == 0 else -hy
 
 
 # --------------------------------------------------------------------------
@@ -5552,6 +5721,7 @@ def traffic__new_state(car):
         'wait': 0,
         'halt': 0,
         'creep': 0,
+        'pass': 0.0,            # current pull-out offset, lane coords
     }
 
 
@@ -5740,16 +5910,27 @@ def traffic__axis_of(other):
 
 
 def traffic__follow_cap(car, neighbours, fx, fy):
-    """Speed allowed by whatever is in the forward cone (None = unrestricted).
+    """Scan the forward cone.  Returns (cap, pass_side).
+
+    ``cap`` is the speed the car in front allows, or None for a clear road.
+    ``pass_side`` is -1 / +1 when something *stopped* is sitting in the cone
+    and the lane should be shifted that way to get around it, or 0 for
+    nothing to pull out for.
 
     Oncoming traffic is deliberately ignored.  It is separated by a full lane
     width, it passes in a few frames, and main.py runs no car-car collision
     between AI cars anyway -- whereas braking for it deadlocks both cars
     permanently: a stopped car cannot steer (the physics needs |velocity| > 0.15)
-    so neither can ever pull back into its own lane.  Stationary cars still
-    count, so a parked or jammed car is always given room.
+    so neither can ever pull back into its own lane.
+
+    Stationary obstacles no longer set a hard cap either. Parked cars, wrecks
+    and jammed cars sit in the driving lane all day; braking to nothing behind
+    one and waiting for it to move is a wait that never ends, and it was the
+    single biggest source of stacked-up traffic. They ask for a pass instead.
     """
     cap = None
+    pass_side = 0
+    nearest_static = traffic_PASS_LOOK
     px, py = car.rect.centerx, car.rect.centery
     for other in neighbours:
         if other is car:
@@ -5759,17 +5940,27 @@ def traffic__follow_cap(car, neighbours, fx, fy):
         f = dx * fx + dy * fy
         if f <= 0.0 or f > traffic_FOLLOW_LOOK:
             continue
-        if abs(dx * -fy + dy * fx) > traffic_FOLLOW_LAT:
+        lat = dx * -fy + dy * fx
+        if abs(lat) > traffic_FOLLOW_LAT:
             continue
-        if abs(other.velocity) > 0.4:
+        moving = abs(other.velocity) > traffic_PASS_STILL
+        if moving and abs(other.velocity) > 0.4:
             if math.cos(other.angle) * fx + math.sin(other.angle) * fy < 0.25:
                 continue                     # oncoming: it will pass, don't brake
+        if not moving:
+            # Something parked in our way. Go around it rather than queue.
+            if f < nearest_static:
+                nearest_static = f
+                # Pull toward whichever side it is NOT on; dead ahead, pull
+                # left, which on right-hand traffic is toward the centre line.
+                pass_side = -1 if lat >= 0.0 else 1
+            continue
         allow = (f - traffic_FOLLOW_MIN_GAP) * traffic_FOLLOW_GAIN
         if allow < 0.0:
             allow = 0.0
         if cap is None or allow < cap:
             cap = allow
-    return cap
+    return cap, pass_side
 
 
 def traffic__should_yield(car, st, neighbours, jcol, jrow, dist_j):
@@ -5891,8 +6082,23 @@ def traffic_drive(car, neighbours=()):
                 dist_j = 1e9
                 along = px * hx + py * hy
 
+    # --- pull out around anything stopped in the lane ----------------------
+    # Done before the steering so the lane target already includes the offset.
+    fx0 = math.cos(car.angle)
+    fy0 = math.sin(car.angle)
+    follow, pass_side = traffic__follow_cap(car, neighbours, fx0, fy0)
+    want_pass = pass_side * traffic_PASS_SHIFT * traffic__pass_axis(d)
+    st['pass'] += (want_pass - st['pass']) * traffic_PASS_RATE
+    if abs(st['pass']) < 0.4:
+        st['pass'] = 0.0
+
     # --- pure-pursuit steering toward the lane centre ----------------------
-    lane = traffic__lane_clamped(d, st['line'], col, row)
+    lane = traffic__lane_clamped(d, st['line'], col, row, st['pass'])
+    # Did the pull-out survive the kerb clamp? On a bridge deck, or a street
+    # walled in on both sides, there is nowhere to go: the pass is refused and
+    # the car queues normally instead of driving into the obstacle at the
+    # pass speed floor.
+    room_to_pass = abs(lane - traffic__lane_clamped(d, st['line'], col, row)) > 6.0
     if hy == 0:
         tx = px + hx * traffic_LOOKAHEAD
         ty = lane
@@ -5920,11 +6126,13 @@ def traffic_drive(car, neighbours=()):
         eased = traffic_TRAFFIC_MAX_SPEED - (err - 0.30) * 3.0
         target = min(target, max(1.5, eased))
 
-    fx = math.cos(car.angle)
-    fy = math.sin(car.angle)
-    follow = traffic__follow_cap(car, neighbours, fx, fy)
     if follow is not None and follow < target:
         target = follow
+
+    # Easing out around something stopped: keep rolling. Braking to a halt
+    # beside a parked car is how a lane used to die permanently.
+    if pass_side and room_to_pass and target < traffic_PASS_SPEED:
+        target = traffic_PASS_SPEED
 
     if st['creep'] <= 0 and traffic__should_yield(car, st, neighbours, jcol, jrow, dist_j):
         target = 0.0
@@ -9032,8 +9240,16 @@ class Camera:
         self.center_on(rect)
 
     def center_on(self, rect, lead=(0.0, 0.0)):
-        self.lead_x += (lead[0] - self.lead_x) * 0.11
-        self.lead_y += (lead[1] - self.lead_y) * 0.11
+        self.lead_x += (lead[0] - self.lead_x) * CAM_LEAD_EASE
+        self.lead_y += (lead[1] - self.lead_y) * CAM_LEAD_EASE
+        # Backstop. Whatever the caller asks for, the subject stays inside the
+        # frame by at least the safe margin: a look-ahead that pushes the car
+        # you are steering off the bottom of the screen is never the right
+        # answer, and that is exactly what the old vertical lead did at speed.
+        cap_x = max(0.0, SCREEN_WIDTH * 0.5 - CAM_SAFE_MARGIN_X)
+        cap_y = max(0.0, SCREEN_HEIGHT * 0.5 - CAM_SAFE_MARGIN_Y)
+        self.lead_x = max(-cap_x, min(cap_x, self.lead_x))
+        self.lead_y = max(-cap_y, min(cap_y, self.lead_y))
         self.x = int(rect.centerx + self.lead_x) - SCREEN_WIDTH // 2
         self.y = int(rect.centery + self.lead_y) - SCREEN_HEIGHT // 2
         self.x = max(0, min(MAP_WIDTH - SCREEN_WIDTH, self.x))
@@ -9074,12 +9290,20 @@ class Car:
         self.angle = random.uniform(0, math.tau)
         self.velocity = 0.0
         self.steer_angle = 0.0
+        # Sub-pixel travel carried between steps; see take_subpixel().
+        self.sub_x = 0.0
+        self.sub_y = 0.0
         # Every vehicle used to top out at exactly 9.5 under the player -
         # the bus, the refuse truck, the Vespa and the sedan were the same
         # car, and only the time taken to reach it differed. speed_factor was
         # applied by the AI paths and never to you, so which car you stole
         # made no difference at all. It does now.
-        self.max_speed = 9.5 * tune.get('speed_factor', 1.0)
+        #
+        # It is PLAYER_CAR_MAX_SPEED, not a second literal: toggle_enter_exit
+        # sets that on the way in and apply_grub_to_car re-reads base_max_speed
+        # every step, so a different number here silently won the argument and
+        # the documented player top speed was never the one in effect.
+        self.max_speed = PLAYER_CAR_MAX_SPEED * tune.get('speed_factor', 1.0)
         # The ceiling this car came with. Power-ups and the police AI both
         # write max_speed, so anything that raises it needs a baseline it can
         # restore rather than compounding on itself every step.
@@ -9114,10 +9338,11 @@ class Car:
         self.stall = 0           # steps stopped in traffic; feeds the jam breaker
         # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
         # counting down) then explodes. Trucks soak more, the scooter is paper.
-        self.max_hp = {'bus': 170.0, 'garbage_truck': 155.0, 'box_truck': 120.0,
-                       'vespa': 26.0}.get(self.variant, 80.0)
+        self.max_hp = {'bus': 200.0, 'garbage_truck': 185.0, 'box_truck': 145.0,
+                       'vespa': 32.0}.get(self.variant, 100.0)
         self.hp = self.max_hp
         self.burn = 0            # >0 = on fire, steps until it goes up
+        self.crash_cd = 0        # steps until this car can take contact damage again
 
     def damage(self, amount):
         """Take `amount` of impact damage; light the fuse at zero HP."""
@@ -9128,6 +9353,54 @@ class Car:
             self.hp = 0.0
             self.burn = int(FPS * 1.4)   # ~1.4s of smoking before the blast
 
+    def crash_damage(self, amount):
+        """Impact damage from *sustained contact* - a wall, a car, a cruiser.
+
+        Those three sites fire once per simulation step for as long as the two
+        rects overlap, and nothing rate-limited them: leaning on a kerb for a
+        second was sixty separate impacts and about 420 points of damage
+        against an 80hp car. Every scripted chase in the playtest rig ended
+        the same way inside fifteen seconds - WRECK TOTALLED - with the
+        nearest cruiser still five hundred pixels back. One scrape is one
+        impact now, however long you hold it.
+        """
+        if self.crash_cd > 0:
+            return
+        self.crash_cd = CRASH_DAMAGE_COOLDOWN
+        self.damage(amount)
+
+    def tick_crash_cooldown(self):
+        if self.crash_cd > 0:
+            self.crash_cd -= 1
+
+    def take_subpixel(self, dx, dy):
+        """Bank this step's float travel and hand back whole pixels.
+
+        pygame.Rect holds integers, so `rect.move(int(dx), int(dy))` threw
+        away the fraction of every single step. That is not a rounding
+        nicety, it was the engine's largest single bug:
+
+          * a car travelling 0.9 px/step moved ZERO pixels, forever, which is
+            how ambient traffic ended up in permanent knots - the lead car of
+            a queue creeping at under a pixel a step could never actually
+            leave, so everything behind it stopped too;
+          * on a diagonal the loss is per axis, so heading 45 degrees cost 12%
+            of your speed against heading due east - the car was measurably
+            faster along the compass points than between them;
+          * 6.10 and 6.40 px/step both truncated to 6, which is why a cop
+            0.3 px/step slower than you never fell behind.
+
+        Carrying the remainder makes travel exact over time in every
+        direction, for every vehicle.
+        """
+        self.sub_x += dx
+        self.sub_y += dy
+        mx = int(self.sub_x)          # trunc toward zero; the sign is kept
+        my = int(self.sub_y)
+        self.sub_x -= mx
+        self.sub_y -= my
+        return mx, my
+
     def move_forward_check(self, dx, dy):
         temp = self.rect.move(int(dx), int(dy))
         if is_blocked(temp) or not (0 <= temp.left and temp.right <= MAP_WIDTH
@@ -9137,41 +9410,77 @@ class Car:
         return True
 
     def physics_step(self):
+        # Two handling models live here. Anything with a driver - you or a
+        # cruiser - gets the bicycle model below, where the turning radius
+        # grows with speed and the tyres have a finite grip budget. Ambient
+        # traffic (driver is None) keeps the original speed-proportional turn,
+        # because traffic_drive()'s whole lane-following geometry is tuned
+        # against "radius == max_speed / steer_angle" and rewriting the
+        # physics under it would put every AI car in the kerb.
+        human = self.driver is not None
+
         if self.input_throttle > 0:
-            response = PLAYER_THROTTLE_RESPONSE if self.driver == 'player' else 1.0
+            if human:
+                # Power fades toward the ceiling: the last of the top end has
+                # to be worked for instead of arriving in half a second.
+                frac = min(1.0, abs(self.velocity) / max(1.0, self.max_speed))
+                response = PLAYER_THROTTLE_RESPONSE * (1.0 - PLAYER_POWER_FADE * frac)
+            else:
+                response = 1.0
             self.velocity += self.acceleration * self.input_throttle * response
         elif self.input_throttle < 0:
-            self.velocity += self.brake_force * self.input_throttle
+            brake = PLAYER_BRAKE if human else self.brake_force
+            self.velocity += brake * self.input_throttle
         self.velocity = max(-self.max_speed / 2, min(self.max_speed, self.velocity))
 
         if self.input_throttle == 0:
-            self.velocity *= self.drag
+            self.velocity *= PLAYER_COAST_DRAG if human else self.drag
             if abs(self.velocity) < 0.02:
                 self.velocity = 0.0
 
-        if abs(self.velocity) > 0.15:
-            reverse = -1 if self.velocity < 0 else 1
-            steer_response = PLAYER_STEER_RESPONSE if self.driver == 'player' else 1.0
-            steer_lock = PLAYER_STEER_LOCK if self.driver == 'player' else 2.2
-            self.steer_angle += self.input_steer * self.max_steer * reverse * steer_response
-            self.steer_angle = max(-self.max_steer * steer_lock,
-                                   min(self.max_steer * steer_lock, self.steer_angle))
-            speed_frac = abs(self.velocity) / self.max_speed
-            # The player keeps usable steering authority at parking speeds so a
-            # car can be lined up with a gap in a tight street; AI traffic keeps
-            # the old pure speed-proportional turn so its lane-following is
-            # unchanged.
-            turn_scale = (0.45 + 0.55 * speed_frac) if self.driver == 'player' else speed_frac
-            self.angle += self.steer_angle * min(1.0, turn_scale)
-        if self.input_steer == 0:
-            self.steer_angle *= 0.8
+        hb = bool(self.input_handbrake) and self.driver == 'player'
+        if human:
+            # --- steering: speed-sensitive lock, rate-limited -------------
+            # Lock fades as speed rises, so the wheel you can actually use at
+            # 6 px/step is a quarter of the wheel you have when parking. That
+            # single term is what turns a twitchy hovercraft into a car.
+            speed_frac = min(1.0, abs(self.velocity) / max(1.0, self.max_speed))
+            lock = self.max_steer * (1.0 - PLAYER_LOCK_FADE * speed_frac)
+            if hb:
+                lock *= HANDBRAKE_STEER
+            want = self.input_steer * lock
+            rate = PLAYER_STEER_RATE if self.input_steer else PLAYER_STEER_RETURN
+            self.steer_angle += (want - self.steer_angle) * rate
+            self.steer_angle = max(-lock, min(lock, self.steer_angle))
+            if abs(self.velocity) > 0.12:
+                # Bicycle model. Yaw is proportional to how fast the car is
+                # actually travelling, so a stationary car cannot spin on the
+                # spot and a fast one sweeps wide. velocity is signed, which
+                # is what makes reversing swing the nose the other way - the
+                # old model had to special-case that and got it backwards.
+                yaw = self.velocity * self.steer_angle * PLAYER_YAW_GAIN
+                # ... but only up to what the tyres will hold. Over-ask and
+                # the nose washes wide: understeer, not a hidden speed cap.
+                grip = PLAYER_GRIP_HANDBRAKE if hb else PLAYER_GRIP
+                demand = abs(self.velocity * yaw)
+                if demand > grip:
+                    yaw *= grip / demand
+                self.angle += yaw
+        else:
+            if abs(self.velocity) > 0.15:
+                reverse = -1 if self.velocity < 0 else 1
+                self.steer_angle += self.input_steer * self.max_steer * reverse
+                self.steer_angle = max(-self.max_steer * 2.2,
+                                       min(self.max_steer * 2.2, self.steer_angle))
+                self.angle += self.steer_angle * min(1.0, abs(self.velocity) / self.max_speed)
+            if self.input_steer == 0:
+                self.steer_angle *= 0.8
 
         # --- grip ---------------------------------------------------------
         # Rotating the nose does not rotate the car's momentum with it. The
         # difference between the two is the lateral component, and the tyres
         # scrub it away over the next few steps - fast with grip, slowly with
         # the handbrake down, which is what lets the back end come round.
-        hb = bool(self.input_handbrake) and self.driver == 'player'
         retain = LAT_RETAIN_HANDBRAKE if hb else LAT_RETAIN
         prev_angle = getattr(self, '_prev_angle', self.angle)
         turned = (self.angle - prev_angle + math.pi) % math.tau - math.pi
@@ -9186,8 +9495,10 @@ class Car:
             self.velocity *= HANDBRAKE_DRAG
 
         fwd_x, fwd_y = math.cos(self.angle), math.sin(self.angle)
-        dx = fwd_x * self.velocity - fwd_y * self.vlat
-        dy = fwd_y * self.velocity + fwd_x * self.vlat
+        dx, dy = self.take_subpixel(fwd_x * self.velocity - fwd_y * self.vlat,
+                                    fwd_y * self.velocity + fwd_x * self.vlat)
+        if dx == 0 and dy == 0:
+            return False               # under a pixel this step; it is banked
         if self.move_forward_check(dx, dy):
             return False
         # Blocked head-on. Try each axis alone so the car slides along the wall
@@ -9195,14 +9506,15 @@ class Car:
         # was most of what made the narrow streets feel undriveable. An axis
         # only counts as a slide if it actually had travel in it: hitting a
         # wall square-on (one axis ~0) is a real thunk, not a free slide.
-        slid_x = abs(dx) >= 1.0 and self.move_forward_check(dx, 0.0)
-        slid_y = abs(dy) >= 1.0 and self.move_forward_check(0.0, dy)
+        slid_x = dx != 0 and self.move_forward_check(dx, 0)
+        slid_y = dy != 0 and self.move_forward_check(0, dy)
         if slid_x or slid_y:
             self.velocity *= 0.86      # scrub a little speed on the scrape
             self.vlat *= 0.5
             return False
         self.velocity *= -0.18         # true head-on: soft stop, faint kickback
         self.vlat = 0.0
+        self.sub_x = self.sub_y = 0.0  # do not spend banked travel into a wall
         self.unwedge()
         return True  # collided
 
@@ -10382,7 +10694,34 @@ class Game:
         if len(self.decals) > DECAL_MAX:
             del self.decals[:len(self.decals) - DECAL_MAX]
 
-    def splatter_ped(self, ped, impulse, score=True):
+    def combo_window(self):
+        """How long the current streak survives without a fresh hit.
+
+        A flat two seconds meant a streak died in the gap between one knot of
+        people and the next, so nothing above the second rung of the ladder
+        was reachable. It opens up as the streak grows: get one going and the
+        game gives you room to keep it.
+        """
+        t = min(1.0, self.combo / float(COMBO_WINDOW_RUNGS))
+        return int(COMBO_WINDOW_MIN + (COMBO_WINDOW_MAX - COMBO_WINDOW_MIN) * t)
+
+    def bump_combo(self, world_pos, base, speed=0.0):
+        """One rung of a rampage streak: score, shout, heat."""
+        self.combo += 1
+        self.combo_timer = self.combo_window()
+        # Speed is the whole read on a splatter - a 6 px/step hit through a
+        # crowd should pay very differently from rolling into somebody at
+        # walking pace, and it did not before.
+        boost = 1.0 + min(1.0, speed / max(1.0, PLAYER_CAR_MAX_SPEED)) * 0.9
+        self.add_score(int(base * min(self.combo, 16) * boost), world_pos)
+        if self.combo in COMBO_SHOUTS:
+            self.add_callout(COMBO_SHOUTS[self.combo], hud_HUD_RED, scale=2)
+            self.bump_multiplier(1)
+        if self.combo == 12:
+            self.wanted_level = max(self.wanted_level, 3)
+            self.add_callout("YOU MONSTER", hud_HUD_RED)
+
+    def splatter_ped(self, ped, impulse, score=True, speed=0.0):
         """Kill a pedestrian: gore, a stain that stays, and a replacement
         walker somewhere else so the street never empties out."""
         pos = ped.rect.center
@@ -10394,17 +10733,9 @@ class Game:
             nx, ny = random_open_spawn()
             self.pedestrians.append(Pedestrian(nx, ny, self._ped_kind_for(nx, ny)))
         if score:
-            self.combo += 1
-            self.combo_timer = FPS * 2
-            self.add_score(12 * min(self.combo, 12), pos)
+            self.bump_combo(pos, 12, speed)
             self.frenzy_hit('ped')
             self.wanted_bump(1, 'pedestrian')
-            if self.combo in COMBO_SHOUTS:
-                self.add_callout(COMBO_SHOUTS[self.combo], hud_HUD_RED, scale=2)
-                self.bump_multiplier(1)
-            if self.combo == 12:
-                self.wanted_level = max(self.wanted_level, 3)
-                self.add_callout("YOU MONSTER", hud_HUD_RED)
         # everyone who saw it runs
         for other in self.pedestrians:
             ox = other.rect.centerx - pos[0]
@@ -10972,7 +11303,12 @@ class Game:
         pr = self.player_rect
         for car in list(self.cars) + list(self.police):
             speed = abs(car.velocity)
-            if speed <= 4.0 or not car.rect.colliderect(pr.inflate(2, 2)):
+            # The same threshold that decides whether a car kills a pedestrian
+            # decides whether one hurts you: on foot you are a pedestrian, and
+            # the rule reading both ways is what makes it learnable. (It used
+            # to be a bare 4.0, tuned against a top speed the game no longer
+            # has.)
+            if speed < SPLAT_SPEED or not car.rect.colliderect(pr.inflate(2, 2)):
                 continue
             # Capped, so even a ten-star cruiser cannot take a third of the
             # bar off you in a single touch.
@@ -11635,6 +11971,72 @@ class Game:
             self.player_rect.center = probe.center
 
     # ---------------- update ----------------
+    def unstack_traffic(self):
+        """Push overlapping AI cars apart by a pixel a step.
+
+        main.py deliberately runs no car-to-car collision between AI cars -
+        adding one deadlocks the grid, because a stopped car cannot steer.
+        The cost of that was cars sitting *inside* each other: measured at a
+        mean of 3.7 overlapping pairs on screen, 11 at worst, which is the
+        "piling up on top of each other" you can see from the street. A
+        one-pixel mutual shove is not a collision response - it never changes
+        a velocity or a heading, so the lane logic is untouched - but two
+        cars can no longer occupy the same paint.
+        """
+        movers = [c for c in self.cars
+                  if c.driver is None and not c.parked and c is not self.driving]
+        for i, a in enumerate(movers):
+            ar = a.rect
+            for b in movers[i + 1:]:
+                if not ar.colliderect(b.rect):
+                    continue
+                dx = ar.centerx - b.rect.centerx
+                dy = ar.centery - b.rect.centery
+                if dx == 0 and dy == 0:
+                    dx = 1
+                # Shove along the dominant axis only: a diagonal nudge on a
+                # 64px street just puts both cars in the kerb.
+                if abs(dx) >= abs(dy):
+                    axes = ((1 if dx > 0 else -1, 0), (0, 1 if dy >= 0 else -1))
+                else:
+                    axes = ((0, 1 if dy > 0 else -1), (1 if dx >= 0 else -1, 0))
+                for car, sign in ((a, 1), (b, -1)):
+                    # Preferred axis first, the other one as a fallback: on a
+                    # bridge deck or a walled street the sideways shove has
+                    # nowhere to go and the cars would stay welded together.
+                    for px_, py_ in axes:
+                        moved = car.rect.move(px_ * sign, py_ * sign)
+                        if (0 <= moved.left and moved.right <= MAP_WIDTH
+                                and 0 <= moved.top and moved.bottom <= MAP_HEIGHT
+                                and not is_blocked(moved)):
+                            car.rect.topleft = moved.topleft
+                            break
+
+    def _camera_lead(self):
+        """How far ahead of the player the view should sit, in world px.
+
+        Each axis is capped at its own fraction of its own half-viewport, so
+        the amount of road you get ahead of you scales with speed but the car
+        is always comfortably inside the frame. The vertical budget is
+        smaller because the vertical half-viewport is smaller - the previous
+        version scaled it *up* by the aspect ratio and drove the car off the
+        bottom of the screen at anything over half throttle.
+        """
+        half_w = SCREEN_WIDTH * 0.5
+        half_h = SCREEN_HEIGHT * 0.5
+        if self.driving:
+            v = self.driving.velocity
+            frac = min(1.0, abs(v) / max(1.0, self.driving.base_max_speed))
+            reach = math.copysign(frac, v) * CAM_LEAD_STEPS * self.driving.base_max_speed
+            ax = math.cos(self.driving.angle) * reach
+            ay = math.sin(self.driving.angle) * reach
+        else:
+            ax = self.player_dir[0] * CAM_FOOT_LEAD
+            ay = self.player_dir[1] * CAM_FOOT_LEAD
+        lx = max(-half_w * CAM_LEAD_MAX_X, min(half_w * CAM_LEAD_MAX_X, ax))
+        ly = max(-half_h * CAM_LEAD_MAX_Y, min(half_h * CAM_LEAD_MAX_Y, ay))
+        return (lx, ly)
+
     def update(self):
         """One fixed 1/60s simulation step."""
         self.frame += 1
@@ -11656,30 +12058,19 @@ class Game:
             # kerb is not a crime; only the offences in handle_collisions are.
             pre_speed = abs(self.driving.velocity)
             hit = self.driving.physics_step()
-            if hit and pre_speed > 3.0:
+            if hit and pre_speed > IMPACT_MIN_SPEED:
                 # gap: a wall scrape fires every single step otherwise
                 self.play_impact(self.driving.rect.center, pre_speed, gap=8)
-                self.kick(min(6.0, pre_speed * 0.7), freeze=1 if pre_speed > 6.5 else 0)
+                self.kick(min(6.0, pre_speed * 1.0),
+                          freeze=1 if pre_speed > IMPACT_HEAVY_SPEED else 0)
                 self.spawn_burst(self.driving.rect.center, int(2 + pre_speed),
                                  ('spark', 'spark', 'debris'), pre_speed * 0.5)
-                if pre_speed > 4.0:
-                    self.driving.damage(pre_speed * 1.1)
+                if pre_speed > IMPACT_HURT_SPEED:
+                    self.driving.crash_damage(pre_speed * PLAYER_WALL_DAMAGE)
         else:
             self.move_player_on_foot()
 
-        if self.driving:
-            # The lead was isotropic on a 16:9 buffer, so driving north you
-            # got 0.45s of road ahead against 0.69s driving east - not enough
-            # to react to anything. Scaling the vertical component by the
-            # aspect ratio evens the headroom out at about 0.8s either way.
-            v = self.driving.velocity
-            aspect = SCREEN_WIDTH / float(SCREEN_HEIGHT)
-            lead = (math.cos(self.driving.angle) * v * 15.0,
-                    math.sin(self.driving.angle) * v * 15.0 * aspect)
-        else:
-            lead = (self.player_dir[0] * 34.0,
-                    self.player_dir[1] * 34.0 * (SCREEN_WIDTH / float(SCREEN_HEIGHT)))
-        self.camera.center_on(self.active_rect(), lead)
+        self.camera.center_on(self.active_rect(), self._camera_lead())
 
         for car in self.cars:
             if car.driver is None and not car.parked:
@@ -11692,6 +12083,14 @@ class Game:
                 car.input_throttle = 0.0
                 car.input_steer = 0.0
                 car.physics_step()
+
+        self.unstack_traffic()
+        for car in self.cars:
+            car.tick_crash_cooldown()
+        for cop in self.police:
+            cop.tick_crash_cooldown()
+        if self.driving is not None:
+            self.driving.tick_crash_cooldown()
 
         for ped in self.pedestrians:
             ped.update(self)
@@ -12031,13 +12430,13 @@ class Game:
             if ped.bump_cooldown <= 0 and self.driving.rect.colliderect(ped.rect.inflate(6, 6)):
                 ped.bump_cooldown = 90
                 # Knockback along a blend of the car's heading and the radial,
-                # scaled by speed - a 9.5 clip launches, a 1.0 nudge stumbles.
+                # scaled by speed - a flat-out clip launches, a crawl stumbles.
                 heading = pygame.Vector2(math.cos(self.driving.angle),
                                          math.sin(self.driving.angle))
                 radial = pygame.Vector2(ped.rect.centerx - self.driving.rect.centerx,
                                         ped.rect.centery - self.driving.rect.centery)
                 radial = radial.normalize() if radial.length() > 0 else heading
-                mag = 2.5 + min(9.5, speed) * 1.5
+                mag = 2.5 + min(PLAYER_CAR_MAX_SPEED, speed) * 2.1
                 kb = heading * 0.6 + radial * 0.7
                 kb = kb.normalize() * mag if kb.length() > 0 else radial * mag
                 if speed >= SPLAT_SPEED:
@@ -12045,8 +12444,8 @@ class Game:
                     self.play_impact(ped.rect.center, speed, gap=3)
                     self.play_sound(f'yell{self.frame % 4}', ped.rect.center,
                                     vol=0.55, gap=10)
-                    self.kick(1.3 + min(3.0, speed * 0.28))
-                    self.splatter_ped(ped, kb)
+                    self.kick(1.3 + min(3.0, speed * 0.45))
+                    self.splatter_ped(ped, kb, speed=speed)
                     continue
                 ped.knock = kb
                 if speed > 2.0:
@@ -12056,9 +12455,7 @@ class Game:
                 # Chaos pays in score, never in cash - the delivery loop is the
                 # only thing that puts money in your pocket. Combo stacks the
                 # per-hit value; GTA1's GOURANGA lives here.
-                self.combo += 1
-                self.combo_timer = FPS * 2
-                self.add_score(5 * min(self.combo, 12), ped.rect.center)
+                self.bump_combo(ped.rect.center, 5, speed)
                 # Rolling into somebody in a parking bay is not a crime. This
                 # used to fire at *any* closing speed including 0.0, which
                 # criminalised careful driving: a measured pilot that yielded,
@@ -12077,38 +12474,33 @@ class Game:
                     oy = other.rect.centery - ped.rect.centery
                     if ox * ox + oy * oy < 82 * 82:
                         other.gawk_at(ped.rect.center, random.randint(90, 150))
-                if self.combo in COMBO_SHOUTS:
-                    self.add_callout(COMBO_SHOUTS[self.combo], hud_HUD_RED, scale=2)
-                    self.bump_multiplier(1)
-                if self.combo == 12:
-                    self.wanted_level = max(self.wanted_level, 3)
-                    self.add_callout("YOU MONSTER", hud_HUD_RED)
         for car in self.cars:
             if car is self.driving or car.driver == 'player':
                 continue
             if self.driving.rect.colliderect(car.rect):
                 self.shunt(car, speed)
                 # A nudge in traffic is not a crime; a real shunt is.
-                if speed > 4.5:
+                if speed > RAM_SPEED:
                     self.add_score(2, car.rect.center)
                     self.wanted_bump(1, 'traffic')
-                    self.kick(min(5.0, speed * 0.55), freeze=1 if speed > 7.5 else 0)
+                    self.kick(min(5.0, speed * 0.8),
+                              freeze=1 if speed > IMPACT_HEAVY_SPEED else 0)
                     self.spawn_burst(car.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
                     self.play_impact(car.rect.center, speed)
-                    self.driving.damage(speed * 0.7 * self.grub_self_ram())
-                    car.damage(speed * 1.6 * self.grub_ram_scale())
+                    self.driving.crash_damage(speed * PLAYER_RAM_DAMAGE * self.grub_self_ram())
+                    car.crash_damage(speed * 1.6 * self.grub_ram_scale())
         for cop in self.police:
             if self.driving.rect.colliderect(cop.rect):
                 self.shunt(cop, speed)
-                if speed > 4.5:
+                if speed > RAM_SPEED:
                     self.wanted_bump(1, 'cop')
-                    self.kick(min(5.0, speed * 0.55))
+                    self.kick(min(5.0, speed * 0.8))
                     self.spawn_burst(cop.rect.center, int(2 + speed),
                                      ('spark', 'glass'), speed * 0.5)
                     self.play_impact(cop.rect.center, speed)
-                    self.driving.damage(speed * 0.6 * self.grub_self_ram())
-                    cop.damage(speed * 1.3 * self.grub_ram_scale())
+                    self.driving.crash_damage(speed * PLAYER_RAM_DAMAGE * self.grub_self_ram())
+                    cop.crash_damage(speed * 1.3 * self.grub_ram_scale())
 
     def shunt(self, other, speed):
         """Momentum transfer into a rammed car: shove it down the contact
@@ -12308,11 +12700,22 @@ class Game:
         while len(self.police) > target_count:
             self.police.pop()
 
+        # Is the player conspicuous enough to be called in? A car being driven
+        # hard down a street is; a stopped one, or anyone who has gone to
+        # ground, is not.
+        radio = (self.driving is not None and not self.hidden
+                 and abs(self.driving.velocity) >= COP_RADIO_SPEED)
+
         touching = False
         seen = False
         searching = False
         for cop in self.police:
             cop.max_speed = COP_SPEED_BY_STAR[star]
+            if radio and math.hypot(cop.rect.centerx - active_c[0],
+                                    cop.rect.centery - active_c[1]) > COP_RADIO_RANGE:
+                radio_this = False
+            else:
+                radio_this = radio
             if self.grub_active('provel'):
                 # A wheel of provel under a cruiser. It is not a cheese, it is
                 # a lubricant, and everyone from here knows it.
@@ -12329,7 +12732,13 @@ class Game:
                 cop.search_timer -= 1
                 if cop.alert == 'chase':
                     cop.alert = 'search'
-                if cop.search_timer <= 0 or cop.last_seen is None:
+                if radio_this and self.frame % COP_RADIO_STEPS == 0:
+                    # Called in over the air rather than seen: a fix good
+                    # enough to keep the pursuit alive across a few blocks,
+                    # never good enough to be the same as eyes on you.
+                    cop.last_seen = active_c
+                    cop.search_timer = COP_SEARCH_STEPS
+                elif cop.search_timer <= 0 or cop.last_seen is None:
                     # Given up on that spot. Cast around it rather than
                     # beelining somewhere it has no reason to go.
                     cop.last_seen = self.cop_search_point(cop)
@@ -12359,8 +12768,12 @@ class Game:
             self.chase_steps = 0
 
         # A single frame of contact used to bust you instantly. Now the cops
-        # have to hold you for ~0.7s, so shaking one off in a scrape is a real
-        # skill rather than a coin flip.
+        # have to hold you for ~0.9s, so shaking one off in a scrape is a real
+        # skill rather than a coin flip - and they can only do it to a car
+        # that has actually been stopped. Trading paint at speed is a wreck in
+        # progress, not an arrest.
+        if self.driving is not None and abs(self.driving.velocity) > BUST_MAX_SPEED:
+            touching = False
         if touching and self.state == STATE_PLAYING:
             self.bust_meter += 1
             if self.bust_meter >= BUST_CONTACT_STEPS:
@@ -14095,7 +14508,7 @@ class Game:
                    else hud_HUD_GOLD if frac > 0.70 else hud_HUD_WHITE)
             pygame.draw.rect(self.screen, col,
                              (rx, bar_y, int(RADAR_SIZE * frac), 5))
-            mph = f"{int(v * 8.4)} MPH"
+            mph = f"{int(v * HUD_MPH_PER_PX)} MPH"
             hud_text(self.screen, mph, right - hud_text_width(mph, 1),
                      bar_y + 7, hud_HUD_GREY_DIM, True, 1)
 
