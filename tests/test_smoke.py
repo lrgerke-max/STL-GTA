@@ -56,6 +56,11 @@ def reset(g):
     g.jobs_failed = 0
     g.job_cooldown = 0
     g.job = M.Job.generate()
+    g.arch_job_unlocked = False
+    g.arch_job_completed = False
+    g.arch_job_phase = M.ARCH_LOCKED
+    g.arch_job_timer = 0
+    g.arch_job_offer_after = 0
     g.state = M.STATE_PLAYING
     g.busted_flash = 0
     g.wasted_flash = 0
@@ -390,7 +395,12 @@ def test_heat_decays_once_you_are_clear():
 def test_cops_get_out_of_a_dead_end():
     """The old chase_ai drove straight at the player and ground into the first
     wall between them. A cop boxed against geometry must recover."""
+    # This test used whatever random state every alphabetically earlier test
+    # happened to leave behind, so adding an unrelated Job.generate() could
+    # change the cop's initial heading and flip the assertion. Pin the scenario.
+    rng_state = random.getstate()
     g = game()
+    random.seed(9)
     cop = M.Car(*g.police_station, color=M.POLICE_COLOR, variant='police')
     cop.driver = 'police'
     target = (g.police_station[0], g.police_station[1] - 900)
@@ -399,6 +409,7 @@ def test_cops_get_out_of_a_dead_end():
         cop.chase_ai(target)
     moved = math.hypot(cop.rect.centerx - start[0], cop.rect.centery - start[1])
     assert moved > 4 * M.TILE_SIZE, f"cop only travelled {moved:.0f}px in 400 steps"
+    random.setstate(rng_state)
 
 
 # ---------------------------------------------------------------------------
@@ -1725,6 +1736,153 @@ def test_cash_banks_under_the_arch_and_nowhere_else():
     assert g.cash == 0
 
 
+def test_fifty_thousand_banked_unlocks_a_real_latched_arch_job():
+    g = game()
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chdir(td)
+            g.banked = M.ARCH_JOB_TARGET - 100
+            g.cash = 100
+            teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
+            g.update_bank()
+            assert not g.arch_job_unlocked, "money in your pocket is not banked"
+            teleport(g, g.arch_center())
+            g.update_bank()
+            assert g.arch_job_unlocked
+            assert g.arch_job_phase == M.ARCH_READY
+            assert g.banked == M.ARCH_JOB_TARGET, "the threshold is not a buy-in"
+            assert g.job is None, "an unaccepted courier offer should yield to the finale"
+            g.banked = 1
+            assert g.arch_job_unlocked, "bail or a respray must never re-lock the finale"
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_an_accepted_delivery_finishes_before_the_arch_job_takes_over():
+    rng_state = random.getstate()
+    g = game()
+    try:
+        job = M.Job.generate()
+        job.collect()
+        g.job = job
+        g.arch_job_unlocked = True
+        g.arch_job_phase = M.ARCH_READY
+        g.arch_job_offer_after = 0
+        teleport(g, job.drop_pos)
+        before = g.jobs_done
+        g.update_arch_job()
+        assert g.arch_job_phase == M.ARCH_READY
+        g.update_job()
+        assert g.jobs_done == before + 1
+        assert g.job is None
+    finally:
+        random.setstate(rng_state)
+
+
+def test_arch_job_runs_city_museum_to_arch_to_hill_and_back_to_jobs():
+    rng_state = random.getstate()
+    g = game()
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chdir(td)
+            g.arch_job_unlocked = True
+            g.arch_job_phase = M.ARCH_READY
+            g.arch_job_offer_after = 0
+            g.job = None
+            g.wanted_level = 0
+
+            teleport(g, g.arch_center())
+            g.update_arch_job()
+            assert g.arch_job_phase == M.ARCH_CUTTER
+
+            teleport(g, g.landmark_job_point("City Museum"))
+            g.update_arch_job()
+            assert g.arch_job_phase == M.ARCH_RETURN
+
+            teleport(g, g.arch_center())
+            g.update_arch_job()
+            assert g.arch_job_phase == M.ARCH_RETURN, "the cutter needs a getaway car"
+
+            car = _drive(g)
+            car.rect.center = tuple(map(int, g.arch_center()))
+            g.update_arch_job()
+            assert g.arch_job_phase == M.ARCH_ESCAPE
+            assert g.wanted_level == M.WANTED_MAX
+            assert g.arch_job_timer == M.ARCH_JOB_SECONDS * M.FPS
+
+            car.rect.center = tuple(map(int, g.landmark_job_point("The Hill")))
+            g.update_arch_job()
+            assert g.arch_job_phase == M.ARCH_LAY_LOW
+            assert not g.arch_job_completed, "arrival alone is not enough while hot"
+            g.wanted_level = 0
+            g.police = []
+            g.foot_police = []
+            score = g.score
+            g.update_arch_job()
+            assert g.arch_job_completed
+            assert g.arch_job_phase == M.ARCH_COMPLETE
+            assert g.score == score + M.ARCH_JOB_SCORE
+            assert g.job is not None, "ordinary St. Louis keeps going after the finale"
+            g.update_arch_job()
+            assert g.score == score + M.ARCH_JOB_SCORE, "completion reward fired twice"
+        finally:
+            os.chdir(old_cwd)
+            random.setstate(rng_state)
+
+
+def test_arch_job_timeout_death_and_body_shop_cannot_cheese_the_chase():
+    rng_state = random.getstate()
+    g = game()
+    car = _drive(g)
+    car.rect.center = tuple(map(int, g.body_shops[0]))
+    g.arch_job_unlocked = True
+    g.arch_job_phase = M.ARCH_ESCAPE
+    g.arch_job_timer = 40
+    g.wanted_level = 5
+    g.cash = 1000
+    g.update_body_shop()
+    assert g.cash == 1000 and g.wanted_level == 5
+
+    g.arch_job_timer = 1
+    g.update_arch_job()
+    assert g.arch_job_phase == M.ARCH_READY
+    assert g.arch_job_unlocked and not g.arch_job_completed
+    assert g.wanted_level == 5, "timeout should not magically clear the cops"
+
+    g.arch_job_phase = M.ARCH_LAY_LOW
+    g.arch_job_timer = 30 * M.FPS
+    car.rect.center = tuple(map(int, g.landmark_job_point("The Hill")))
+    g.peak_star = 5
+    g.busted()
+    assert g.state == M.STATE_DEAD
+    assert g.arch_job_phase == M.ARCH_READY
+    g.update_arch_job()  # wanted was reset by the bust; this must not count as hiding
+    assert not g.arch_job_completed
+    random.setstate(rng_state)
+
+
+def test_arch_job_objective_renders_in_every_phase():
+    rng_state = random.getstate()
+    g = game()
+    g.arch_job_unlocked = True
+    g.job = None
+    for phase in (M.ARCH_READY, M.ARCH_CUTTER, M.ARCH_RETURN,
+                  M.ARCH_ESCAPE, M.ARCH_LAY_LOW):
+        g.state = M.STATE_PLAYING
+        g.arch_job_phase = phase
+        g.arch_job_timer = 45 * M.FPS
+        if phase == M.ARCH_LAY_LOW:
+            teleport(g, (70 * M.TILE_SIZE, 45 * M.TILE_SIZE))
+        assert g.arch_job_objective_text() is not None
+        g.draw_job_marker()
+        g.draw_radar(M.SCREEN_WIDTH - M.RADAR_SIZE - 10, 76)
+        g.draw_objective()
+        g.draw_map_screen()
+    random.setstate(rng_state)
+
+
 def test_getting_killed_drops_your_roll_where_you_died():
     g = game()
     teleport(g, (40 * M.TILE_SIZE, 40 * M.TILE_SIZE))
@@ -2069,7 +2227,7 @@ def test_school_combobox_types_filters_and_selects():
     assert g.character_school == "St. Louis University High School"
 
 
-def test_character_profile_round_trips_in_v3_save():
+def test_character_profile_and_arch_progress_round_trip_in_v4_save():
     g = game()
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
@@ -2077,16 +2235,45 @@ def test_character_profile_round_trips_in_v3_save():
             os.chdir(td)
             g.character_look = len(M.CHARACTER_LOOKS) - 1
             g.character_school = "Vashon High School"
+            g.arch_job_unlocked = True
+            g.arch_job_completed = False
+            g.arch_job_phase = M.ARCH_ESCAPE  # active attempts deliberately do not resume
             g.save_game()
             with open("savegame.json", "r") as f:
                 raw = json.load(f)
-            assert raw['version'] == 3
+            assert raw['version'] == 4
             assert raw['character']['high_school'] == "Vashon High School"
             g.character_look = 0
             g.character_school = "NOT FROM AROUND HERE"
+            g.arch_job_unlocked = False
+            g.arch_job_phase = M.ARCH_LOCKED
             assert g.load_game()
             assert g.character_look == len(M.CHARACTER_LOOKS) - 1
             assert g.character_school == "Vashon High School"
+            assert g.arch_job_unlocked and not g.arch_job_completed
+            assert g.arch_job_phase == M.ARCH_READY
+            assert g.job is None
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_old_save_at_the_advertised_threshold_migrates_to_arch_ready():
+    g = game()
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chdir(td)
+            with open("savegame.json", "w") as f:
+                json.dump({
+                    'version': 2,
+                    'player': {'x': 1000, 'y': 1000},
+                    'banked': M.ARCH_JOB_TARGET,
+                    'cash': 0,
+                }, f)
+            assert g.load_game()
+            assert g.arch_job_unlocked
+            assert g.arch_job_phase == M.ARCH_READY
+            assert g.job is None
         finally:
             os.chdir(old_cwd)
 

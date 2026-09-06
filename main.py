@@ -404,6 +404,16 @@ BANK_MIN = 1                # do not spam the callout for nothing
 DROPPED_CASH_LIFE = FPS * 60    # how long your dropped roll waits for you
 DROPPED_CASH_RADIUS = 34
 ARCH_JOB_TARGET = 50000     # banked. The door at the end of the ladder.
+ARCH_JOB_SECONDS = 90
+ARCH_JOB_SCORE = 50000
+ARCH_LOCKED = 'locked'
+ARCH_READY = 'ready'
+ARCH_CUTTER = 'cutter'
+ARCH_RETURN = 'arch'
+ARCH_ESCAPE = 'escape'
+ARCH_LAY_LOW = 'lay_low'
+ARCH_COMPLETE = 'complete'
+ARCH_ACTIVE_PHASES = frozenset((ARCH_CUTTER, ARCH_RETURN, ARCH_ESCAPE, ARCH_LAY_LOW))
 
 # --- Jobs -----------------------------------------------------------------
 # The delivery loop: cash comes from finishing runs, score comes from chaos.
@@ -532,6 +542,8 @@ CALLOUT_STRINGS = (
     # the bank under the Arch
     "BANKED $1200", "GOT IT BACK", "$50000 TO THE ARCH JOB",
     "THE ARCH JOB IS OPEN", "DROPPED $900 - GO GET IT",
+    "THE ARCH JOB", "GOT THE CUTTER", "RUN!", "ARCH JOB FAILED",
+    "ARCH JOB COMPLETE", "THE ITALIAN JOB. MISSOURI RULES.",
     "RUN DOWN ON THE STREET", "SCORE 0", "CASH $0", "RUNS 0   STREAK 0",
     "COMING TO UNDER THE ARCH", "RELEASED FROM THE STATION",
 )
@@ -9560,6 +9572,13 @@ class Game:
         self.best_streak = 0
         self.job_cooldown = 0
         self.chain_until = 0         # frame the hot-streak bonus expires on
+        # The promise at $50,000 is a real finale, not a toast. Unlock and
+        # completion persist; an attempt itself restarts clean after death/load.
+        self.arch_job_unlocked = False
+        self.arch_job_completed = False
+        self.arch_job_phase = ARCH_LOCKED
+        self.arch_job_timer = 0
+        self.arch_job_offer_after = 0
 
         # --- who are you? -------------------------------------------------
         # This is intentionally lightweight mechanically and extremely heavy
@@ -9601,10 +9620,10 @@ class Game:
             self.pad = None
 
     # ---------------- persistence ----------------
-    def save_game(self):
+    def save_game(self, announce=True):
         here = self.active_rect().center
         state = {
-            'version': 3,
+            'version': 4,
             'player': {'x': here[0], 'y': here[1]},
             'score': self.score,
             'cash': self.cash,
@@ -9618,11 +9637,16 @@ class Game:
                 'look': self.character_look,
                 'high_school': self.character_school,
             },
+            'arch_job': {
+                'unlocked': self.arch_job_unlocked,
+                'completed': self.arch_job_completed,
+            },
         }
         try:
             with open("savegame.json", 'w') as f:
                 json.dump(state, f)
-            self.add_toast("Game saved")
+            if announce:
+                self.add_toast("Game saved")
         except OSError as e:
             self.add_toast(f"Save failed: {e}")
 
@@ -9658,10 +9682,34 @@ class Game:
             valid_schools = {name for name, _group in HS_SPECIAL_CHOICES + STL_HIGH_SCHOOLS}
             school = str(profile.get('high_school', "NOT FROM AROUND HERE"))
             self.character_school = school if school in valid_schools else "NOT FROM AROUND HERE"
+            arch = state.get('arch_job', {})
+            self.arch_job_completed = bool(arch.get('completed', False))
+            # v2 and early v3 saves had only the bank balance. Crossing the old
+            # advertised threshold still earns the promised door permanently.
+            self.arch_job_unlocked = bool(
+                arch.get('unlocked', False) or self.arch_job_completed or
+                self.banked >= ARCH_JOB_TARGET)
+            self.arch_job_phase = (ARCH_COMPLETE if self.arch_job_completed else
+                                   ARCH_READY if self.arch_job_unlocked else ARCH_LOCKED)
+            self.arch_job_timer = 0
+            self.arch_job_offer_after = self.frame + FPS * 2
             self.streak = 0
             self.police = []
+            self.foot_police = []
             self.bust_meter = 0
-            self.job = Job.generate()             # runs are not resumable, redeal
+            self.peak_star = self.wanted_level
+            self.crime_pos = None
+            self.spotted = False
+            self.was_spotted = False
+            self.searching = False
+            self.hidden = False
+            self.hide_timer = 0
+            self.heat_timer = 0
+            self.wanted_decay_timer = 0
+            # Runs and finale attempts are not resumable. A latched finale gets
+            # the objective exclusively; locked/completed games redeal normally.
+            self.job = (None if self.arch_job_unlocked and not self.arch_job_completed
+                        else Job.generate())
             self.camera.snap_to(self.player_rect)
             self.add_toast("Game loaded")
             return True
@@ -9684,6 +9732,143 @@ class Game:
                         (entry[1] + entry[3] / 2.0) * TILE_SIZE)
         return self.police_station
 
+    def landmark_job_point(self, name):
+        entry = next((entry for entry in LANDMARKS if entry[5] == name), None)
+        return landmark_dropoff_point(entry) if entry is not None else self.arch_center()
+
+    def arch_job_target_pos(self):
+        if not self.arch_job_unlocked or self.arch_job_completed:
+            return None
+        if self.arch_job_phase in (ARCH_READY, ARCH_RETURN):
+            return self.arch_center()
+        if self.arch_job_phase == ARCH_CUTTER:
+            return self.landmark_job_point("City Museum")
+        if self.arch_job_phase in (ARCH_ESCAPE, ARCH_LAY_LOW):
+            # Once you are on The Hill, LAY_LOW is a state, not a bullseye.
+            if self.arch_job_phase == ARCH_LAY_LOW and self.on_the_hill():
+                return None
+            return self.landmark_job_point("The Hill")
+        return None
+
+    def on_the_hill(self):
+        x, y = self.active_rect().center
+        return hood_at(int(x) // TILE_SIZE, int(y) // TILE_SIZE) == 'hill'
+
+    def arch_job_objective_text(self):
+        phase = self.arch_job_phase
+        if phase == ARCH_READY:
+            return "MEET UNDER THE ARCH", "COME CLEAN", False
+        if phase == ARCH_CUTTER:
+            return "PICK UP AT CITY MUSEUM", "BORROW A CUTTER", False
+        if phase == ARCH_RETURN:
+            return "TAKE THE CUTTER TO GATEWAY ARCH", "YOU NEED A GETAWAY CAR", False
+        if phase == ARCH_ESCAPE:
+            return "GET IT TO THE HILL", "43 LB OF STAINLESS STEEL", True
+        if phase == ARCH_LAY_LOW:
+            if self.on_the_hill():
+                return "LOSE THE COPS ON THE HILL", "USE THE GANGWAYS", True
+            return "GET BACK TO THE HILL", "THE PACKAGE IS GETTING HEAVY", True
+        return None
+
+    def fail_arch_job(self, reason):
+        if self.arch_job_phase not in ARCH_ACTIVE_PHASES:
+            return
+        self.arch_job_phase = ARCH_READY
+        self.arch_job_timer = 0
+        self.arch_job_offer_after = self.frame + FPS * 2
+        self.add_callout("ARCH JOB FAILED", hud_HUD_RED, scale=2)
+        self.add_toast(reason)
+
+    def complete_arch_job(self):
+        if self.arch_job_completed:
+            return
+        self.arch_job_completed = True
+        self.arch_job_unlocked = True
+        self.arch_job_phase = ARCH_COMPLETE
+        self.arch_job_timer = 0
+        self.add_score(ARCH_JOB_SCORE, self.active_rect().center, mult=False)
+        self.add_callout("ARCH JOB COMPLETE", hud_HUD_GOLD, scale=2)
+        self.add_toast("The Italian Job. Missouri rules.")
+        self.play_sound('cash', vol=1.0)
+        self.job = Job.generate()
+        self.job_cooldown = 0
+        self.save_game(announce=False)
+
+    def update_arch_job(self):
+        """The real end of the $50,000 ladder. This sits beside the ordinary
+        courier system so the finale can fail/retry without corrupting a Job."""
+        # update_police() can enter the death state earlier in the same frame;
+        # never let its wanted reset masquerade as a successful lay-low.
+        if self.state != STATE_PLAYING:
+            return
+        if not self.arch_job_unlocked or self.arch_job_completed:
+            return
+        # A delivery already in the boot when the threshold is crossed gets to
+        # finish. An unaccepted offer does not outrank the finale.
+        if self.arch_job_phase == ARCH_READY and self.job is not None and self.job.collected:
+            return
+
+        here = self.active_rect().center
+        target = self.arch_job_target_pos()
+        near = (target is not None and
+                math.hypot(here[0] - target[0], here[1] - target[1]) <= JOB_MARKER_RADIUS)
+
+        if self.arch_job_phase == ARCH_READY:
+            if self.frame < self.arch_job_offer_after:
+                return
+            if not near:
+                return
+            if self.wanted_level > 0:
+                if self.frame % (FPS * 2) == 0:
+                    self.add_toast("Come back clean. The Arch has enough attention.")
+                return
+            self.job = None
+            self.arch_job_phase = ARCH_CUTTER
+            self.add_callout("THE ARCH JOB", hud_HUD_GOLD, scale=2)
+            self.add_toast("City Museum has a cutter. Of course it does.")
+            self.play_sound('pickup', vol=0.7)
+            return
+
+        if self.arch_job_phase == ARCH_CUTTER:
+            if near:
+                self.arch_job_phase = ARCH_RETURN
+                self.add_callout("GOT THE CUTTER", hud_HUD_GREEN, scale=2)
+                self.add_toast("City Museum had a spare. Of course.")
+                self.play_sound('pickup', vol=0.7)
+            return
+
+        if self.arch_job_phase == ARCH_RETURN:
+            if not near:
+                return
+            if self.driving is None:
+                if self.frame % (FPS * 2) == 0:
+                    self.add_toast("You need a getaway car")
+                return
+            self.arch_job_phase = ARCH_ESCAPE
+            self.arch_job_timer = ARCH_JOB_SECONDS * FPS
+            self.hidden = False
+            self.hide_timer = 0
+            self.infraction_at.pop('arch_job', None)
+            self.wanted_bump(WANTED_MAX - self.wanted_level, 'arch_job')
+            self.cop_dispatch = 0
+            self.add_callout("RUN!", hud_HUD_RED, scale=3)
+            self.add_toast("The whole city saw that")
+            self.add_toast("Cargo: 43 lb of stainless steel")
+            self.play_sound('bad', vol=1.0)
+            return
+
+        if self.arch_job_phase in (ARCH_ESCAPE, ARCH_LAY_LOW):
+            self.arch_job_timer = max(0, self.arch_job_timer - 1)
+            if self.arch_job_timer <= 0:
+                self.fail_arch_job("Too slow. Somebody put the piece back.")
+                return
+            if self.arch_job_phase == ARCH_ESCAPE and near:
+                self.arch_job_phase = ARCH_LAY_LOW
+                self.add_toast("Now lose them in the gangways")
+            if (self.arch_job_phase == ARCH_LAY_LOW and self.on_the_hill() and
+                    self.wanted_level == 0):
+                self.complete_arch_job()
+
     def update_bank(self):
         """Under the span: bank what you are carrying."""
         if self.cash < BANK_MIN:
@@ -9699,10 +9884,21 @@ class Game:
         self.play_sound('cash', vol=0.8)
         self.add_pop(here, f"${amount}", hud_HUD_GREEN)
         left = max(0, ARCH_JOB_TARGET - self.banked)
-        if left:
+        if not self.arch_job_unlocked and left:
             self.add_toast(f"${left} to the Arch job")
-        else:
+        elif not self.arch_job_unlocked:
+            self.arch_job_unlocked = True
+            self.arch_job_phase = ARCH_READY
+            self.arch_job_offer_after = self.frame + FPS * 2
+            if self.job is not None and not self.job.collected:
+                self.job = None
+            self.add_callout("THE ARCH JOB", hud_HUD_GOLD, scale=2)
             self.add_toast("The Arch job is open. Somebody's waiting.")
+            self.save_game(announce=False)
+        elif self.arch_job_completed:
+            self.add_toast("Safe under the Arch")
+        else:
+            self.add_toast("The Arch job is waiting under the Arch")
 
     def drop_cash(self, amount, pos):
         """Leave a roll of cash on the pavement where you went down."""
@@ -10294,6 +10490,8 @@ class Game:
         """
         if self.state == STATE_DEAD:
             return
+        if self.arch_job_phase in ARCH_ACTIVE_PHASES:
+            self.fail_arch_job("The Arch job is back on the table")
         self.wasted_flash = FPS * 2
         if self.driving is not None:
             self.driving.driver = None
@@ -10379,7 +10577,12 @@ class Game:
         self.state = STATE_PLAYING
         self.death_kind = None
         self.death_timer = 0
-        if self.job is None and self.job_cooldown <= 0:
+        if self.arch_job_unlocked and not self.arch_job_completed:
+            # Both deaths respawn under the Arch; without a fresh arm delay the
+            # failed finale would restart before the player took one step.
+            self.arch_job_offer_after = self.frame + FPS * 2
+        if (self.job is None and self.job_cooldown <= 0 and
+                (not self.arch_job_unlocked or self.arch_job_completed)):
             self.job = Job.generate()
 
     def lay_skid_marks(self):
@@ -10412,6 +10615,10 @@ class Game:
             self.shop_cooldown -= 1
             return
         if self.driving is None or self.wanted_level <= 0:
+            return
+        if self.arch_job_phase in (ARCH_ESCAPE, ARCH_LAY_LOW):
+            if self.frame % (FPS * 2) == 0:
+                self.add_toast("No respray with part of the Arch in the car")
             return
         here = self.driving.rect.center
         for (sx, sy) in self.body_shops:
@@ -11176,6 +11383,7 @@ class Game:
         self.update_wrecks()
         self.update_police()
         self.update_wanted_decay()
+        self.update_arch_job()
         self.update_job()
         self.update_frenzy()
         self.update_multiplier()
@@ -11307,6 +11515,12 @@ class Game:
     # ---------------- jobs ----------------
     def update_job(self):
         """Advance the courier run: pickup, clock, drop-off, payout."""
+        finale_pending = self.arch_job_unlocked and not self.arch_job_completed
+        if finale_pending and not (self.arch_job_phase == ARCH_READY and
+                                    self.job is not None and self.job.collected):
+            if self.job is not None and not self.job.collected:
+                self.job = None
+            return
         if self.job_cooldown > 0:
             self.job_cooldown -= 1
             if self.job_cooldown == 0 and self.job is None:
@@ -11365,15 +11579,21 @@ class Game:
             # The next run is already on the table. Take it inside the window
             # and it pays more - which replaces two seconds of silence with a
             # decision, and is the cheapest retention in the game.
-            self.job = Job.generate()
-            self.job_cooldown = 0
-            self.chain_until = self.frame + JOB_CHAIN_WINDOW
-            self.add_toast(f"Next: {self.job.pickup[5]} (+{int(JOB_CHAIN_BONUS * 100)}% if you hurry)")
+            if self.arch_job_unlocked and not self.arch_job_completed:
+                self.job = None
+                self.job_cooldown = 0
+                self.chain_until = 0
+                self.add_toast("Somebody is waiting under the Arch")
+            else:
+                self.job = Job.generate()
+                self.job_cooldown = 0
+                self.chain_until = self.frame + JOB_CHAIN_WINDOW
+                self.add_toast(f"Next: {self.job.pickup[5]} (+{int(JOB_CHAIN_BONUS * 100)}% if you hurry)")
 
     def reroll_job(self):
         """R: throw this run back. Only before you have picked the cargo up -
         once it is in the boot it is yours."""
-        if self.job is None or self.job.collected:
+        if (self.arch_job_unlocked and not self.arch_job_completed) or self.job is None or self.job.collected:
             return
         self.job = Job.generate()
         self.chain_until = 0
@@ -11836,6 +12056,8 @@ class Game:
         """
         if self.state == STATE_DEAD:
             return
+        if self.arch_job_phase in ARCH_ACTIVE_PHASES:
+            self.fail_arch_job("Evidence impounded. The Arch job can wait.")
         # Bail scales with how hot you were when they took you, so a five-star
         # bust is a real loss and running is worth something.
         bail = BAIL_BY_STAR[min(self.peak_star, WANTED_MAX)]
@@ -12720,8 +12942,12 @@ class Game:
             # The compulsion spine, on every card, every time: GTA1's
             # "$1,000,000 unlocks the next city" in one row.
             left = max(0, ARCH_JOB_TARGET - self.banked)
-            goal = (f"${left} TO THE ARCH JOB" if left
-                    else "THE ARCH JOB IS OPEN")
+            if self.arch_job_completed:
+                goal = "ARCH JOB COMPLETE"
+            elif self.arch_job_unlocked:
+                goal = "THE ARCH JOB IS OPEN"
+            else:
+                goal = f"${left} TO THE ARCH JOB"
             gw = hud_text_width(goal, 1)
             hud_text(self.screen, goal, (SCREEN_WIDTH - gw) // 2,
                      SCREEN_HEIGHT - 22, hud_HUD_GOLD, True, 1)
@@ -13003,6 +13229,23 @@ class Game:
     JOB_MARKER_COLORS = ((250, 214, 78), (196, 150, 34))
     JOB_DROP_COLORS = ((110, 226, 118), (44, 146, 62))
 
+    def current_objective_marker(self):
+        """One marker contract for world, radar and map."""
+        finale_owns = (self.arch_job_unlocked and not self.arch_job_completed and
+                       not (self.arch_job_phase == ARCH_READY and self.job is not None
+                            and self.job.collected))
+        if finale_owns:
+            pos = self.arch_job_target_pos()
+            if pos is None:
+                return None
+            colors = (self.JOB_DROP_COLORS if self.arch_job_phase in
+                      (ARCH_ESCAPE, ARCH_LAY_LOW) else self.JOB_MARKER_COLORS)
+            return pos, colors[0], colors[1]
+        if self.job is not None:
+            colors = self.JOB_DROP_COLORS if self.job.collected else self.JOB_MARKER_COLORS
+            return self.job.target_pos, colors[0], colors[1]
+        return None
+
     def draw_job_marker(self):
         """Ground marker for the current objective, plus an edge-of-screen
         chevron when it is off camera.
@@ -13010,11 +13253,10 @@ class Game:
         Without this the player is told to go to 'The Hill' and handed a
         100x100 tile city with no indication of which way that is.
         """
-        if self.job is None:
+        marker = self.current_objective_marker()
+        if marker is None:
             return
-        bright, dark = (self.JOB_DROP_COLORS if self.job.collected
-                        else self.JOB_MARKER_COLORS)
-        tx, ty = self.job.target_pos
+        (tx, ty), bright, dark = marker
         sx, sy = self.camera.apply_pos((tx, ty))
         pulse = (self.frame // 6) % 4                # 4-step chunky pulse
 
@@ -13145,7 +13387,17 @@ class Game:
         pygame.draw.circle(self.screen, (90, 150, 240), (stx, sty), 3)
         pygame.draw.circle(self.screen, (12, 16, 28), (stx, sty), 3, 1)
 
-        if self.job is not None:
+        finale_marker = (self.current_objective_marker()
+                          if self.arch_job_unlocked and not self.arch_job_completed and
+                          not (self.arch_job_phase == ARCH_READY and self.job is not None
+                               and self.job.collected) else None)
+        if finale_marker is not None:
+            (pos, bright, _dark) = finale_marker
+            jx, jy = to_map(*pos)
+            pulse = 5 + (self.frame // 6) % 3
+            pygame.draw.circle(self.screen, bright, (jx, jy), 4)
+            pygame.draw.circle(self.screen, hud_HUD_WHITE, (jx, jy), pulse, 1)
+        elif self.job is not None:
             for pos, col, active in (
                     (self.job.pickup_pos, hud_HUD_GOLD, not self.job.collected),
                     (self.job.drop_pos, hud_HUD_GREEN, self.job.collected)):
@@ -13345,10 +13597,11 @@ class Game:
                 blip((g['x'], g['y']), GRUB_KINDS[g['kind']][3], 2)
         if self.frenzy_icon is not None:
             blip(self.frenzy_icon[:2], hud_HUD_RED, 3)
-        if self.job is not None:
-            jc = hud_HUD_GREEN if self.job.collected else hud_HUD_GOLD
-            if not blip(self.job.target_pos, jc, 3):
-                chevron(self.job.target_pos, jc)
+        marker = self.current_objective_marker()
+        if marker is not None:
+            pos, bright, _dark = marker
+            if not blip(pos, bright, 3):
+                chevron(pos, bright)
         for cop in list(self.police) + list(self.foot_police):
             if not blip(cop.rect.center, hud_HUD_RED, 2):
                 chevron(cop.rect.center, hud_HUD_RED)
@@ -13382,10 +13635,14 @@ class Game:
         # in your pocket, which you lose when you are killed, and gold is what
         # you have banked under the Arch, which is yours for good.
         hud_draw_cash(self.screen, self.cash, right, 24, 2)
-        if self.banked:
-            btxt = f"BANKED ${int(self.banked)}"
-            hud_text(self.screen, btxt, right - hud_text_width(btxt, 1), 42,
-                     hud_HUD_GOLD, True, 1)
+        if self.arch_job_completed:
+            btxt = "ARCH JOB COMPLETE"
+        elif self.arch_job_unlocked:
+            btxt = "ARCH JOB READY" if self.arch_job_phase == ARCH_READY else "ARCH JOB ACTIVE"
+        else:
+            btxt = f"ARCH ${int(self.banked)}/${ARCH_JOB_TARGET}"
+        hud_text(self.screen, btxt, right - hud_text_width(btxt, 1), 42,
+                 hud_HUD_GOLD, True, 1)
 
         # slots=WANTED_MAX, not the default 6: the sixth slot was
         # unreachable by construction and ate 13px of the block forever.
@@ -13472,6 +13729,36 @@ class Game:
 
         Returns the y the next left-column overlay may start at.
         """
+        finale_owns = (self.arch_job_unlocked and not self.arch_job_completed and
+                       not (self.arch_job_phase == ARCH_READY and self.job is not None
+                            and self.job.collected))
+        arch_text = self.arch_job_objective_text() if finale_owns else None
+        if arch_text is not None:
+            head, sub, timed = arch_text
+            clock_gutter = hud_text_width("000", 1) + 8 if timed else 0
+            pw = max(hud_text_width(head, 1) + clock_gutter,
+                     hud_text_width(sub, 1)) + 16
+            ph = 40 if timed else 34
+            hud_draw_panel(self.screen, pygame.Rect(8, 8, pw, ph), alpha=215)
+            color = hud_HUD_GREEN if self.arch_job_phase == ARCH_LAY_LOW else hud_HUD_GOLD
+            hud_text(self.screen, head, 15, 13, color, True, 1)
+            hud_text(self.screen, sub, 15, 24, hud_HUD_GREY_DIM, True, 1)
+            if timed:
+                frac = self.arch_job_timer / float(max(1, ARCH_JOB_SECONDS * FPS))
+                bw = pw - 16
+                bar = pygame.Rect(15, 34, bw, 4)
+                pygame.draw.rect(self.screen, (30, 30, 38), bar)
+                fill = int(bw * max(0.0, min(1.0, frac)))
+                if fill:
+                    pygame.draw.rect(self.screen,
+                                     hud_HUD_RED if frac < 0.25 else hud_HUD_GREEN,
+                                     (bar.x, bar.y, fill, bar.h))
+                secs = str(int(math.ceil(self.arch_job_timer / float(FPS))))
+                hud_text(self.screen, secs,
+                         8 + pw - hud_text_width(secs, 1) - 7, 13,
+                         hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
+            return 8 + ph
+
         if self.job is None:
             return 8
         job = self.job
@@ -13648,6 +13935,16 @@ class Game:
             return f"player hp out of range: {self.player_hp}"
         if self.frenzy is not None and self.frenzy.steps_left < 0:
             return "frenzy timer went negative"
+        valid_arch = {ARCH_LOCKED, ARCH_READY, ARCH_CUTTER, ARCH_RETURN,
+                      ARCH_ESCAPE, ARCH_LAY_LOW, ARCH_COMPLETE}
+        if self.arch_job_phase not in valid_arch:
+            return f"invalid Arch job phase: {self.arch_job_phase}"
+        if self.arch_job_completed and self.arch_job_phase != ARCH_COMPLETE:
+            return "completed Arch job left its completion phase"
+        if self.arch_job_phase != ARCH_LOCKED and not self.arch_job_unlocked:
+            return "locked Arch job has an active phase"
+        if self.arch_job_timer < 0:
+            return "Arch job timer went negative"
         if len(self.fx) > 240 or len(self.pops) > 48 or len(self.callouts) > 3:
             return "a feedback pool grew unbounded"
         for car in self.cars + self.police:
