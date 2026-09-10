@@ -2242,6 +2242,26 @@ LOCAL_LEGEND_HINT_FIRST = FPS * 8
 LOCAL_LEGEND_HINT_GAP = FPS * 75
 LOCAL_LEGEND_DISCOVERY_RADIUS = TILE_SIZE * 2.5
 
+LOCAL_CHALLENGE_REWARD = 750
+LOCAL_CHALLENGE_TIMES = {
+    'mudfoot': FPS * 60,
+    'grocery_cart': FPS * 75,
+    'trash_day': FPS * 120,
+    'hill_hydrants': FPS * 90,
+}
+TRASH_DAY_TILES = ((15, 57), (21, 68), (32, 79),
+                   (43, 73), (57, 63), (63, 57))
+CART_SLALOM_TILES = ((73, 50), (79, 50), (79, 57),
+                     (73, 57), (68, 57), (68, 50))
+MUDFOOT_SCRAP_OFFSETS = ((-82, -54), (0, -70), (82, -54),
+                         (-62, 62), (62, 62))
+LOCAL_CHALLENGE_COLORS = {
+    'mudfoot': (96, 156, 244),
+    'grocery_cart': (238, 78, 72),
+    'trash_day': (238, 134, 40),
+    'hill_hydrants': (60, 202, 92),
+}
+
 # Default car collider. The kerbside parking layout is sized against this, so
 # it is a named constant both places can assert on rather than a loose 34/18.
 VEHICLE_DEFAULT_W = 34
@@ -11794,6 +11814,9 @@ class Car:
         self.variant = variant or random.choice(CIVILIAN_WEIGHTED)
         self.color = (cars_TRANS_AM_BODY if self.variant == 'trans_am'
                       else color or random.choice(CAR_COLORS))
+        tag_hash = (int(x) * 31 + int(y) * 17
+                    + sum((index + 1) * ord(ch) for index, ch in enumerate(self.variant)))
+        self.temp_tag = self.variant in CIVILIAN_VARIANTS and tag_hash % 100 < 8
         tune = VEHICLE_TUNING.get(self.variant, {})
         self.width = tune.get('w', VEHICLE_DEFAULT_W)
         self.height = tune.get('h', VEHICLE_DEFAULT_H)
@@ -12217,6 +12240,15 @@ class Car:
         rect = sprite.get_rect(center=(int(screen_pos[0]), int(screen_pos[1])))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
+        if self.temp_tag:
+            # The crooked paper temp tag: tiny, bright, and unmistakably taped
+            # to the rear instead of mounted like a plate.
+            fx, fy = math.cos(self.angle), math.sin(self.angle)
+            tx = int(round(screen_pos[0] - fx * self.width * SPRITE_SCALE_CAR * 0.48))
+            ty = int(round(screen_pos[1] - fy * self.width * SPRITE_SCALE_CAR * 0.48))
+            pygame.draw.rect(screen, COLOR_OUTLINE, (tx - 2, ty - 2, 6, 5))
+            pygame.draw.rect(screen, (244, 240, 218), (tx - 1, ty - 1, 4, 3))
+            screen.fill((72, 70, 66), (tx + 1, ty, 1, 1))
         if self.drive_gear() == 'R':
             # Two hard-pixel white lamps make reverse legible at a glance. The
             # rear is opposite the heading; side offsets follow the car's local
@@ -12860,7 +12892,10 @@ class Game:
         self.legend_rumors = set()
         self.legend_discovered = set()
         self.legend_garage = set()
+        self.legend_mastery = set()
         self.legend_hint_after = LOCAL_LEGEND_HINT_FIRST
+        self.local_challenge = None
+        self.hill_hint_shown = False
         self.toasts = []
         self.speech_bubbles = []  # timed world-space dialogue anchored to speakers
         self.busted_flash = 0
@@ -13093,7 +13128,8 @@ class Game:
             value = state.get(key)
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"invalid {key} list")
-        for key in ('legend_rumors', 'legend_discovered', 'legend_garage'):
+        for key in ('legend_rumors', 'legend_discovered', 'legend_garage',
+                    'legend_mastery'):
             value = state.get(key, [])
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"invalid {key} list")
@@ -13157,6 +13193,7 @@ class Game:
             'legend_rumors': sorted(self.legend_rumors),
             'legend_discovered': sorted(self.legend_discovered),
             'legend_garage': sorted(self.legend_garage),
+            'legend_mastery': sorted(self.legend_mastery),
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
             'side_missions_done': self.side_missions_done,
@@ -13212,6 +13249,12 @@ class Game:
             self.legend_garage = {
                 kind for kind in state.get('legend_garage', []) if kind in LOCAL_LEGENDS
             }
+            valid_mastery = set(LOCAL_LEGENDS) | {'trash_day', 'hill_hydrants'}
+            self.legend_mastery = {
+                kind for kind in state.get('legend_mastery', []) if kind in valid_mastery
+            }
+            self.local_challenge = None
+            self.hill_hint_shown = 'hill_hydrants' in self.legend_mastery
             self.legend_hint_after = self.frame + LOCAL_LEGEND_HINT_FIRST
             self.jobs_done = state.get('jobs_done', 0)
             self.jobs_failed = state.get('jobs_failed', 0)
@@ -14576,6 +14619,7 @@ class Game:
         """
         self.side_mission_event(
             'player_busted' if kind == 'busted' else 'player_wasted')
+        self.local_challenge = None
         self.play_sound('bad', vol=0.9)
         snd_duck(FPS)
         self.state = STATE_DEAD
@@ -15435,6 +15479,15 @@ class Game:
         self.driving = best
         self.side_mission_event('vehicle_entered', vehicle_id=id(best))
         self.add_callout("JACKED!", hud_HUD_GOLD, ttl=FPS, scale=1)
+        if best.variant in LOCAL_LEGENDS:
+            self.legend_rumors.add(best.variant)
+            self.legend_discovered.add(best.variant)
+            if best.variant not in self.legend_garage:
+                self.legend_garage.add(best.variant)
+                self.add_callout("GARAGE UNLOCKED", hud_HUD_GOLD, ttl=FPS, scale=1)
+            self.start_local_challenge(best.variant)
+        elif best.variant == 'garbage_truck':
+            self.start_local_challenge('trash_day')
         if best.variant == 'trans_am':
             self.add_toast("THE RADIO IS STUCK ON KSHE")
         elif best.variant == 'mudfoot':
@@ -15443,6 +15496,10 @@ class Game:
         elif best.variant == 'grocery_cart':
             self.add_callout("CART PARADE!", hud_HUD_GOLD, scale=2)
             self.add_toast("CLEANUP ON EVERY AISLE")
+        if best.temp_tag:
+            self.add_toast("THAT TEMP TAG EXPIRED THREE PRESIDENTS AGO")
+            if (best.rect.centerx // TILE_SIZE + best.rect.centery // TILE_SIZE) % 4 == 0:
+                self.wanted_bump(1, 'temp_tag')
         self.add_score(20, best.rect.center)
 
     # ---------------- on-foot movement ----------------
@@ -15673,6 +15730,7 @@ class Game:
         self.update_train_collisions()
 
         self.handle_collisions()
+        self.update_local_challenge()
         self.check_potholes()
         if not self.driving:
             self.check_roadkill_risk()
@@ -17119,6 +17177,172 @@ class Game:
             self.add_callout(info['name'], info['color'], ttl=FPS * 2, scale=2)
             self.add_toast(f"Local Legend discovered near {info['venue']}")
 
+        # The first painted hydrant is the start line, not background clutter.
+        if ('hill_hydrants' not in self.legend_mastery
+                and self.local_challenge is None and self.driving is None):
+            hydrants = self.hill_hydrant_positions()
+            nearest = min((math.dist(center, point), point) for point in hydrants)
+            if nearest[0] <= 34:
+                self.start_local_challenge('hill_hydrants', first=nearest[1])
+            elif self.hood_now == 'hill' and not self.hill_hint_shown:
+                self.hill_hint_shown = True
+                self.add_toast("The Hill challenge: follow the painted hydrants on foot")
+
+    @staticmethod
+    def tile_route_points(tiles):
+        return [(c * TILE_SIZE + TILE_SIZE // 2,
+                 r * TILE_SIZE + TILE_SIZE // 2) for c, r in tiles]
+
+    @staticmethod
+    def hill_hydrant_positions():
+        return [(c * TILE_SIZE + ox, r * TILE_SIZE + oy)
+                for (c, r), (ox, oy) in HILL_HYDRANT_TILES.items()]
+
+    def start_local_challenge(self, kind, first=None):
+        if self.local_challenge is not None or kind in self.legend_mastery:
+            return False
+        if (self.side_mission is not None
+                or (self.job is not None and self.job.collected)
+                or self.arch_job_phase in ARCH_ACTIVE_PHASES):
+            return False
+        challenge = {
+            'kind': kind,
+            'steps_left': LOCAL_CHALLENGE_TIMES[kind],
+            'time_limit': LOCAL_CHALLENGE_TIMES[kind],
+            'index': 0,
+        }
+        if kind == 'mudfoot':
+            car = self.local_legend_car('mudfoot')
+            if car is None:
+                return False
+            targets = []
+            for ox, oy in MUDFOOT_SCRAP_OFFSETS:
+                want = (car.rect.centerx + ox, car.rect.centery + oy)
+                rect = pygame.Rect(0, 0, 34, 16)
+                rect.center = want
+                if is_blocked(rect):
+                    spot = free_point_near(*want, rect.w, rect.h, max_rings=3,
+                                           require_reachable=False)
+                    if spot is not None:
+                        rect.center = spot
+                targets.append({'rect': rect, 'hit': False})
+            challenge['targets'] = targets
+            head, sub = "BIGFOOT'S FIRST CRUSH", "FLATTEN 5 JUNK CARS"
+        elif kind == 'grocery_cart':
+            challenge['points'] = self.tile_route_points(CART_SLALOM_TILES)
+            challenge['last_hp'] = self.driving.hp if self.driving else 0.0
+            head, sub = "THE BIG CART SLALOM", "KEEP THE GROCERIES IN"
+        elif kind == 'trash_day':
+            challenge['points'] = self.tile_route_points(TRASH_DAY_TILES)
+            head, sub = "TRASH DAY", "EMPTY 6 ALLEY DUMPSTERS"
+        else:
+            points = self.hill_hydrant_positions()
+            if first in points:
+                at = points.index(first)
+                points = points[at:] + points[:at]
+                challenge['index'] = 1
+            challenge['points'] = points
+            head, sub = "THE HILL HYDRANT CIRCUIT", "FOLLOW GREEN WHITE AND RED"
+        self.local_challenge = challenge
+        self.add_callout(head, LOCAL_CHALLENGE_COLORS[kind], ttl=FPS * 2, scale=1)
+        self.add_toast(sub)
+        return True
+
+    def finish_local_challenge(self):
+        challenge = self.local_challenge
+        if challenge is None:
+            return
+        kind = challenge['kind']
+        self.legend_mastery.add(kind)
+        self.cash += LOCAL_CHALLENGE_REWARD
+        self.add_score(750, self.active_rect().center, mult=False)
+        self.add_callout("LOCAL LEGEND MASTERED", hud_HUD_GOLD, ttl=FPS * 2, scale=2)
+        self.add_toast(f"${LOCAL_CHALLENGE_REWARD}  Garage medal earned")
+        self.local_challenge = None
+
+    def fail_local_challenge(self, reason):
+        if self.local_challenge is None:
+            return
+        self.add_callout("LOCAL CHALLENGE FAILED", hud_HUD_RED, ttl=FPS, scale=1)
+        self.add_toast(reason)
+        self.local_challenge = None
+
+    def local_challenge_marker(self):
+        challenge = self.local_challenge
+        if challenge is None:
+            return None
+        if challenge['kind'] == 'mudfoot':
+            target = next((item for item in challenge['targets'] if not item['hit']), None)
+            return target['rect'].center if target else None
+        points = challenge.get('points', ())
+        index = challenge.get('index', 0)
+        return points[index] if index < len(points) else None
+
+    def local_challenge_hud(self):
+        challenge = self.local_challenge
+        if challenge is None:
+            return None
+        kind = challenge['kind']
+        if kind == 'mudfoot':
+            done = sum(item['hit'] for item in challenge['targets'])
+            text = f"CRUSH JUNK CARS {done}/{len(challenge['targets'])}"
+            head = "BIGFOOT'S FIRST CRUSH"
+        else:
+            done = challenge['index']
+            total = len(challenge['points'])
+            text = f"CHECKPOINTS {done}/{total}"
+            head = {'grocery_cart': "THE BIG CART SLALOM",
+                    'trash_day': "TRASH DAY",
+                    'hill_hydrants': "THE HILL HYDRANTS"}[kind]
+        return head, text, challenge['steps_left'], challenge['time_limit']
+
+    def update_local_challenge(self):
+        challenge = self.local_challenge
+        if challenge is None:
+            return
+        challenge['steps_left'] -= 1
+        if challenge['steps_left'] <= 0:
+            self.fail_local_challenge("Time's up")
+            return
+        kind = challenge['kind']
+        if kind == 'mudfoot':
+            if self.driving is None or self.driving.variant != 'mudfoot':
+                return
+            if abs(self.driving.velocity) < 1.8:
+                return
+            for target in challenge['targets']:
+                if target['hit'] or not self.driving.rect.colliderect(target['rect']):
+                    continue
+                target['hit'] = True
+                self.spawn_burst(target['rect'].center, 12, ('spark', 'debris'), 3.4)
+                self.play_impact(target['rect'].center, 7.0, gap=2)
+                done = sum(item['hit'] for item in challenge['targets'])
+                self.add_callout(f"CRUSHED {done}/{len(challenge['targets'])}",
+                                 LOCAL_CHALLENGE_COLORS[kind], ttl=FPS, scale=1)
+            if all(item['hit'] for item in challenge['targets']):
+                self.finish_local_challenge()
+            return
+
+        required = {'grocery_cart': 'grocery_cart', 'trash_day': 'garbage_truck'}.get(kind)
+        if required is not None and (self.driving is None or self.driving.variant != required):
+            return
+        if kind == 'hill_hydrants' and self.driving is not None:
+            return
+        if kind == 'grocery_cart' and self.driving is not None:
+            hp = self.driving.hp
+            if hp < challenge.get('last_hp', hp) - 1.0 and challenge['index']:
+                challenge['index'] = 0
+                self.add_callout("GROCERIES EVERYWHERE", hud_HUD_RED, ttl=FPS, scale=1)
+            challenge['last_hp'] = hp
+        marker = self.local_challenge_marker()
+        if marker is None or math.dist(self.active_rect().center, marker) > 44:
+            return
+        challenge['index'] += 1
+        done, total = challenge['index'], len(challenge['points'])
+        self.add_callout(f"{done}/{total}", LOCAL_CHALLENGE_COLORS[kind], ttl=FPS, scale=1)
+        if done >= total:
+            self.finish_local_challenge()
+
     # ---------------- drawing ----------------
     _TREE_GREENS = ((58, 84, 46), (50, 74, 40), (66, 92, 52), (46, 66, 38))
 
@@ -18173,6 +18397,23 @@ class Game:
             hud_text(self.screen, label, int(sx) - hud_text_width(label, 1) // 2,
                      int(sy) - pulse - 10, info['color'], True, 1)
 
+    def draw_local_challenge_world(self):
+        challenge = self.local_challenge
+        if challenge is None or challenge['kind'] != 'mudfoot':
+            return
+        for target in challenge['targets']:
+            if target['hit']:
+                continue
+            rect = self.camera.apply(target['rect'])
+            if not rect.colliderect(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)):
+                continue
+            pygame.draw.rect(self.screen, (26, 26, 30), rect.inflate(4, 4))
+            pygame.draw.rect(self.screen, (112, 72, 62), rect)
+            pygame.draw.rect(self.screen, (164, 178, 184),
+                             (rect.centerx - 7, rect.top + 3, 14, 5))
+            pygame.draw.line(self.screen, hud_HUD_RED, rect.topleft,
+                             rect.bottomright, 2)
+
     def draw(self):
         if self.state == STATE_TITLE:
             self.draw_title_screen()
@@ -18217,6 +18458,7 @@ class Game:
         self.draw_rail_infrastructure()
         self.draw_roadblock_strips()
         self.draw_side_mission_world()
+        self.draw_local_challenge_world()
 
         for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
             frect = self.camera.apply(pygame.Rect(lx * TILE_SIZE, ly * TILE_SIZE,
@@ -18920,6 +19162,10 @@ class Game:
             colors = (self.JOB_DROP_COLORS if self.arch_job_phase in
                       (ARCH_ESCAPE, ARCH_LAY_LOW) else self.JOB_MARKER_COLORS)
             return pos, colors[0], colors[1]
+        local = self.local_challenge_marker()
+        if local is not None:
+            color = LOCAL_CHALLENGE_COLORS[self.local_challenge['kind']]
+            return local, color, _blend(color, (0, 0, 0), 0.5)
         side = self.side_mission_marker()
         if side is not None:
             return side, SIDE_MISSION_MARKER_COLORS[0], SIDE_MISSION_MARKER_COLORS[1]
@@ -19145,8 +19391,23 @@ class Game:
         entries += [("YOU", (232, 232, 232)), ("PICKUP", hud_HUD_GOLD),
                      ("DROP-OFF", hud_HUD_GREEN), ("POLICE", hud_HUD_RED),
                      ("STATION", (90, 150, 240)),
-                     ("BODY SHOP $300", (110, 170, 220)),
-                     ("? LOCAL LEGEND", (238, 176, 68))]
+                     ("BODY SHOP $300", (110, 170, 220))]
+        for kind, info in LOCAL_LEGENDS.items():
+            if kind in self.legend_mastery:
+                status = "MASTERED"
+            elif kind in self.legend_garage:
+                status = "GARAGE"
+            elif kind in self.legend_discovered:
+                status = "FOUND"
+            elif kind in self.legend_rumors:
+                status = "RUMOR"
+            else:
+                status = "???"
+            entries.append((f"L {info['name']} {status}", info['color']))
+        hydrant_status = "MASTERED" if 'hill_hydrants' in self.legend_mastery else "OPEN"
+        trash_status = "MASTERED" if 'trash_day' in self.legend_mastery else "OPEN"
+        entries += [(f"HILL HYDRANTS {hydrant_status}", props_C_HILL_GREEN),
+                    (f"TRASH DAY {trash_status}", cars_CITY_SERVICE_ORANGE)]
         colw = 104
         for i, (name, col) in enumerate(entries):
             cx = lx0 + (i // rows) * colw
@@ -19501,6 +19762,28 @@ class Game:
                          8 + pw - hud_text_width(secs, 1) - 7, 13,
                          hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
             return 8 + ph
+
+        local_text = self.local_challenge_hud()
+        if local_text is not None:
+            head, sub, steps_left, limit = local_text
+            head = self._fit_menu_text(head, 254)
+            sub = self._fit_menu_text(sub, 254)
+            clock_gutter = hud_text_width("000", 1) + 8
+            pw = min(286, max(hud_text_width(head, 1) + clock_gutter,
+                              hud_text_width(sub, 1)) + 16)
+            hud_draw_panel(self.screen, pygame.Rect(8, 8, pw, 40), alpha=218)
+            color = LOCAL_CHALLENGE_COLORS[self.local_challenge['kind']]
+            hud_text(self.screen, head, 15, 13, color, True, 1)
+            hud_text(self.screen, sub, 15, 24, hud_HUD_WHITE, True, 1)
+            frac = steps_left / float(max(1, limit))
+            bw = pw - 16
+            pygame.draw.rect(self.screen, (30, 30, 38), (15, 34, bw, 4))
+            pygame.draw.rect(self.screen, hud_HUD_RED if frac < 0.25 else color,
+                             (15, 34, int(bw * max(0.0, min(1.0, frac))), 4))
+            secs = str(int(math.ceil(steps_left / float(FPS))))
+            hud_text(self.screen, secs, 8 + pw - hud_text_width(secs, 1) - 7,
+                     13, hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
+            return 48
 
         side_text = self.side_mission_hud()
         if side_text is not None:

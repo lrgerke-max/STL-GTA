@@ -1506,6 +1506,78 @@ def test_local_legend_art_reads_before_the_entry_toast():
     assert set(M.cars_CART_BAG_COLORS) <= cart_colors
 
 
+def test_rare_rides_unlock_the_garage_and_start_distinct_mastery_runs():
+    for variant in ('mudfoot', 'grocery_cart'):
+        g = M.Game(start_fullscreen=False)
+        car = g.local_legend_car(variant)
+        teleport(g, car.rect.center)
+        g.toggle_enter_exit()
+        assert g.driving is car
+        assert variant in g.legend_garage
+        assert g.local_challenge['kind'] == variant
+        assert g.local_challenge_marker() is not None
+        assert g.local_challenge_hud()[0]
+
+
+def test_each_local_mastery_route_can_be_completed_and_persists():
+    # Checkpoint challenges use the actual controlled vehicle/player position.
+    for kind, variant in (('grocery_cart', 'grocery_cart'),
+                          ('trash_day', 'garbage_truck')):
+        g = M.Game(start_fullscreen=False)
+        car = (g.local_legend_car(variant) if variant in M.LOCAL_LEGENDS else
+               next(c for c in g.cars if c.variant == variant))
+        car.driver = 'player'
+        car.parked = False
+        g.driving = car
+        assert g.start_local_challenge(kind)
+        points = list(g.local_challenge['points'])
+        for point in points:
+            car.rect.center = point
+            g.update_local_challenge()
+        assert kind in g.legend_mastery and g.local_challenge is None
+
+    g = M.Game(start_fullscreen=False)
+    first = g.hill_hydrant_positions()[0]
+    teleport(g, first)
+    g.update_local_legends()
+    assert g.local_challenge['kind'] == 'hill_hydrants'
+    for point in g.local_challenge['points'][1:]:
+        teleport(g, point)
+        g.update_local_challenge()
+    assert 'hill_hydrants' in g.legend_mastery
+
+
+def test_mudfoot_crush_targets_are_physical_and_masterable():
+    g = M.Game(start_fullscreen=False)
+    truck = g.local_legend_car('mudfoot')
+    truck.driver = 'player'
+    truck.parked = False
+    g.driving = truck
+    assert g.start_local_challenge('mudfoot')
+    targets = list(g.local_challenge['targets'])
+    for target in targets:
+        truck.rect.center = target['rect'].center
+        truck.velocity = 2.5
+        g.update_local_challenge()
+    assert 'mudfoot' in g.legend_mastery
+
+
+def test_expired_temp_tags_are_uncommon_but_visible():
+    cars = [M.Car(100 + i * 37, 200 + i * 53, variant='sedan') for i in range(500)]
+    tagged = [car for car in cars if car.temp_tag]
+    assert 20 <= len(tagged) <= 60
+    assert not M.Car(100, 100, variant='garbage_truck').temp_tag
+    car = tagged[0]
+    car.rect.center = (80, 60)
+    car.angle = 0.0
+    surf = pygame.Surface((160, 120))
+    surf.fill((1, 2, 3))
+    cam = M.Camera()
+    car.draw(surf, cam)
+    assert (244, 240, 218) in {surf.get_at((x, y))[:3]
+                              for y in range(120) for x in range(160)}
+
+
 def test_corrected_landmark_plaques_do_not_repeat_false_claims():
     soulard = M.LANDMARK_PLAQUES['Soulard Farmers Market']
     garden = M.LANDMARK_PLAQUES['Missouri Botanical Garden']
@@ -3063,6 +3135,7 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             g.legend_rumors = {'mudfoot', 'grocery_cart'}
             g.legend_discovered = {'mudfoot'}
             g.legend_garage = {'mudfoot'}
+            g.legend_mastery = {'mudfoot', 'hill_hydrants'}
             g.arch_job_unlocked = True
             g.arch_job_completed = False
             g.arch_job_phase = M.ARCH_ESCAPE  # active attempts deliberately do not resume
@@ -3087,12 +3160,14 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             assert raw['legend_rumors'] == ['grocery_cart', 'mudfoot']
             assert raw['legend_discovered'] == ['mudfoot']
             assert raw['legend_garage'] == ['mudfoot']
+            assert raw['legend_mastery'] == ['hill_hydrants', 'mudfoot']
             g.character_look = 0
             g.character_school = "NOT FROM AROUND HERE"
             g.job_types_done = set()
             g.legend_rumors = set()
             g.legend_discovered = set()
             g.legend_garage = set()
+            g.legend_mastery = set()
             g.arch_job_unlocked = False
             g.arch_job_phase = M.ARCH_LOCKED
             g.owned_weapons = {'fists'}
@@ -3105,6 +3180,7 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             assert g.legend_rumors == {'mudfoot', 'grocery_cart'}
             assert g.legend_discovered == {'mudfoot'}
             assert g.legend_garage == {'mudfoot'}
+            assert g.legend_mastery == {'mudfoot', 'hill_hydrants'}
             assert g.arch_job_unlocked and not g.arch_job_completed
             assert g.arch_job_phase == M.ARCH_READY
             assert g.job is None
