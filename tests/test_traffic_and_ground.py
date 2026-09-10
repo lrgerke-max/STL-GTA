@@ -9,6 +9,7 @@ so completely that crossing the yard felt like walking over roofs.
 """
 
 import os
+import math
 import random
 import sys
 
@@ -116,6 +117,69 @@ def test_a_diagonal_tile_is_drawn_as_a_diagonal_not_as_a_boxed_square():
     assert game.screen.get_at((32, 32))[:3] != (255, 0, 255), "no asphalt drawn"
 
 
+def test_diagonal_grid_crossings_keep_the_cardinal_road_underlay():
+    """A crossing tile needs road beneath the diagonal, not sidewalk wedges."""
+    game = M.Game()
+    crossings = [(c, r) for c, r in M.DIAGONAL_AT
+                 if (c in M.ROAD_LINES) != (r in M.ROAD_LINES)]
+    assert crossings, "no diagonal crosses a cardinal street between junctions"
+
+    for col, row in crossings:
+        game.camera.x = col * M.TILE_SIZE
+        game.camera.y = row * M.TILE_SIZE
+        game.screen.fill((255, 0, 255))
+        game.draw_tile(col, row)
+        road_pixels = sum(
+            game.screen.get_at((x, y))[:3] == M.COLOR_ROAD
+            for y in range(M.TILE_SIZE)
+            for x in range(M.TILE_SIZE)
+        )
+        assert road_pixels > 1500, \
+            f"sidewalk underlay cuts through crossing at {col},{row}"
+
+
+def test_diagonal_shoulders_stop_at_the_cardinal_crossing_mouth():
+    """The diagonal's asphalt crosses the street; its curbs do not."""
+    game = M.Game()
+    crossing = next((tile for tile in M.DIAGONAL_GRID_CROSSINGS
+                     if (tile[0] in M.ROAD_LINES) != (tile[1] in M.ROAD_LINES)))
+    col, row = crossing
+    game.camera.x = col * M.TILE_SIZE
+    game.camera.y = row * M.TILE_SIZE
+    game.screen.fill((1, 2, 3))
+    game.draw_tile(col, row)
+    game.draw_diagonal_network()
+
+    ux, uy = M.DIAGONAL_DIR[crossing]
+    # These points lie in the old 50..62px shoulder band, on opposite sides
+    # of the diagonal centre. Both must expose the intersecting asphalt now.
+    normal = pygame.Vector2(-uy, ux)
+    for side in (-1, 1):
+        point = pygame.Vector2(32, 32) + normal * 28 * side
+        color = game.screen.get_at((round(point.x), round(point.y)))[:3]
+        assert color not in (M.COLOR_SIDEWALK, M.COLOR_SIDEWALK_SEAM), \
+            f"diagonal curb crosses cardinal asphalt at {crossing}: {color}"
+
+
+def test_crosswalk_bars_are_small_even_and_balanced():
+    game = M.Game()
+    junction = next((c, r) for c in sorted(M.ROAD_LINES)
+                    for r in sorted(M.ROAD_LINES)
+                    if all(M.tile_type_at(c + dc, r + dr) == M.TILE_ROAD
+                           for dc, dr in ((0, -1), (0, 1), (-1, 0), (1, 0))))
+    game.screen.fill((1, 2, 3))
+    game.draw_crosswalk(pygame.Rect(0, 0, 64, 64), *junction)
+    pixels = [(x, y) for y in range(64) for x in range(64)
+              if game.screen.get_at((x, y))[:3] == M.COLOR_CROSSWALK]
+    assert 500 <= len(pixels) <= 600, f"crosswalk paint is oversized: {len(pixels)}px"
+    xs = [x for x, _y in pixels]
+    ys = [y for _x, y in pixels]
+    assert min(xs) == min(ys) == 6
+    assert max(xs) == max(ys) == 57
+    # Rotating the compact pattern 90 degrees produces the same set.
+    assert set(pixels) == {(63 - y, x) for x, y in pixels}
+
+
 def test_metrolink_and_eads_pass_north_of_the_arch_grounds():
     """The first polyline ended on row 43 inside the Arch's 9x12 footprint;
     rails and the Eads deck visibly crossed the middle of the memorial lawn."""
@@ -220,3 +284,92 @@ def test_traffic_does_not_come_to_rest_inside_another_car():
                 if over.w * over.h >= 0.30 * small:
                     bad += 1
     assert bad <= 40, f"{bad} badly stacked car pairs over 600 steps"
+
+
+def test_streamed_traffic_stays_on_the_cardinal_road_grid():
+    """Diagonal roads and open rail/landmark ground are not AI corridors.
+
+    The ambient driver only understands cardinal named streets. A diagonal
+    spawn used to be snapped toward the nearest grid line, sometimes directly
+    onto MetroLink ballast or a landmark plaza, and from there collision saw
+    open ground and allowed the car to keep driving across it.
+    """
+    for seed in range(6):
+        random.seed(seed)
+        game = M.Game()
+        game.state = M.STATE_PLAYING
+        for _ in range(900):
+            game.update()
+            for car in game.cars:
+                if car.driver is not None or car.parked:
+                    continue
+                col, row = car.rect.centerx // M.TILE_SIZE, car.rect.centery // M.TILE_SIZE
+                assert M.traffic__is_grid_road(col, row), (
+                    f"seed {seed}: {car.variant} left traffic grid for "
+                    f"{M.GAME_MAP[row][col]} at {(col, row)}")
+
+
+def test_offroad_traffic_restores_its_last_road_position_and_turns_around():
+    game = M.Game()
+    edge = None
+    for row in range(2, M.MAP_TILES_H - 2):
+        for col in range(2, M.MAP_TILES_W - 2):
+            if not M.traffic__is_grid_road(col, row):
+                continue
+            for direction, (dx, dy) in enumerate(M.traffic__DIRS):
+                other = M.GAME_MAP[row + dy][col + dx]
+                if not other['collidable'] and not M.traffic__is_grid_road(col + dx, row + dy):
+                    edge = (col, row, col + dx, row + dy, direction)
+                    break
+            if edge:
+                break
+        if edge:
+            break
+    assert edge is not None, "map has no road edge beside open non-road ground"
+
+    col, row, off_col, off_row, direction = edge
+    car = M.Car(col * M.TILE_SIZE + M.TILE_SIZE // 2,
+                row * M.TILE_SIZE + M.TILE_SIZE // 2, variant='sedan')
+    car.angle = direction * math.pi * 0.5
+    car.driver = None
+    car.parked = False
+    assert M.traffic_init_car(car)
+    assert M.traffic_snap_to_lane(car)
+    safe = car.rect.center
+    car.rect.center = (off_col * M.TILE_SIZE + M.TILE_SIZE // 2,
+                       off_row * M.TILE_SIZE + M.TILE_SIZE // 2)
+    M.traffic_drive(car, (car,))
+    assert car.rect.center == safe
+    assert car.velocity == 0.0
+    assert M.traffic__is_grid_road(car.rect.centerx // M.TILE_SIZE,
+                                   car.rect.centery // M.TILE_SIZE)
+
+
+def test_unstack_does_not_shove_correct_opposing_lanes_off_the_road():
+    game = M.Game()
+    point = None
+    for col in sorted(M.ROAD_LINES):
+        for row in range(2, M.MAP_TILES_H - 2):
+            if row not in M.ROAD_LINES and M.traffic__is_grid_road(col, row):
+                point = col, row
+                break
+        if point:
+            break
+    assert point is not None
+    col, row = point
+    y = row * M.TILE_SIZE + M.TILE_SIZE // 2
+    south_x = int(M.traffic__lane_coord(1, col))
+    north_x = int(M.traffic__lane_coord(3, col))
+    south = M.Car(south_x, y, variant='sedan')
+    north = M.Car(north_x, y, variant='sedan')
+    south.angle, north.angle = math.pi * 0.5, math.pi * 1.5
+    south.driver = north.driver = None
+    south.parked = north.parked = False
+    # Their unrotated physics AABBs overlap, but their rendered/cardinal
+    # footprints do not: these are two correctly occupied opposing lanes.
+    assert south.rect.colliderect(north.rect)
+    assert not game.traffic_footprint(south).colliderect(game.traffic_footprint(north))
+    before = south.rect.center, north.rect.center
+    game.cars = [south, north]
+    game.unstack_traffic()
+    assert (south.rect.center, north.rect.center) == before

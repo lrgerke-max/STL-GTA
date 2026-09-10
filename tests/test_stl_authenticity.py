@@ -53,6 +53,22 @@ def test_named_streets_land_on_the_landmarks_they_actually_serve():
         assert row in M.ROAD_LINES and M.EW_STREET_NAMES.get(row)
 
 
+def test_grand_boulevard_stays_open_through_grand_center():
+    """The district mask must not turn its painted boulevard into a wall."""
+    gc = next(e for e in M.LANDMARKS if e[5] == "Grand Center Arts District")
+    lx, ly, lw, lh = gc[:4]
+    grand = next(line for line, name in M.NS_STREET_NAMES.items()
+                 if name == "GRAND BLVD")
+    assert lx <= grand < lx + lw
+
+    for row in range(ly, ly + lh):
+        tile = M.GAME_MAP[row][grand]
+        assert tile['type'] == M.TILE_ROAD, (grand, row, tile['type'])
+        assert not tile['collidable'], (grand, row)
+        assert tile['landmark'] == "Grand Center Arts District"
+        assert M.WALK_REACHABLE[row][grand], (grand, row)
+
+
 def test_the_diagonals_exist_and_are_drivable_end_to_end():
     """Gravois does not run at a right angle to anything. That is the point."""
     assert {"GRAVOIS AVE", "MANCHESTER AVE", "NATURAL BRIDGE"} <= {

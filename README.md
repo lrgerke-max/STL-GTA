@@ -99,8 +99,21 @@ pip install -r requirements.txt && python main.py
   `music/gloria-8bit.wav`, a 195-second pulse/square/triangle/noise chiptune. It loops once
   play begins, pauses with the game, and sits below the procedural engines, sirens, impacts,
   radio, and neighborhood ambience. `F4` toggles it without muting the rest of the city.
-- **Busy streets without the traffic jam**: the viewport sees 0.56% of the map, so population is streamed through a ring just outside the camera instead of smeared across the whole city. The calmer ten-car moving pool now measures **~1.8 moving cars and ~2.5 parked cars on screen** on the irregular network, with overlapping moving-car pairs averaging **0.09**, stalls averaging **0.31**, and traffic averaging **2.28 px/step** against its 3.25 cap. Twenty-two parked cars (including the two local showcase rides) still leave something to steal nearby; the streets breathe instead of becoming a permanent obstacle course.
-- **St. Louis traffic**: ordinary cars and taxis plus a City refuse truck, box truck, school bus,
+- **Busy streets without the traffic jam**: the viewport sees 0.56% of the map, so population is streamed through a ring just outside the camera instead of smeared across the whole city. The calmer ten-car moving pool now measures **~1.6 moving cars and ~2.6 parked cars on screen** on the irregular network, with overlapping moving-car pairs averaging **0.05**, stalls averaging **0.12**, and traffic averaging **2.27 px/step** against its 3.25 cap. Twenty-two parked cars (including the two local showcase rides) still leave something to steal nearby; the streets breathe instead of becoming a permanent obstacle course.
+- **Traffic stays on traffic streets**: ambient routing now admits only true cardinal-road
+  tiles, excluding diagonal reservations, landmark plazas, and dedicated MetroLink ballast.
+  Cars keep a last-known-good road position and recover within the same simulation frame if
+  physics carries them over a kerb. Vehicle overlap checks use the rotated body footprint,
+  so north/south traffic no longer mistakes two legal lanes for a collision and shoves both
+  cars into Grand Center. A 1,800-frame deterministic run now averages **0.05 real overlaps**,
+  **0.12 cars stalled over one second**, and **2.27 px/step** against the 3.25 cap.
+- **Road and rail joins read as joins**: diagonal shoulders are clipped at cardinal street
+  mouths while their asphalt continues through. Compact four-bar crosswalks replace the old
+  oversized blocks. MetroLink keeps asphalt at embedded and grade-crossing track, sleepers
+  stay on dedicated ballast, and the steel railheads follow rounded bends instead of hard
+  right-angle elbows.
+- **St. Louis traffic**: ordinary cars and taxis plus a safety-orange City refuse truck with
+  black `CITY` lettering, box truck, school bus,
   blue/red **Route 70 MetroBus**, Hill delivery Vespa, and a rare black Trans Am with a gold
   hood bird and the radio permanently stuck on KSHE — each with its own size and handling.
   Moving traffic spawns directly in its proper lane and uses a measured long-look steering
@@ -124,9 +137,10 @@ pip install -r requirements.txt && python main.py
   wait at destinations instead of clogging traffic: a St. Louis-built monster-truck homage
   inside Busch and the enormous red grocery cart from childhood parades at Soulard Market.
   The monster truck shrugs off potholes; the cart handles exactly like a giant shopping cart should.
-- **The Hill's hydrants**: six guaranteed curbside hydrants ring the neighborhood in green,
-  white and red. They occupy verified walkable sidewalk tiles rather than depending on the
-  generic street-clutter lottery, so the detail is actually there every time you visit.
+- **The Hill's hydrants**: six enlarged, guaranteed curbside hydrants ring the neighborhood
+  in broad green, white and red bands. They occupy verified walkable sidewalk tiles rather
+  than depending on the generic street-clutter lottery, so the detail is legible and actually
+  there every time you visit.
 - **The $50,000 Arch Job**: bank enough money and a real multi-stage finale opens under the
   Arch: borrow a cutter from City Museum, bring a getaway car, strap 43 pounds of visible
   stainless steel to it, survive a forced five-star run to The Hill, and lose the cops in
@@ -145,7 +159,11 @@ pip install -r requirements.txt && python main.py
   The Hill. Each has its own timer, failure rules, objective markers, and cash payout.
 - **Cash vs. score**: two separate currencies that mean different things. **Cash** comes from
   finished runs, can be banked safely beneath the Arch, and leaves via bail or a body-shop
-  respray. **Score** is the chaos counter. Playing carefully and playing recklessly are genuinely different strategies.
+  respray. Bail is painful but capped at **$1,000**, so one arrest never erases a whole good
+  session. **Score** is the chaos counter. Playing carefully and playing recklessly are genuinely different strategies.
+- **Defensive saves**: the title screen only offers Continue for a current, structurally valid
+  save. Missing, truncated, malformed, out-of-bounds, and incompatible saves fall back safely
+  to New Game without partially mutating a live run.
 - **Chaos multiplier (x1–x8)**: every reckless act — a hit, a shunt, a wreck — feeds a running multiplier that scales every point of score you earn. Park and it bleeds away; get **busted** or **wasted** and it's gone. The screen shouts each rung.
 - **Kill Frenzy**: a pulsing icon drops on the map. Touch it and a clock starts — `MOW DOWN 14 LOCALS`, `WRECK 8 MOTORS`, or the much hotter `DROP 6 COPS` — for a fat score payout and free multiplier rungs. Pure GTA1 "just one more go".
 - **Rampage streaks**: bowl a line of pedestrians and the per-hit value stacks, scaled by how

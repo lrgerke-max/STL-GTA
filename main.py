@@ -46,14 +46,13 @@ FOOT_ACCEL_RESPONSE = 0.42    # fraction of the gap to target speed closed/step
 FOOT_BRAKE_RESPONSE = 0.58    # stopping stays a little crisper than starting
 
 # Sprite draw scale. Purely cosmetic: collision rects stay 34x18 (car) and
-# 14x14 (ped) so physics and collisions are untouched. Cars read at ~5.3% of
-# screen width at 1.0, but a 320x256 PS1 view reads a car at ~7.5%, so the
-# sprites are drawn slightly over their collider to match that.
-SPRITE_SCALE_CAR = 1.30
-# Peds are authored at 13x13, already sized for the 14x14 collision rect.
-# Any non-integer scale (13 -> 16) doubles some pixel rows and not others,
-# which breaks the uniform chunky-pixel look, so they ship unscaled.
-SPRITE_SCALE_PED = 1.0
+# 14x14 (ped) so physics and traffic spacing are untouched. At 1.0 the game
+# read like a map viewed from too high up: street details were charming only
+# after somebody explained what they were. A modest nearest-neighbour lift
+# keeps the city in view while making a person, motorcycle, truck livery, and
+# hydrant legible during normal play rather than only in a screenshot crop.
+SPRITE_SCALE_CAR = 1.45
+SPRITE_SCALE_PED = 1.50
 SHADOW_DX = 3               # southeast, matching the building shadows
 SHADOW_DY = 3
 
@@ -353,6 +352,14 @@ for _dname, _dpts, _dw in DIAGONAL_STREETS:
         DIAGONAL_AT.setdefault(_t, _dname)
     for _t, _u in _diagonal_headings(_dpts, _dw).items():
         DIAGONAL_DIR.setdefault(_t, _u)
+
+# Curbs stop at the mouth of a crossing. The diagonal asphalt continues over
+# the cardinal street, but its sidewalk shoulders must not make two pale bars
+# across the intersecting carriageway.
+DIAGONAL_GRID_CROSSINGS = frozenset(
+    (col, row) for col, row in DIAGONAL_AT
+    if col in ROAD_LINES or row in ROAD_LINES
+)
 del _dname, _dpts, _dw, _t, _u
 
 # Speedometer scale. A bare 8.4 was calibrated against a top speed the car no
@@ -452,7 +459,8 @@ WANTED_DECAY_BY_STAR = (0, FPS * 6, FPS * 6, FPS * 9, FPS * 9, FPS * 9)
 WANTED_DECAY_STEPS = FPS * 8   # fallback / test reference
 # Bail scales with how hot you were when they took you, so a five-star bust
 # is a real loss and running is worth something.
-BAIL_BY_STAR = (100, 100, 250, 500, 1000, 2000)
+BAIL_MAX_LOSS = 1000       # an arrest hurts, but never wipes out a successful session
+BAIL_BY_STAR = (100, 100, 250, 500, 1000, 1000)
 BAIL_COST = 250             # reference figure; see bail_for()
 
 # --- Police senses: the chase is now a game of being seen ----------------
@@ -1608,6 +1616,7 @@ BANK_RADIUS = 150           # px from the centre of the Arch footprint
 BANK_MIN = 1                # do not spam the callout for nothing
 DROPPED_CASH_LIFE = FPS * 60    # how long your dropped roll waits for you
 DROPPED_CASH_RADIUS = 34
+SAVE_VERSION = 6
 ARCH_JOB_TARGET = 50000     # banked. The door at the end of the ladder.
 ARCH_JOB_SECONDS = 90
 ARCH_JOB_SCORE = 50000
@@ -2002,6 +2011,18 @@ LANDMARK_LAYOUT = {
     "Grand Center Arts District": "blocks",
 }
 LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
+
+# Bespoke district art may carry a real named street through its footprint.
+# Keep that street in the collision/traffic map as road rather than letting the
+# landmark's coarse tile mask turn the painted carriageway into a wall. Grand
+# Boulevard is drawn north/south through the middle of Grand Center at column
+# 57; it must remain continuous between the grid roads above and below.
+LANDMARK_THROUGH_ROADS = {
+    "Grand Center Arts District": {
+        'cols': frozenset((57,)),
+        'rows': frozenset(),
+    },
+}
 
 # Positions trace the real St. Louis map (north = up, Mississippi on the east
 # edge): the Arch on the riverfront with downtown and the ballpark just inland,
@@ -2473,7 +2494,17 @@ def build_map():
     for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
         for y in range(ly, min(ly + lh, MAP_TILES_H)):
             for x in range(lx, min(lx + lw, MAP_TILES_W)):
-                game_map[y][x] = _landmark_tile(x - lx, y - ly, lw, lh, kind, name, color)
+                through = LANDMARK_THROUGH_ROADS.get(name)
+                if (through is not None
+                        and (x in through['cols'] or y in through['rows'])):
+                    game_map[y][x] = {
+                        'type': TILE_ROAD, 'collidable': False,
+                        'landmark': name, 'color': COLOR_ROAD,
+                        'street': street_name(x, y),
+                    }
+                else:
+                    game_map[y][x] = _landmark_tile(
+                        x - lx, y - ly, lw, lh, kind, name, color)
 
     _stamp_features(game_map)
     _stamp_diagonals(game_map)
@@ -3484,6 +3515,32 @@ def is_blocked(rect):
     return False
 
 
+def pedestrian_ground_is_clear(rect):
+    """True when a pedestrian's whole collider is on reachable ground.
+
+    Pedestrian spawners normally choose an open tile centre, but the live pool
+    is long-lived: knockback, streamed repositioning and replacement spawns all
+    reuse the same objects and can expose a bad placement immediately.  Keep a
+    stricter, named invariant than ``not is_blocked`` so a walker can never be
+    accepted on a building tile (and visually read as standing on its roof).
+    """
+    rect = pygame.Rect(rect)
+    if (rect.left < 0 or rect.top < 0
+            or rect.right > MAP_WIDTH or rect.bottom > MAP_HEIGHT):
+        return False
+    if is_blocked(rect) or not is_reachable(rect.centerx, rect.centery):
+        return False
+    start_col = rect.left // TILE_SIZE
+    end_col = (rect.right - 1) // TILE_SIZE
+    start_row = rect.top // TILE_SIZE
+    end_row = (rect.bottom - 1) // TILE_SIZE
+    for row in range(start_row, end_row + 1):
+        for col in range(start_col, end_col + 1):
+            if GAME_MAP[row][col]['type'] == TILE_BUILDING:
+                return False
+    return True
+
+
 def sight_blocked(ax, ay, bx, by):
     """True when a building stands between two world points.
 
@@ -3676,6 +3733,36 @@ def free_point_near(x, y, w, h, max_rings=6, require_reachable=True):
                 continue
             return probe.centerx, probe.centery
     return None
+
+
+def pedestrian_point_near(x, y, max_rings=6):
+    """Resolve a candidate into a safe 14px pedestrian placement."""
+    probe = pygame.Rect(0, 0, 14, 14)
+    probe.center = (int(x), int(y))
+    if pedestrian_ground_is_clear(probe):
+        return probe.center
+    spot = free_point_near(x, y, probe.width, probe.height,
+                           max_rings=max_rings, require_reachable=True)
+    if spot is None:
+        return None
+    probe.center = spot
+    return probe.center if pedestrian_ground_is_clear(probe) else None
+
+
+def random_pedestrian_point():
+    """Return a valid pedestrian point, with a deterministic exhaustive fallback."""
+    for _ in range(32):
+        spot = pedestrian_point_near(*random_open_spawn(), max_rings=4)
+        if spot is not None:
+            return spot
+    probe = pygame.Rect(0, 0, 14, 14)
+    for row in range(1, MAP_TILES_H - 1):
+        for col in range(1, MAP_TILES_W - 1):
+            probe.center = (col * TILE_SIZE + TILE_SIZE // 2,
+                            row * TILE_SIZE + TILE_SIZE // 2)
+            if pedestrian_ground_is_clear(probe):
+                return probe.center
+    raise RuntimeError("map contains no valid pedestrian ground")
 
 
 def landmark_rect(entry):
@@ -4064,6 +4151,8 @@ cars_TRANS_AM_GOLD = (206, 154, 54)
 cars_METROBUS_BLUE = (42, 82, 142)
 cars_METROBUS_RED = (184, 48, 48)
 cars_METROBUS_ROUTE = (242, 184, 52)
+cars_CITY_SERVICE_ORANGE = (218, 104, 32)
+cars_CITY_SERVICE_LETTERING = (24, 22, 20)
 
 cars_SHADOW_ALPHA = 115  # 45% of 255
 
@@ -4375,15 +4464,33 @@ def cars_big_grid(kind):
     top, bot = 1, H - 2                        # body sits between the wheel nubs
 
     if kind == 'garbage_truck':
-        cab = (74, 108, 150)                   # St. Louis City blue cab
-        box = (58, 120, 78)                    # green refuse body
+        # St. Louis refuse trucks are rolling city equipment, not anonymous
+        # green dumpsters. Safety orange makes the silhouette legible in
+        # traffic; a real pixel-wordmark on both flanks still reads after the
+        # game's normal sprite scale and at every cardinal heading.
+        cab = cars_CITY_SERVICE_ORANGE
+        box = cars_CITY_SERVICE_ORANGE
         cars__put_r(grid, 2, top, 33, bot, box)
         for x in range(5, 33, 4):
             cars__put_r(grid, x, top + 1, x, bot - 1, cars__darker(box, 0.25))
         cars__put_r(grid, 1, top + 3, 3, bot - 3, cars__darker(box, 0.45))   # loader
         cars__put_r(grid, 34, top, 46, bot, cab)
         cars__put_r(grid, 44, top + 2, 45, bot - 2, cars_GLASS_FRONT)
-        cars__put_r(grid, 36, top + 3, 39, bot - 3, (216, 216, 208))         # door
+        cars__put_r(grid, 36, top + 3, 39, bot - 3, cars__lighter(cab))      # door
+
+        glyphs = {
+            'C': ("###", "#..", "#..", "#..", "###"),
+            'I': ("###", ".#.", ".#.", ".#.", "###"),
+            'T': ("###", ".#.", ".#.", ".#.", ".#."),
+            'Y': ("#.#", "#.#", ".#.", ".#.", ".#."),
+        }
+        for y0 in (top + 2, bot - 6):
+            for i, letter in enumerate("CITY"):
+                for gy, bits in enumerate(glyphs[letter]):
+                    for gx, bit in enumerate(bits):
+                        if bit == '#':
+                            cars__put(grid, 7 + i * 4 + gx, y0 + gy,
+                                      cars_CITY_SERVICE_LETTERING)
     elif kind == 'bus':
         body = (232, 182, 40)                  # school-bus yellow
         trim = (26, 26, 28)
@@ -5913,6 +6020,9 @@ props_C_LAMP_DIM = (168, 154, 104)
 props_C_RED = (198, 158, 46)          # hydrant body (gold)
 props_C_RED_DARK = (150, 118, 36)     # body shade
 props_C_RED_LIT = (176, 58, 48)       # bonnet / side-cap red
+props_C_HILL_GREEN = (38, 132, 64)
+props_C_HILL_WHITE = (242, 238, 220)
+props_C_HILL_RED = (202, 48, 44)
 props_C_GREEN_BIN = (72, 90, 62)
 props_C_GREEN_BIN_LID = (86, 104, 74)
 props_C_GREEN_BIN_DARK = (48, 62, 42)
@@ -5959,7 +6069,7 @@ props__FLAT = frozenset(('manhole', 'above_pool'))
 props__ANCHORS = {
     'streetlight': (4, 10),
     'hydrant': (3, 7),
-    'hydrant_hill': (3, 7),
+    'hydrant_hill': (5, 13),
     'trafficlight': (3, 9),
     'dumpster': (7, 9),
     'trashcan': (3, 7),
@@ -6051,13 +6161,19 @@ def props__build_hydrant_hill():
     """The Hill paints its hydrants green, white and red. Every corner. It is
     the first thing anyone from here notices about the neighbourhood, and it
     costs one extra sprite."""
-    s = props__surf(7, 8)
-    props__box(s, 0, 2, 7, 3, (30, 86, 48))
-    props__rect(s, 0, 3, 7, 1, (46, 118, 66))
-    props__box(s, 1, 0, 5, 8, (238, 234, 214))
-    props__rect(s, 1, 0, 5, 2, (30, 86, 48))          # green cap
-    props__rect(s, 1, 6, 5, 2, (176, 46, 44))         # red base
-    props__rect(s, 2, 3, 3, 1, (222, 218, 200))
+    # The old 7x8 mark collapsed to a white speck at gameplay scale. A wider
+    # 11x14 silhouette leaves each Italian-tricolour section several chunky
+    # pixels tall while keeping the footprint tiny beside a pedestrian.
+    s = props__surf(11, 14)
+    props__box(s, 0, 5, 11, 5, props_C_HILL_RED)        # side caps / arms
+    props__rect(s, 1, 7, 2, 1, props_C_HILL_WHITE)
+    props__rect(s, 8, 7, 2, 1, props_C_HILL_WHITE)
+    props__box(s, 3, 2, 5, 11, props_C_HILL_WHITE)      # central barrel
+    props__rect(s, 4, 4, 1, 6, (255, 252, 236))         # hard highlight
+    props__box(s, 2, 0, 7, 5, props_C_HILL_GREEN)       # green bonnet
+    props__rect(s, 3, 1, 4, 1, (72, 166, 92))
+    props__box(s, 2, 10, 7, 4, props_C_HILL_RED)        # broad red foot
+    props__rect(s, 3, 11, 4, 1, (224, 76, 66))
     return s
 
 
@@ -7434,7 +7550,7 @@ traffic_CREEP_FRAMES = 90            # how long a creep lasts
 traffic_CREEP_SPEED = 1.5            # creep pace, slow enough to still read as yielding
 traffic_PROBE_AHEAD = 26             # px in front of the nose checked for a wall
 
-traffic_SEGMENT_SCAN = 9             # tiles scanned ahead when validating an exit
+traffic_SEGMENT_SCAN = 18            # covers the longest irregular block plus its next junction
 
 # --- Pulling out around a stopped obstacle --------------------------------
 # A kerbside car, a wreck, a car the player rammed into the gutter: any of
@@ -7498,6 +7614,27 @@ def traffic__tile(col, row):
 def traffic__is_road(col, row):
     t = traffic__tile(col, row)
     return t is not None and t['type'] == traffic_TILE_ROAD and not t['collidable']
+
+
+def traffic__is_grid_road(col, row):
+    """A road tile this cardinal-only driver can actually follow.
+
+    The map also contains diagonal arterials. They are legitimate player roads,
+    but this AI only understands named north/south and east/west corridors. A
+    diagonal tile used as a spawn used to be snapped sideways to the nearest
+    grid line, which could be a MetroLink cut, a plaza, or a landmark lawn.
+    """
+    tile = traffic__tile(col, row)
+    if not (traffic__is_road(col, row)
+            and (col in traffic__ROAD_LINES or row in traffic__ROAD_LINES)):
+        return False
+    # Cars may cross MetroLink at a marked grade crossing, but they must not
+    # turn onto or spawn along its embedded/reserved alignment. The Loop
+    # trolley is explicitly street-running on Delmar, so ordinary traffic is
+    # allowed to share that road.
+    rail = tile.get('rail')
+    return (rail is None or rail == 'trolley'
+            or bool(tile.get('rail_crossing')))
 
 
 def traffic__is_open(col, row):
@@ -7620,6 +7757,7 @@ def traffic__new_state(car):
         'halt': 0,
         'creep': 0,
         'pass': 0.0,            # current pull-out offset, lane coords
+        'safe_pos': None,       # last centre known to be on the cardinal road grid
     }
 
 
@@ -7638,20 +7776,21 @@ def traffic_init_car(car):
     col = int(car.rect.centerx) // traffic__TS
     row = int(car.rect.centery) // traffic__TS
 
+    if traffic__is_grid_road(col, row):
+        st['safe_pos'] = car.rect.center
+
     # Candidate axes: whichever corridor(s) this tile belongs to.
     cands = []
-    if row in traffic__ROAD_LINES:
+    if traffic__is_road(col, row) and row in traffic__ROAD_LINES:
         cands.extend(((0, row), (2, row)))
-    if col in traffic__ROAD_LINES:
+    if traffic__is_road(col, row) and col in traffic__ROAD_LINES:
         cands.extend(((1, col), (3, col)))
     if not cands:
-        # Off the grid entirely: aim along the nearest road line.
-        near_row = min(traffic__LINES, key=lambda v: abs(v - row)) if traffic__LINES else row
-        near_col = min(traffic__LINES, key=lambda v: abs(v - col)) if traffic__LINES else col
-        if abs(near_row - row) <= abs(near_col - col):
-            cands = [(0, near_row), (2, near_row)]
-        else:
-            cands = [(1, near_col), (3, near_col)]
+        # A parked/player-abandoned car may legitimately be on a driveway,
+        # diagonal, rail cut or plaza. Do not invent a cardinal corridor and
+        # make it drive across whatever happens to lie between it and that line.
+        st['valid'] = False
+        return False
 
     facing = int(round(car.angle / (math.pi * 0.5))) % 4
 
@@ -7663,7 +7802,9 @@ def traffic_init_car(car):
 
     cands.sort(key=rank)
     st['dir'], st['line'] = cands[0]
+    st['valid'] = True
     car.wander_dir = traffic__WANDER_DIR_MAP[st['dir']]
+    return True
 
 
 # main.py's wander_dir order is [(1,0), (-1,0), (0,1), (0,-1)]; keep it in sync
@@ -7698,8 +7839,11 @@ def traffic_snap_to_lane(car):
     """
     st = getattr(car, '_traffic_ai', None)
     if st is None:
-        traffic_init_car(car)
+        if not traffic_init_car(car):
+            return False
         st = car._traffic_ai
+    if not st.get('valid', False):
+        return False
     col = int(car.rect.centerx) // traffic__TS
     row = int(car.rect.centery) // traffic__TS
     old = car.rect.center
@@ -7717,6 +7861,7 @@ def traffic_snap_to_lane(car):
     car.steer_angle = 0.0
     car.vlat = 0.0
     car._prev_angle = car.angle
+    st['safe_pos'] = car.rect.center
     return True
 
 
@@ -7893,18 +8038,49 @@ def traffic__should_yield(car, st, neighbours, jcol, jrow, dist_j):
 # One frame of driving
 # --------------------------------------------------------------------------
 
+def traffic__recover_to_grid(car, st):
+    """Put a wayward ambient vehicle back at its last valid road point."""
+    safe = st.get('safe_pos')
+    if safe is not None:
+        car.rect.center = safe
+    car.velocity = 0.0
+    st['dir'] = (st['dir'] + 2) % 4
+    car.angle = st['dir'] * math.pi * 0.5
+    car.steer_angle = 0.0
+    car.vlat = 0.0
+    st['junction'] = None
+    st['next_dir'] = None
+    st['last_junction'] = None
+    st['halt'] = 0
+    st['creep'] = 0
+
+
 def traffic_drive(car, neighbours=()):
     """One frame of ambient driving.  Ends with exactly one physics_step()."""
     st = getattr(car, '_traffic_ai', None)
     if st is None:
-        traffic_init_car(car)
+        if not traffic_init_car(car):
+            car.velocity = 0.0
+            return
         st = car._traffic_ai
+    if not st.get('valid', False):
+        car.velocity = 0.0
+        return
 
     ts = traffic__TS
     px = car.rect.centerx
     py = car.rect.centery
     col = int(px) // ts
     row = int(py) // ts
+
+    # Never continue across open non-road ground. Collision alone cannot help:
+    # ballast, landmark plazas and lawns are intentionally walkable. Restore
+    # the last road position (normally only a few pixels behind), turn around,
+    # and let the ordinary junction logic find a different route.
+    if not traffic__is_grid_road(col, row):
+        traffic__recover_to_grid(car, st)
+        return
+    st['safe_pos'] = car.rect.center
 
     # --- forget the junction we just left ---------------------------------
     lj = st['last_junction']
@@ -8088,6 +8264,14 @@ def traffic_drive(car, neighbours=()):
         car.input_throttle = 0.0
 
     car.physics_step()
+
+    # physics_step can cross a tile boundary on this very frame. Repair it
+    # immediately so rendering and collision never get one frame of a car on
+    # a lawn, plaza, roof, or reserved rail bed.
+    new_col = car.rect.centerx // ts
+    new_row = car.rect.centery // ts
+    if not traffic__is_grid_road(new_col, new_row):
+        traffic__recover_to_grid(car, st)
 
 
 
@@ -12341,7 +12525,7 @@ class Pedestrian:
 
     def _try_move(self, dx, dy):
         temp = self.rect.move(int(dx), int(dy))
-        if not is_blocked(temp):
+        if pedestrian_ground_is_clear(temp):
             self.rect.topleft = temp.topleft
             return True
         return False
@@ -12516,6 +12700,13 @@ class Game:
         # Most traffic is parked at the kerb, GTA1 style, so there is always a
         # car you can walk up to and steal. The rest drive as ambient traffic.
         parking_set_blocked_fn(is_blocked)
+        # Spawning now asks the traffic module whether a tile belongs to the
+        # cardinal grid, so install its read-only map hooks before creating the
+        # first moving car. The crossing callback is only used during updates,
+        # after self.rail_crossings exists.
+        traffic_set_hooks(is_blocked, GAME_MAP, TILE_SIZE,
+                          MAP_TILES_W, MAP_TILES_H, ROAD_LINES,
+                          self.rail_gate_holds)
         self.cars = []
         ordinary_parked = PARKED_CAR_COUNT - len(SHOWCASE_VEHICLES)
         bays = parking_parking_spots(max_count=ordinary_parked,
@@ -12546,25 +12737,19 @@ class Game:
         for _ in range(MOVING_CAR_COUNT):
             # seeded around the player, not smeared over the whole map, so the
             # first street you see already has traffic on it - and never on top
-            # of a car that is already there.
-            spot = None
-            for _try in range(8):
-                cand = ring_spawn_near(px, py, road_only=True, rmin=140,
-                                       rmax=POP_KEEP_RADIUS)
-                if cand is None:
-                    break
-                if self.spot_is_free(cand[0], cand[1], pad=self.SPAWN_CLEARANCE):
-                    spot = cand
-                    break
+            # of a car that is already there. Diagonal arterials are player
+            # roads but not valid inputs to the cardinal traffic driver.
+            spot = self.free_spawn_spot(
+                tries=24, grid_traffic=True, ax=px, ay=py, road_only=True,
+                rmin=140, rmax=POP_KEEP_RADIUS)
+            if spot is None:
+                spot = self.fallback_traffic_spawn()
             cx, cy = spot if spot else random_open_spawn(road_only=True)
             self.cars.append(Car(cx, cy))
 
         self.rail = build_rail_vehicles()
         self.rail_crossings = build_rail_crossings()
 
-        traffic_set_hooks(is_blocked, GAME_MAP, TILE_SIZE,
-                          MAP_TILES_W, MAP_TILES_H, ROAD_LINES,
-                          self.rail_gate_holds)
         for car in self.cars:
             traffic_init_car(car)
             if not car.parked:
@@ -12577,8 +12762,13 @@ class Game:
 
         self.pedestrians = []
         for _ in range(PEDESTRIAN_COUNT):
-            spot = ring_spawn_near(px, py, rmin=50, rmax=POP_KEEP_RADIUS)
-            px2, py2 = spot if spot else random_open_spawn()
+            candidate = ring_spawn_near(px, py, rmin=50, rmax=POP_KEEP_RADIUS)
+            if candidate is None:
+                candidate = random_pedestrian_point()
+            spot = pedestrian_point_near(*candidate, max_rings=8)
+            if spot is None:                       # map-wide fallback, practically unreachable
+                spot = random_pedestrian_point()
+            px2, py2 = spot
             self.pedestrians.append(Pedestrian(px2, py2, self._ped_kind_for(px2, py2)))
         self._kerb_queue = []      # cached kerb spots for recycling parked cars
 
@@ -12767,6 +12957,8 @@ class Game:
         self.school_open = False
         self.school_query = ""
         self.school_cursor = 0
+        self._save_probe_signature = None
+        self._save_probe_valid = False
 
         # --- heat ---------------------------------------------------------
         self.infraction_at = {}   # offence key -> sim step it may re-arm at
@@ -12802,11 +12994,92 @@ class Game:
             self.pad = None
 
     # ---------------- persistence ----------------
+    @staticmethod
+    def _read_save_state(path="savegame.json"):
+        """Read and validate a current save before any live state is changed.
+
+        The title screen probes this too. A file merely existing is not enough
+        to advertise CONTINUE: truncated JSON, structurally malformed data and
+        old schemas all stay on the safe NEW GAME path instead of failing after
+        the player has already selected them.
+        """
+        with open(path, 'r') as f:
+            state = json.load(f)
+        if not isinstance(state, dict):
+            raise ValueError("save root is not an object")
+        if state.get('version') != SAVE_VERSION:
+            raise ValueError(f"unsupported save version {state.get('version')!r}")
+
+        player = state.get('player')
+        if not isinstance(player, dict):
+            raise ValueError("save has no player position")
+        try:
+            px = float(player['x'])
+            py = float(player['y'])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid player position") from exc
+        if (not math.isfinite(px) or not math.isfinite(py)
+                or not 0 <= px <= MAP_WIDTH or not 0 <= py <= MAP_HEIGHT):
+            raise ValueError("player position is outside the city")
+
+        for key in ('character', 'arch_job', 'weapons'):
+            if not isinstance(state.get(key), dict):
+                raise ValueError(f"invalid {key} record")
+        for key in ('discovered', 'job_types_done'):
+            value = state.get(key)
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"invalid {key} list")
+        arsenal = state['weapons']
+        owned = arsenal.get('owned')
+        ammo = arsenal.get('ammo')
+        if (not isinstance(owned, list)
+                or not all(isinstance(item, str) for item in owned)
+                or not isinstance(ammo, dict)
+                or not isinstance(arsenal.get('selected'), str)):
+            raise ValueError("invalid weapons record")
+
+        numeric = ('score', 'cash', 'banked', 'wanted_level', 'jobs_done',
+                   'jobs_failed', 'side_missions_done', 'side_missions_failed',
+                   'side_mission_serial', 'best_streak')
+        for key in numeric:
+            value = state.get(key)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"invalid {key}")
+            if value < 0:
+                raise ValueError(f"negative {key}")
+        for kind, amount in ammo.items():
+            if not isinstance(kind, str):
+                raise ValueError("invalid ammunition type")
+            if isinstance(amount, bool) or not isinstance(amount, int):
+                raise ValueError("invalid ammunition count")
+            if amount < 0:
+                raise ValueError("negative ammunition")
+        return state
+
+    def loadable_save_exists(self, path="savegame.json"):
+        """Cheap title-screen probe, reparsing only when the file changes."""
+        absolute = os.path.abspath(path)
+        try:
+            stat = os.stat(path)
+            signature = (absolute, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = (absolute, None, None)
+        if signature == self._save_probe_signature:
+            return self._save_probe_valid
+        try:
+            self._read_save_state(path)
+            valid = True
+        except (OSError, json.JSONDecodeError, ValueError):
+            valid = False
+        self._save_probe_signature = signature
+        self._save_probe_valid = valid
+        return valid
+
     def save_game(self, announce=True):
         here = self.active_rect().center
         self._store_current_ammo()
         state = {
-            'version': 6,
+            'version': SAVE_VERSION,
             'player': {'x': here[0], 'y': here[1]},
             'score': self.score,
             'cash': self.cash,
@@ -12837,18 +13110,15 @@ class Game:
         try:
             with open("savegame.json", 'w') as f:
                 json.dump(state, f)
+            self._save_probe_signature = None
             if announce:
                 self.add_toast("Game saved")
         except OSError as e:
             self.add_toast(f"Save failed: {e}")
 
     def load_game(self):
-        if not os.path.exists("savegame.json"):
-            self.add_toast("No save file found")
-            return False
         try:
-            with open("savegame.json", 'r') as f:
-                state = json.load(f)
+            state = self._read_save_state()
             if self.driving:                      # step out before teleporting
                 self.driving.driver = None
                 self.driving.parked = True
@@ -12948,6 +13218,9 @@ class Game:
             self.camera.snap_to(self.player_rect)
             self.add_toast("Game loaded")
             return True
+        except FileNotFoundError:
+            self.add_toast("No save file found")
+            return False
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             self.add_toast(f"Load failed: {e}")
             return False
@@ -13444,7 +13717,8 @@ class Game:
         self.kick(2.2)
         if ped in self.pedestrians:
             self.pedestrians.remove(ped)
-            nx, ny = random_open_spawn()
+            spot = random_pedestrian_point()
+            nx, ny = spot
             self.pedestrians.append(Pedestrian(nx, ny, self._ped_kind_for(nx, ny)))
         if score:
             self.bump_combo(pos, 12, speed)
@@ -13971,12 +14245,33 @@ class Game:
             return False
         return True
 
-    def free_spawn_spot(self, tries=6, skip=None, **kwargs):
+    def free_spawn_spot(self, tries=6, skip=None, grid_traffic=False, **kwargs):
         """Retry a ring spawn until it does not overlap an existing vehicle."""
         for _ in range(tries):
             spot = ring_spawn_near(**kwargs)
             if spot is None:
                 return None
+            if grid_traffic:
+                col, row = int(spot[0]) // TILE_SIZE, int(spot[1]) // TILE_SIZE
+                if not traffic__is_grid_road(col, row):
+                    continue
+            if self.spot_is_free(*spot, skip=skip):
+                return spot
+        return None
+
+    def fallback_traffic_spawn(self, skip=None):
+        """Find a guaranteed free cardinal-road centre without random retries."""
+        candidates = []
+        for row in range(2, MAP_TILES_H - 2):
+            for col in range(2, MAP_TILES_W - 2):
+                if traffic__is_grid_road(col, row):
+                    candidates.append((col * TILE_SIZE + TILE_SIZE // 2,
+                                       row * TILE_SIZE + TILE_SIZE // 2))
+        if not candidates:
+            return None
+        start = random.randrange(len(candidates))
+        for index in range(len(candidates)):
+            spot = candidates[(start + index) % len(candidates)]
             if self.spot_is_free(*spot, skip=skip):
                 return spot
         return None
@@ -14019,12 +14314,21 @@ class Game:
         for ped in self.pedestrians:
             if moved >= POP_RECYCLE_PER_STEP:
                 break
-            if ped.down_timer > 0:            # do not vanish a body mid-fall
+            invalid_ground = not pedestrian_ground_is_clear(ped.rect)
+            if ped.down_timer > 0 and not invalid_ground:
+                # Do not vanish a body mid-fall unless it is already somewhere
+                # impossible, such as a roof tile exposed by bad placement.
                 continue
             dx, dy = ped.rect.centerx - ax, ped.rect.centery - ay
-            if dx * dx + dy * dy <= limit:
+            if dx * dx + dy * dy <= limit and not invalid_ground:
                 continue
-            spot = ring_spawn_near(ax, ay, heading=heading)
+            candidate = ring_spawn_near(ax, ay, heading=heading)
+            spot = (pedestrian_point_near(*candidate, max_rings=3)
+                    if candidate is not None else None)
+            if spot is None and invalid_ground:
+                # A corrupt live placement is repaired even if the preferred
+                # off-screen ring happened not to find a candidate this step.
+                spot = random_pedestrian_point()
             if spot is None:
                 continue
             ped.rect.center = spot
@@ -14036,6 +14340,7 @@ class Game:
             ped.knock.update(0, 0)
             if ped.follower:
                 ped.follower.x, ped.follower.y = float(spot[0]), float(spot[1])
+                ped.follower.placed = True
             moved += 1
 
         for car in self.cars:
@@ -14065,7 +14370,10 @@ class Game:
                 car.velocity = 0.0
             else:
                 spot = self.free_spawn_spot(skip=car, ax=ax, ay=ay,
-                                            road_only=True, heading=heading)
+                                            road_only=True, heading=heading,
+                                            grid_traffic=True)
+                if spot is None:
+                    spot = self.fallback_traffic_spawn(skip=car)
                 if spot is None:
                     continue
                 car.rect.center = spot
@@ -14691,7 +14999,7 @@ class Game:
     # ---------------- title / character input ----------------
     def title_options(self):
         options = ["NEW GAME"]
-        if os.path.exists("savegame.json"):
+        if self.loadable_save_exists():
             options.insert(0, "CONTINUE")
         options.append("QUIT")
         return tuple(options)
@@ -15119,10 +15427,27 @@ class Game:
             self.player_rect.center = probe.center
 
     # ---------------- update ----------------
-    #: most a car is shoved out of another in one step, px. Big enough to
-    #: clear a real overlap in a few frames, small enough that it never reads
-    #: as a bounce.
-    UNSTACK_STEP = 4
+    #: most a car is shoved out of another in one step, px. Ambient cars can
+    #: close at 6.5px/step, so the old 4px cap literally lost ground while two
+    #: cars approached and allowed a pileup to deepen indefinitely.
+    UNSTACK_STEP = 8
+
+    @staticmethod
+    def traffic_footprint(car):
+        """Cardinal, orientation-aware footprint used only for AI separation.
+
+        Car.rect is deliberately an unrotated physics AABB. A northbound sedan
+        therefore appears 34px wide to code even though its rendered body is
+        only 18px across. Opposing north/south lanes are 30px apart, so the old
+        separator saw correctly lane-centred cars as overlapping and shoved
+        them off the street onto rail cuts and open landmark ground.
+        """
+        vertical = abs(math.sin(car.angle)) > abs(math.cos(car.angle))
+        w, h = ((car.rect.h, car.rect.w) if vertical
+                else (car.rect.w, car.rect.h))
+        footprint = pygame.Rect(0, 0, w, h)
+        footprint.center = car.rect.center
+        return footprint
 
     def unstack_traffic(self):
         """Push overlapping AI cars apart, by the depth they actually overlap.
@@ -15137,7 +15462,7 @@ class Game:
                    if c.driver is None and c is not self.driving]
         for i, a in enumerate(traffic):
             for b in traffic[i + 1:]:
-                ar, br = a.rect, b.rect
+                ar, br = self.traffic_footprint(a), self.traffic_footprint(b)
                 if not ar.colliderect(br):
                     continue
                 if a.parked and b.parked:
@@ -15168,7 +15493,10 @@ class Game:
                     # nowhere to go and the cars would stay welded together.
                     for px_, py_ in axes:
                         moved = car.rect.move(px_ * sign * step, py_ * sign * step)
-                        if (0 <= moved.left and moved.right <= MAP_WIDTH
+                        col, row = moved.centerx // TILE_SIZE, moved.centery // TILE_SIZE
+                        on_route = car.parked or traffic__is_grid_road(col, row)
+                        if (on_route
+                                and 0 <= moved.left and moved.right <= MAP_WIDTH
                                 and 0 <= moved.top and moved.bottom <= MAP_HEIGHT
                                 and not is_blocked(moved)):
                             car.rect.topleft = moved.topleft
@@ -16575,7 +16903,8 @@ class Game:
             self.fail_arch_job("Evidence impounded. The Arch job can wait.")
         # Bail scales with how hot you were when they took you, so a five-star
         # bust is a real loss and running is worth something.
-        bail = BAIL_BY_STAR[min(self.peak_star, WANTED_MAX)]
+        bail = min(BAIL_MAX_LOSS,
+                   BAIL_BY_STAR[min(self.peak_star, WANTED_MAX)])
         from_hand = min(self.cash, bail)
         self.cash -= from_hand
         from_bank = min(self.banked, bail - from_hand)
@@ -16755,7 +17084,12 @@ class Game:
         # Diagonal tiles reserve a walkable corridor, but the asphalt itself is
         # drawn once as a continuous polyline in draw_diagonal_network().  A
         # square of asphalt per tile was the source of the staircase/plaza look.
-        if tile.get('diagonal') and not (c in ROAD_LINES and r in ROAD_LINES):
+        # At a diagonal/grid crossing the square beneath the smooth diagonal
+        # must remain the cardinal road. Treating every diagonal reservation
+        # as sidewalk left pale triangular curb wedges across the mouth of the
+        # intersecting street. Only off-grid diagonal tiles need this neutral
+        # sidewalk underlay.
+        if tile.get('diagonal') and c not in ROAD_LINES and r not in ROAD_LINES:
             pygame.draw.rect(self.screen, COLOR_SIDEWALK, rect)
             n = _noise(c, r, 17)
             pygame.draw.line(self.screen, COLOR_PLAZA_SEAM,
@@ -16775,22 +17109,26 @@ class Game:
         # 23px-tall rendered car. Six keeps the kerb readable without making a
         # legal two-lane road look like an alley.
         apron = 6
-        for dr, dc, horizontal in ((0, -1, True), (0, 1, True), (-1, 0, False), (1, 0, False)):
-            nt = tile_type_at(c + dc, r + dr)
-            if nt == TILE_ROAD:
-                continue
-            if horizontal:  # apron running along a vertical road edge
-                x0 = rect.left + 2 if dc < 0 else rect.right - apron - 2
-                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (x0, rect.top + 2, apron, TILE_SIZE - 4))
-                pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
-                                 (x0 + (apron if dc > 0 else 0), rect.top + 2),
-                                 (x0 + (apron if dc > 0 else 0), rect.bottom - 2), 1)
-            else:  # apron running along a horizontal road edge
-                y0 = rect.top + 2 if dr < 0 else rect.bottom - apron - 2
-                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (rect.left + 2, y0, TILE_SIZE - 4, apron))
-                pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
-                                 (rect.left + 2, y0 + (apron if dr > 0 else 0)),
-                                 (rect.right - 2, y0 + (apron if dr > 0 else 0)), 1)
+        # A diagonal/cardinal crossing is one continuous intersection mouth.
+        # Cardinal edge aprons here recreated the very curb bars that the
+        # diagonal shoulder pass clips away, so leave the whole underlay paved.
+        if not tile.get('diagonal'):
+            for dr, dc, horizontal in ((0, -1, True), (0, 1, True), (-1, 0, False), (1, 0, False)):
+                nt = tile_type_at(c + dc, r + dr)
+                if nt == TILE_ROAD:
+                    continue
+                if horizontal:  # apron running along a vertical road edge
+                    x0 = rect.left + 2 if dc < 0 else rect.right - apron - 2
+                    pygame.draw.rect(self.screen, COLOR_SIDEWALK, (x0, rect.top + 2, apron, TILE_SIZE - 4))
+                    pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
+                                     (x0 + (apron if dc > 0 else 0), rect.top + 2),
+                                     (x0 + (apron if dc > 0 else 0), rect.bottom - 2), 1)
+                else:  # apron running along a horizontal road edge
+                    y0 = rect.top + 2 if dr < 0 else rect.bottom - apron - 2
+                    pygame.draw.rect(self.screen, COLOR_SIDEWALK, (rect.left + 2, y0, TILE_SIZE - 4, apron))
+                    pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM,
+                                     (rect.left + 2, y0 + (apron if dr > 0 else 0)),
+                                     (rect.right - 2, y0 + (apron if dr > 0 else 0)), 1)
 
         # intersection: zebra crossings, no centre lines through it
         if c in ROAD_LINES and r in ROAD_LINES:
@@ -16859,6 +17197,7 @@ class Game:
 
     def draw_diagonal_network(self):
         """Draw every named diagonal as one continuous, normal-width road."""
+        routes = []
         for _name, points, _width in DIAGONAL_STREETS:
             screen_points = [
                 (int(c * TILE_SIZE + TILE_SIZE * 0.5 - self.camera.x),
@@ -16867,13 +17206,26 @@ class Game:
             ]
             if len(screen_points) < 2:
                 continue
+            routes.append(screen_points)
 
-            # A narrow kerb/sidewalk shoulder defines the edge without turning
-            # the reserved 64px tiles into visible asphalt squares.
-            pygame.draw.lines(self.screen, COLOR_SIDEWALK_SEAM, False,
+        # Draw shoulders on their own transparent layer, then punch out each
+        # cardinal crossing before compositing. Drawing the shoulder directly
+        # onto the world left two curb-coloured bars across every intersecting
+        # road even though the tile beneath it was correctly asphalt.
+        shoulders = pygame.Surface(self.screen.get_size(), pygame.SRCALPHA)
+        for screen_points in routes:
+            pygame.draw.lines(shoulders, COLOR_SIDEWALK_SEAM, False,
                               screen_points, self.DIAG_KERB_WIDTH)
-            pygame.draw.lines(self.screen, COLOR_SIDEWALK, False,
+            pygame.draw.lines(shoulders, COLOR_SIDEWALK, False,
                               screen_points, self.DIAG_KERB_WIDTH - 2)
+        for col, row in DIAGONAL_GRID_CROSSINGS:
+            crossing = self.camera.apply(
+                pygame.Rect(col * TILE_SIZE, row * TILE_SIZE,
+                            TILE_SIZE, TILE_SIZE))
+            shoulders.fill((0, 0, 0, 0), crossing)
+        self.screen.blit(shoulders, (0, 0))
+
+        for screen_points in routes:
             pygame.draw.lines(self.screen, COLOR_ROAD, False,
                               screen_points, self.DIAG_ROAD_WIDTH)
             pygame.draw.lines(self.screen, COLOR_ROAD_DARK, False,
@@ -16923,20 +17275,24 @@ class Game:
             self.screen.blit(props_get(name), (x, y))
 
     def draw_crosswalk(self, rect, c, r):
-        """Zebra stripes on the approach edges that continue as road."""
+        """Small, evenly spaced zebra bars on each live approach."""
+        bar = 6
+        # Starts mirror exactly around the tile centre. Constant stride made
+        # the final bar one pixel lopsided after a 90-degree rotation.
+        starts = (9, 22, 36, 49)
         for dx, dy, horizontal in ((0, -1, True), (0, 1, True), (-1, 0, False), (1, 0, False)):
             if tile_type_at(c + dx, r + dy) != TILE_ROAD:
                 continue
             if horizontal:  # bars span the vertical road (north/south approach)
-                y0 = rect.top + 4 if dy < 0 else rect.bottom - 13
-                for i in range(3):
+                y0 = rect.top + 6 if dy < 0 else rect.bottom - 12
+                for start in starts:
                     pygame.draw.rect(self.screen, COLOR_CROSSWALK,
-                                     (rect.left + 9 + i * 15, y0, 8, 9))
+                                     (rect.left + start, y0, bar, bar))
             else:  # bars span the horizontal road (east/west approach)
-                x0 = rect.left + 4 if dx < 0 else rect.right - 13
-                for i in range(3):
+                x0 = rect.left + 6 if dx < 0 else rect.right - 12
+                for start in starts:
                     pygame.draw.rect(self.screen, COLOR_CROSSWALK,
-                                     (x0, rect.top + 9 + i * 15, 9, 8))
+                                     (x0, rect.top + start, bar, bar))
 
     def landmark_has_art(self, tile):
         name = tile['landmark']
@@ -17455,6 +17811,85 @@ class Game:
                 pygame.draw.circle(self.screen, COLOR_OUTLINE, (x, y), 4)
                 pygame.draw.circle(self.screen, hud_HUD_RED, (x, y), 2)
 
+    @staticmethod
+    def rounded_rail_path(points, radius=20.0, steps=6):
+        """Replace right-angle polyline vertices with short quadratic bends."""
+        if len(points) < 3:
+            return [(float(x), float(y)) for x, y in points]
+        out = [(float(points[0][0]), float(points[0][1]))]
+        for index in range(1, len(points) - 1):
+            prev = pygame.Vector2(points[index - 1])
+            corner = pygame.Vector2(points[index])
+            nxt = pygame.Vector2(points[index + 1])
+            incoming = corner - prev
+            outgoing = nxt - corner
+            if incoming.length_squared() == 0 or outgoing.length_squared() == 0:
+                continue
+            incoming = incoming.normalize()
+            outgoing = outgoing.normalize()
+            if abs(incoming.dot(outgoing)) > 0.999:
+                out.append((corner.x, corner.y))
+                continue
+            cut = min(radius, corner.distance_to(prev) * 0.35,
+                      corner.distance_to(nxt) * 0.35)
+            entry = corner - incoming * cut
+            leave = corner + outgoing * cut
+            out.append((entry.x, entry.y))
+            for step in range(1, steps + 1):
+                t = step / float(steps)
+                q = ((1.0 - t) ** 2 * entry
+                     + 2.0 * (1.0 - t) * t * corner
+                     + t * t * leave)
+                out.append((q.x, q.y))
+        out.append((float(points[-1][0]), float(points[-1][1])))
+        return out
+
+    def draw_rail_track(self, centerline):
+        """Draw sleepers and two steel rails along a smoothly bent track."""
+        if len(centerline) < 2:
+            return
+        pts = [pygame.Vector2(p) for p in centerline]
+
+        # Sleepers only belong on ballasted right-of-way. Embedded track and
+        # grade crossings retain their asphalt instead of acquiring a sudden
+        # row of timber bars at the surface transition.
+        distance = 0.0
+        next_tie = 0.0
+        for a, b in zip(pts, pts[1:]):
+            delta = b - a
+            length = delta.length()
+            if length <= 0.01:
+                continue
+            tangent = delta / length
+            normal = pygame.Vector2(-tangent.y, tangent.x)
+            while next_tie <= distance + length:
+                p = a + tangent * (next_tie - distance)
+                world_x = p.x + self.camera.x
+                world_y = p.y + self.camera.y
+                col, row = int(world_x) // TILE_SIZE, int(world_y) // TILE_SIZE
+                tile = tile_at(col, row)
+                if tile is not None and tile['type'] == TILE_RAIL:
+                    pygame.draw.line(self.screen, (76, 54, 42),
+                                     p - normal * 7, p + normal * 7, 3)
+                next_tie += 14.0
+            distance += length
+
+        # Offset each steel rail from the local tangent of the smooth path.
+        for rail_offset in (-4.0, 4.0):
+            rail = []
+            for index, point in enumerate(pts):
+                before = pts[max(0, index - 1)]
+                after = pts[min(len(pts) - 1, index + 1)]
+                tangent = after - before
+                if tangent.length_squared() == 0:
+                    tangent = pygame.Vector2(1.0, 0.0)
+                else:
+                    tangent = tangent.normalize()
+                normal = pygame.Vector2(-tangent.y, tangent.x)
+                rail.append(point + normal * rail_offset)
+            pygame.draw.lines(self.screen, (34, 34, 38), False, rail, 3)
+            pygame.draw.lines(self.screen, (178, 184, 180), False, rail, 1)
+
     def draw_rail_infrastructure(self):
         """MetroLink ballast and double rail along the whole polyline, station
         platforms at the named stops, plus the street-running trolley rail."""
@@ -17465,54 +17900,46 @@ class Game:
             x1 = c1 * TILE_SIZE + TILE_SIZE // 2 - self.camera.x
             y1 = r1 * TILE_SIZE + TILE_SIZE // 2 - self.camera.y
             if axis == 'h':
-                bed = pygame.Rect(int(min(x0, x1)), int(y0 - 24),
-                                  int(abs(x1 - x0)) + 1, 48)
+                bounds = pygame.Rect(int(min(x0, x1)), int(y0 - 24),
+                                     int(abs(x1 - x0)) + 1, 48)
             else:
-                bed = pygame.Rect(int(x0 - 24), int(min(y0, y1)),
-                                  48, int(abs(y1 - y0)) + 1)
-            if not bed.colliderect(clip):
+                bounds = pygame.Rect(int(x0 - 24), int(min(y0, y1)),
+                                     48, int(abs(y1 - y0)) + 1)
+            if not bounds.colliderect(clip):
                 continue
-            pygame.draw.rect(self.screen, (66, 62, 58), bed)
-            # ties, then the two rail heads either side of the centre line
-            if axis == 'h':
-                lo, hi = int(min(x0, x1)), int(max(x0, x1))
-                start = max(lo, -20) // 14 * 14
-                for sx in range(start, min(hi, SCREEN_WIDTH + 20) + 1, 14):
-                    for off in METROLINK_TRACK_OFFSETS:
-                        pygame.draw.rect(self.screen, (76, 54, 42),
-                                         (sx - 1, int(y0) + off - 7, 3, 15))
-                for off in METROLINK_TRACK_OFFSETS:
-                    for rail in (-4, 4):
-                        y = int(y0) + off + rail
-                        pygame.draw.line(self.screen, (34, 34, 38), (lo, y + 1), (hi, y + 1), 3)
-                        pygame.draw.line(self.screen, (178, 184, 180), (lo, y), (hi, y), 1)
-            else:
-                lo, hi = int(min(y0, y1)), int(max(y0, y1))
-                start = max(lo, -20) // 14 * 14
-                for sy in range(start, min(hi, SCREEN_HEIGHT + 20) + 1, 14):
-                    for off in METROLINK_TRACK_OFFSETS:
-                        pygame.draw.rect(self.screen, (76, 54, 42),
-                                         (int(x0) + off - 7, sy - 1, 15, 3))
-                for off in METROLINK_TRACK_OFFSETS:
-                    for rail in (-4, 4):
-                        x = int(x0) + off + rail
-                        pygame.draw.line(self.screen, (34, 34, 38), (x + 1, lo), (x + 1, hi), 3)
-                        pygame.draw.line(self.screen, (178, 184, 180), (x, lo), (x, hi), 1)
 
-        # grade crossings: the road surface is repainted over the ballast
-        for crossing in self.rail_crossings:
-            cx = int(crossing.x - self.camera.x)
-            cy = int(crossing.y - self.camera.y)
-            if not (-60 < cx < SCREEN_WIDTH + 60 and -60 < cy < SCREEN_HEIGHT + 60):
-                continue
-            if crossing.axis == 'h':
-                pygame.draw.rect(self.screen, COLOR_ROAD, (cx - 31, cy - 24, 62, 48))
-                pygame.draw.line(self.screen, COLOR_ROAD_LINE_WHITE,
-                                 (cx, cy - 23), (cx, cy + 23), 1)
+            # Ballast belongs only to dedicated right-of-way tiles. The old
+            # whole-segment bed covered embedded street running with gravel,
+            # then a small crossing patch abruptly painted the road back over
+            # the rails. Drawing the bed from the stamped tile classification
+            # makes dedicated -> embedded -> grade-crossing transitions agree
+            # with collision and preserves one continuous pair of railheads.
+            if axis == 'h':
+                first, last = sorted((c0, c1))
+                for col in range(first, last + 1):
+                    tile = GAME_MAP[r0][col]
+                    if tile['type'] != TILE_RAIL or tile.get('rail_embedded'):
+                        continue
+                    left = int(col * TILE_SIZE - self.camera.x)
+                    pygame.draw.rect(self.screen, (66, 62, 58),
+                                     (left, int(y0 - 24), TILE_SIZE, 48))
             else:
-                pygame.draw.rect(self.screen, COLOR_ROAD, (cx - 24, cy - 31, 48, 62))
-                pygame.draw.line(self.screen, COLOR_ROAD_LINE_WHITE,
-                                 (cx - 23, cy), (cx + 23, cy), 1)
+                first, last = sorted((r0, r1))
+                for row in range(first, last + 1):
+                    tile = GAME_MAP[row][c0]
+                    if tile['type'] != TILE_RAIL or tile.get('rail_embedded'):
+                        continue
+                    top = int(row * TILE_SIZE - self.camera.y)
+                    pygame.draw.rect(self.screen, (66, 62, 58),
+                                     (int(x0 - 24), top, 48, TILE_SIZE))
+
+
+        # Draw each track as one path. Segment-by-segment rails formerly met as
+        # a hard plus-sign at corners; the train turned while its rails did not.
+        for offset in METROLINK_TRACK_OFFSETS:
+            points = [(x - self.camera.x, y - self.camera.y)
+                      for x, y in metrolink_polyline(offset)]
+            self.draw_rail_track(self.rounded_rail_path(points))
 
         # station platforms, with the name on the shelter
         for (col, row, name) in METROLINK_STATIONS:
@@ -19184,6 +19611,11 @@ class Game:
             return "Arch job timer went negative"
         if len(self.fx) > 240 or len(self.pops) > 48 or len(self.callouts) > 3:
             return "a feedback pool grew unbounded"
+        for ped in self.pedestrians:
+            if not pedestrian_ground_is_clear(ped.rect):
+                col = ped.rect.centerx // TILE_SIZE
+                row = ped.rect.centery // TILE_SIZE
+                return f"pedestrian left walkable ground at {col},{row}"
         for car in self.cars + self.police:
             if not finite(car.angle, car.velocity, car.hp):
                 return f"car physics went non-finite: {car.variant}"

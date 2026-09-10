@@ -490,9 +490,9 @@ def probe_traffic(steps=1800):
         moving = [c for c in g.cars if c.driver is None and not c.parked]
         n = 0
         for a in range(len(moving)):
-            ra = moving[a].rect
+            ra = g.traffic_footprint(moving[a])
             for b in range(a + 1, len(moving)):
-                if ra.colliderect(moving[b].rect):
+                if ra.colliderect(g.traffic_footprint(moving[b])):
                     n += 1
         overlaps.append(n)
         worst_pileup = max(worst_pileup, n)
@@ -525,9 +525,9 @@ def probe_junctions(steps=2000):
         moving = [c for c in g.cars if c.driver is None and not c.parked]
         for i, a in enumerate(moving):
             for b in moving[i + 1:]:
-                if not a.rect.colliderect(b.rect):
+                if not g.traffic_footprint(a).colliderect(g.traffic_footprint(b)):
                     continue
-                over = a.rect.clip(b.rect)
+                over = g.traffic_footprint(a).clip(g.traffic_footprint(b))
                 col = over.centerx // M.TILE_SIZE
                 row = over.centery // M.TILE_SIZE
                 tile = (col, row)
@@ -553,6 +553,8 @@ def probe_visuals():
     g.driving = None
     views = {
         'arch_eads': (86, 35),
+        'grand_center': (57, 35),
+        'union_station': (66, 46),
         'downtown_routes': (68, 48),
         'hill_hydrants': (24, 53),
         'manchester': (31, 44),

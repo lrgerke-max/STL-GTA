@@ -1333,6 +1333,47 @@ def test_population_streams_toward_the_player():
         "respawn ring must sit outside the viewport corner"
 
 
+def test_every_live_pedestrian_stays_on_walkable_non_building_ground():
+    """Initial, roaming, streamed and replacement walkers share one invariant.
+
+    In particular, an invalid downed pedestrian must not be preserved on a
+    building tile merely because population streaming normally leaves bodies
+    in place until their fall animation has finished.
+    """
+    g = game()
+
+    def assert_grounded():
+        for ped in g.pedestrians:
+            assert M.pedestrian_ground_is_clear(ped.rect), (
+                ped.rect.center,
+                M.tile_type_at(ped.rect.centerx // M.TILE_SIZE,
+                               ped.rect.centery // M.TILE_SIZE))
+
+    assert_grounded()                       # initial population
+    for _ in range(240):                    # ordinary and panic roaming
+        for ped in g.pedestrians:
+            ped.update(g)
+    assert_grounded()
+
+    victim = g.pedestrians[0]
+    g.splatter_ped(victim, pygame.Vector2(), score=False)
+    assert len(g.pedestrians) == M.PEDESTRIAN_COUNT
+    assert_grounded()                       # replacement population
+
+    # Force the exact bad state seen in captures: a live actor centred on a
+    # roof. Keep it downed so this also covers the streaming early-return.
+    roof = next((c, r) for r in range(M.MAP_TILES_H)
+                for c in range(M.MAP_TILES_W)
+                if M.tile_type_at(c, r) == M.TILE_BUILDING)
+    bad = g.pedestrians[0]
+    bad.rect.center = (roof[0] * M.TILE_SIZE + M.TILE_SIZE // 2,
+                       roof[1] * M.TILE_SIZE + M.TILE_SIZE // 2)
+    bad.down_timer = 30
+    assert not M.pedestrian_ground_is_clear(bad.rect)
+    g.update_population()
+    assert_grounded()                       # defensive live-pool repair
+
+
 def test_population_retypes_to_the_neighborhood_it_streams_into():
     g = game()
     busch = next(lm for lm in M.LANDMARKS if lm[5] == "Busch Stadium")
@@ -1431,6 +1472,35 @@ def test_route_70_metrobus_is_a_moving_fixed_livery():
               for x in range(frames[0].get_width())}
     assert {M.cars_METROBUS_BLUE, M.cars_METROBUS_RED,
             M.cars_METROBUS_ROUTE} <= colors
+
+
+def test_city_refuse_truck_is_orange_and_spells_city_on_both_sides():
+    grid = M.cars_big_grid('garbage_truck')
+    colors = {pixel for row in grid for pixel in row if pixel is not None}
+    assert M.cars_CITY_SERVICE_ORANGE in colors
+    assert M.cars_CITY_SERVICE_LETTERING in colors
+
+    glyphs = {
+        'C': ("###", "#..", "#..", "#..", "###"),
+        'I': ("###", ".#.", ".#.", ".#.", "###"),
+        'T': ("###", ".#.", ".#.", ".#.", ".#."),
+        'Y': ("#.#", "#.#", ".#.", ".#.", ".#."),
+    }
+    for y0 in (3, 14):
+        for i, letter in enumerate("CITY"):
+            for gy, bits in enumerate(glyphs[letter]):
+                for gx, bit in enumerate(bits):
+                    if bit == '#':
+                        assert grid[y0 + gy][7 + i * 4 + gx] == \
+                            M.cars_CITY_SERVICE_LETTERING
+
+    frames = M._scale_frames(M.cars_bake_variant('garbage_truck'),
+                             M.SPRITE_SCALE_CAR)
+    frame_colors = {tuple(frames[0].get_at((x, y))[:3])
+                    for y in range(frames[0].get_height())
+                    for x in range(frames[0].get_width())}
+    assert {M.cars_CITY_SERVICE_ORANGE,
+            M.cars_CITY_SERVICE_LETTERING} <= frame_colors
 
 
 def test_the_streets_are_actually_populated():
@@ -2127,6 +2197,7 @@ def test_losing_five_stars_pays_more_than_losing_one():
 def test_bail_scales_with_how_hot_you_were():
     cheap, dear = M.BAIL_BY_STAR[1], M.BAIL_BY_STAR[5]
     assert dear > cheap * 4
+    assert max(M.BAIL_BY_STAR) == M.BAIL_MAX_LOSS == 1000
     g = game()
     g.cash = 10000
     g.peak_star = 5
@@ -2947,6 +3018,7 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             g.weapon = 'shotgun'
             g.ammo = 7
             g.save_game()
+            assert "CONTINUE" in g.title_options()
             with open("savegame.json", "r") as f:
                 raw = json.load(f)
             assert raw['version'] == 6
@@ -2976,7 +3048,7 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             os.chdir(old_cwd)
 
 
-def test_old_save_at_the_advertised_threshold_migrates_to_arch_ready():
+def test_legacy_save_is_rejected_without_mutating_the_live_game():
     g = game()
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
@@ -2989,10 +3061,50 @@ def test_old_save_at_the_advertised_threshold_migrates_to_arch_ready():
                     'banked': M.ARCH_JOB_TARGET,
                     'cash': 0,
                 }, f)
-            assert g.load_game()
-            assert g.arch_job_unlocked
-            assert g.arch_job_phase == M.ARCH_READY
-            assert g.job is None
+            before = (g.player_rect.center, g.cash, g.banked,
+                      g.arch_job_unlocked, g.arch_job_phase)
+            assert "CONTINUE" not in g.title_options()
+            assert not g.load_game()
+            assert (g.player_rect.center, g.cash, g.banked,
+                    g.arch_job_unlocked, g.arch_job_phase) == before
+        finally:
+            os.chdir(old_cwd)
+
+
+def test_missing_and_malformed_saves_are_safe_on_the_title_screen():
+    g = game()
+    old_cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            os.chdir(td)
+            assert g.title_options() == ("NEW GAME", "QUIT")
+            before = (g.player_rect.center, g.cash, g.banked, g.state)
+            assert not g.load_game()
+            assert (g.player_rect.center, g.cash, g.banked, g.state) == before
+
+            malformed = (
+                "{not json",
+                "[]",
+                json.dumps({'version': M.SAVE_VERSION, 'player': None}),
+                json.dumps({
+                    'version': M.SAVE_VERSION,
+                    'player': {'x': 100, 'y': 100},
+                    'score': 0, 'cash': "500", 'banked': 0,
+                    'wanted_level': 0, 'discovered': [], 'jobs_done': 0,
+                    'jobs_failed': 0, 'side_missions_done': 0,
+                    'side_missions_failed': 0, 'side_mission_serial': 0,
+                    'best_streak': 0, 'job_types_done': [], 'character': {},
+                    'arch_job': {},
+                    'weapons': {'selected': 'fists', 'owned': ['fists'],
+                                'ammo': {}},
+                }),
+            )
+            for contents in malformed:
+                with open("savegame.json", "w") as f:
+                    f.write(contents)
+                assert "CONTINUE" not in g.title_options()
+                assert not g.load_game()
+                assert (g.player_rect.center, g.cash, g.banked, g.state) == before
         finally:
             os.chdir(old_cwd)
 
@@ -3257,7 +3369,20 @@ def test_the_hill_paints_its_hydrants():
     assert 'hydrant_hill' in M.props_PROPS
     plain = M.props_get('hydrant')
     painted = M.props_get('hydrant_hill')
-    assert plain.get_size() == painted.get_size()
+    assert painted.get_width() >= plain.get_width() + 4
+    assert painted.get_height() >= plain.get_height() + 6
+    assert M.props_anchor_offset('hydrant_hill') == (5, 13)
+    colors = {tuple(painted.get_at((x, y))[:3])
+              for x in range(painted.get_width())
+              for y in range(painted.get_height())
+              if painted.get_at((x, y))[3]}
+    assert {M.props_C_HILL_GREEN, M.props_C_HILL_WHITE,
+            M.props_C_HILL_RED} <= colors
+    for color in (M.props_C_HILL_GREEN, M.props_C_HILL_WHITE,
+                  M.props_C_HILL_RED):
+        assert sum(painted.get_at((x, y))[:3] == color
+                   for x in range(painted.get_width())
+                   for y in range(painted.get_height())) >= 8
     # and they are actually different sprites, not the same one twice
     assert any(plain.get_at((x, y)) != painted.get_at((x, y))
                for x in range(plain.get_width())

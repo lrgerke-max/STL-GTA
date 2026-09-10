@@ -190,3 +190,54 @@ def test_tracks_and_closed_crossing_have_visible_world_pixels(game):
     assert (178, 184, 180) in colors       # polished rail head
     assert M.hud_HUD_RED in colors         # warning lamp / striped arm
     assert (76, 54, 42) in colors          # timber ties
+
+
+def test_rail_surface_changes_follow_the_stamped_right_of_way(game):
+    """Street-running and crossing track must not receive a gravel carpet."""
+    embedded = next((c, r) for c, r, _axis in M.METROLINK_TILES
+                    if M.GAME_MAP[r][c].get('rail_embedded'))
+    crossing = next((c, r) for c, r, _axis in M.METROLINK_TILES
+                    if M.GAME_MAP[r][c].get('rail_crossing'))
+
+    for (col, row), want_rails in ((embedded, True), (crossing, True)):
+        game.camera.x = col * M.TILE_SIZE - 128
+        game.camera.y = row * M.TILE_SIZE - 128
+        game.screen.fill((1, 2, 3))
+        game.draw_tile(col, row)
+        game.draw_rail_infrastructure()
+        crop = pygame.Rect(128, 128, M.TILE_SIZE, M.TILE_SIZE)
+        colors = [game.screen.get_at((x, y))[:3]
+                  for y in range(crop.top, crop.bottom)
+                  for x in range(crop.left, crop.right)]
+        assert (66, 62, 58) not in colors, \
+            f"ballast covers street-running rail at {col},{row}"
+        if want_rails:
+            assert (178, 184, 180) in colors, \
+                f"railheads disappear at transition {col},{row}"
+
+
+def test_metrolink_corner_path_is_rounded_instead_of_a_hard_elbow():
+    path = M.Game.rounded_rail_path(((0, 0), (100, 0), (100, 100)),
+                                    radius=20, steps=6)
+    assert (100.0, 0.0) not in path, "hard corner vertex survived smoothing"
+    curve = [(x, y) for x, y in path if 80 < x < 100 and 0 < y < 20]
+    assert len(curve) >= 4, f"rail bend has too few curve samples: {curve}"
+    assert all(0 <= x <= 100 and 0 <= y <= 100 for x, y in path)
+
+
+def test_embedded_metrolink_has_steel_but_no_sleepers(game):
+    """Street-running rail should not grow timber ties at the surface seam."""
+    col, row = next((c, r) for c, r, _axis in M.METROLINK_TILES
+                    if M.GAME_MAP[r][c].get('rail_embedded')
+                    and M.GAME_MAP[r][c]['type'] != M.TILE_RAIL)
+    game.camera.x = col * M.TILE_SIZE - 128
+    game.camera.y = row * M.TILE_SIZE - 128
+    game.screen.fill((1, 2, 3))
+    game.draw_tile(col, row)
+    game.draw_rail_infrastructure()
+    crop = pygame.Rect(128, 128, M.TILE_SIZE, M.TILE_SIZE)
+    colors = [game.screen.get_at((x, y))[:3]
+              for y in range(crop.top, crop.bottom)
+              for x in range(crop.left, crop.right)]
+    assert (178, 184, 180) in colors
+    assert (76, 54, 42) not in colors, "timber sleepers cross embedded asphalt"
