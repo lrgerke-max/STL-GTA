@@ -75,7 +75,12 @@ def test_metrolink_serves_the_stations_it_really_serves_and_skips_south_city():
         assert near, f"MetroLink never comes near {want}"
 
     names = {name for (_c, _r, name) in M.METROLINK_STATIONS}
-    assert {"CENTRAL WEST END", "GRAND", "UNION STATION"} <= names
+    assert {"ROCK ROAD", "CENTRAL WEST END", "GRAND", "UNION STATION"} <= names
+    for col, row, _name in M.METROLINK_STATIONS:
+        assert any(abs(c - col) + abs(r - row) <= 1 for c, r in on_route)
+    order = {name: index for index, (_c, _r, name)
+             in enumerate(M.METROLINK_STATIONS)}
+    assert order['ROCK ROAD'] < order['WELLSTON'] < order['DELMAR LOOP']
     # and it crosses the river on the Eads, which is a named bridge row
     assert M.METROLINK_ROUTE[-1][1] in M.RIVER_BRIDGES
 

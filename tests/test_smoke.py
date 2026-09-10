@@ -1473,8 +1473,12 @@ def test_city_service_and_route_70_are_guaranteed_near_the_player():
         for variant in M.GUARANTEED_AMBIENT_VARIANTS:
             found = [car for car in moving if car.variant == variant]
             assert found, (seed, variant, [car.variant for car in moving])
-            assert min(math.dist(car.rect.center, g.player_rect.center)
-                       for car in found) <= 430
+            if variant == 'metrobus_70':
+                assert all(car.rect.centerx // M.TILE_SIZE == M.ROUTE_70_COL
+                           for car in found)
+            else:
+                assert min(math.dist(car.rect.center, g.player_rect.center)
+                           for car in found) <= 430
 
 
 def test_local_legend_rumors_mark_and_discover_the_rare_rides():
@@ -1682,7 +1686,7 @@ def test_corrected_landmark_plaques_do_not_repeat_false_claims():
 
 
 def test_route_70_metrobus_is_a_moving_fixed_livery():
-    game()
+    g = game()
     assert M.CIVILIAN_WEIGHTED.count("metrobus_70") == 1
     assert "metrobus_70" not in M.PARKED_VARIANTS_WEIGHTED
     assert M.VEHICLE_TUNING["metrobus_70"]["w"] == M.VEHICLE_TUNING["bus"]["w"]
@@ -1695,6 +1699,12 @@ def test_route_70_metrobus_is_a_moving_fixed_livery():
               for x in range(frames[0].get_width())}
     assert {M.cars_METROBUS_BLUE, M.cars_METROBUS_RED,
             M.cars_METROBUS_ROUTE} <= colors
+    bus = next(car for car in g.cars if car.variant == 'metrobus_70')
+    for _ in range(600):
+        M.traffic_drive(bus, g.cars)
+    assert bus.rect.centerx // M.TILE_SIZE == M.ROUTE_70_COL
+    assert bus._traffic_ai['line'] == M.ROUTE_70_COL
+    assert bus._traffic_ai['dir'] in (1, 3)
 
 
 def test_city_refuse_truck_is_orange_and_spells_city_on_both_sides():
@@ -1886,7 +1896,7 @@ def test_the_fox_is_in_grand_center_and_nowhere_else():
             assert hood == 'grove', f"the Grove is hanging in {hood}"
     assert M.hood_at(12, 17) == 'loop'
     assert M.hood_at(56, 34) == 'grand'
-    assert M.hood_at(80, 12) == 'oldnorth', "north city is not downtown"
+    assert M.hood_at(80, 12) == 'collegehill', "north city is not downtown"
     assert M.hood_at(20, 84) == 'sthills', "St Louis Hills is not The Hill"
 
 

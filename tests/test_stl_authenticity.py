@@ -71,7 +71,7 @@ def test_grand_boulevard_stays_open_through_grand_center():
 
 def test_the_diagonals_exist_and_are_drivable_end_to_end():
     """Gravois does not run at a right angle to anything. That is the point."""
-    assert {"GRAVOIS AVE", "MANCHESTER AVE", "NATURAL BRIDGE"} <= {
+    assert {"GRAVOIS AVE", "MANCHESTER AVE", "WEST FLORISSANT AVE"} <= {
         name for name, _pts, _w in M.DIAGONAL_STREETS}
 
     for name, points, width in M.DIAGONAL_STREETS:
@@ -89,6 +89,12 @@ def test_the_diagonals_exist_and_are_drivable_end_to_end():
     # a diagonal tile answers with the diagonal's name, not the grid's
     gravois = [t for t, n in M.DIAGONAL_AT.items() if n == "GRAVOIS AVE"]
     assert any(M.street_name(c, r) == "GRAVOIS AVE" for (c, r) in gravois)
+    west_florissant = [t for t, n in M.DIAGONAL_AT.items()
+                       if n == "WEST FLORISSANT AVE"]
+    assert west_florissant
+    assert all(M.street_name(c, r) == "WEST FLORISSANT AVE"
+               for c, r in west_florissant)
+    assert M.EW_STREET_NAMES[9] == "NATURAL BRIDGE"
 
 
 def test_blocks_are_not_all_the_same_size_any_more():
@@ -127,6 +133,9 @@ def test_every_landmark_sits_in_one_neighbourhood():
     assert M.hood_at(garden[0] + 2, garden[1] + 2) == 'shaw'
     museum = next(e for e in M.LANDMARKS if e[5] == "City Museum")
     assert M.hood_at(museum[0] + 2, museum[1] + 2) == 'downtown'
+    assert M.hood_at(12, 5) == 'wellsgoodfellow'
+    assert M.hood_at(52, 11) == 'fairground'
+    assert M.hood_at(82, 11) == 'collegehill'
 
 
 def test_every_neighbourhood_has_a_complete_kit():

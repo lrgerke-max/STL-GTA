@@ -254,7 +254,9 @@ def street_name(col, row):
 # Gravois leaves downtown heading south-west and does not stop being annoying
 # until Affton; it crosses Morganford at Bevo Mill, which is why the windmill
 # is where it is. Manchester runs west-south-west out through the Grove.
-# Natural Bridge runs north-west out of downtown toward the airport.
+# West Florissant runs north-west through the north side; Natural Bridge is
+# the grid arterial at row 9. Giving both pieces one name made the road cross
+# itself on the map and made turn callouts actively misleading.
 # (name, polyline of (col,row), width in tiles). A polyline, not a segment,
 # because the real ones bend: Gravois leaves downtown between Union Station
 # and the ballpark, runs down the EAST side of Tower Grove Park - the park is
@@ -268,7 +270,7 @@ DIAGONAL_STREETS = (
     ("GRAVOIS AVE", ((71, 51), (52, 73), (50, 77), (39, 83),
                      (36, 88), (24, 96)), 1),
     ("MANCHESTER AVE", ((58, 40), (2, 47)), 1),
-    ("NATURAL BRIDGE", ((66, 30), (8, 4)), 1),
+    ("WEST FLORISSANT AVE", ((66, 30), (8, 4)), 1),
 )
 
 
@@ -1032,6 +1034,62 @@ STL_CONVERSATIONS = (
      "CHER-O-KEE."),
     (("cherokee",), "EVERYTHING'S CASH.", "MOST THINGS.", "BRING CASH."),
 
+    # ------------------------------------------------------ Wells-Goodfellow
+    (("wellsgoodfellow",), "WELLS OR GOODFELLOW?", "BOTH. THAT'S THE NAME.",
+     "DON'T DROP THE S."),
+    (("wellsgoodfellow",), "CITY LINE'S RIGHT THERE.", "WELLSTON'S PAST IT.",
+     "DIFFERENT PLACE."),
+    (("wellsgoodfellow",), "NATURAL BRIDGE IS SOUTH.", "THE ROAD OR THE PLACE?",
+     "THE ROAD THIS TIME."),
+    (("wellsgoodfellow",), "THE 94 STILL COMES?", "EVENTUALLY.", "BRING A COAT."),
+    (("wellsgoodfellow",), "THAT BRICK WAS RED ONCE.", "STILL IS UNDERNEATH.",
+     "MOST THINGS ARE."),
+    (("wellsgoodfellow",), "GOODFELLOW RUNS NORTH.", "UNTIL IT DOESN'T.",
+     "THAT'S DIRECTIONS."),
+    (("wellsgoodfellow",), "CORNER STORE'S OPEN.", "LIGHT'S ON.",
+     "THAT MEANS OPEN."),
+    (("wellsgoodfellow",), "THE ALLEY CUTS THROUGH.", "IF THE TRUCK'S NOT THERE.",
+     "IT'S TRASH DAY."),
+    (("wellsgoodfellow",), "THAT'S THE CITY LIMIT.", "NO SIGN?", "YOU CAN TELL."),
+    (("wellsgoodfellow",), "WE'RE NOT WELLSTON.", "TELL THE MAP.", "WE JUST DID."),
+
+    # ------------------------------------------------------------- fairground
+    (("fairground",), "FAIRGROUND PARK'S OPEN.", "LAKE SIDE OR BALL FIELD?",
+     "MAKE A WHOLE LOOP."),
+    (("fairground",), "THE FAIR USED TO BE HERE.", "THAT'S WHY THE NAME.",
+     "BIGGER THAN YOU THINK."),
+    (("fairground",), "BEAR PITS ARE OVER THERE.", "NO BEARS NOW.",
+     "JUST THE STONE."),
+    (("fairground",), "MAY DAY PARADE'S COMING.", "BANDS FIRST.", "FLOATS AFTER."),
+    (("fairground",), "THE POOL STORY?", "THAT'S A LONG STORY.", "LEARN IT ANYWAY."),
+    (("fairground",), "O'FALLON'S NEXT BLOCK.", "PARK OR NEIGHBORHOOD?",
+     "BOTH AGAIN."),
+    (("fairground",), "SUMNER'S SOUTH OF HERE.", "CHUCK BERRY'S SCHOOL.",
+     "AND TINA TURNER'S."),
+    (("fairground",), "SUNDAY GAME AT TWO.", "WHICH FIELD?", "FOLLOW THE COOLER."),
+    (("fairground",), "THAT LAKE FREEZES?", "NOT ENOUGH.", "SOMEBODY STILL TRIES."),
+    (("fairground",), "ONE HUNDRED THIRTY-ONE ACRES.", "YOU COUNTED?",
+     "THE CITY DID."),
+
+    # ------------------------------------------------------------ collegehill
+    (("collegehill",), "SEE THE RED TOWER?", "BISSELL.", "TWO HUNDRED SIX FEET."),
+    (("collegehill",), "THE OTHER TOWER'S WHITE.", "GRAND AVENUE.",
+     "WE KEEP BOTH STRAIGHT."),
+    (("collegehill",), "THAT LOOKS LIKE A MINARET.", "MOORISH REVIVAL.",
+     "IN NORTH CITY."),
+    (("collegehill",), "HYDE PARK'S SOUTH.", "OLD NORTH AFTER THAT.",
+     "KEEP GOING."),
+    (("collegehill",), "CROWN CANDY?", "DOWN FOURTEENTH.", "BRING CASH."),
+    (("collegehill",), "THE RIVER'S CLOSE.", "CAN'T SEE IT FROM HERE.",
+     "THE LEVEE'S IN THE WAY."),
+    (("collegehill",), "THOSE STANDPIPES WORKED.", "PRESSURE FOR THE WHOLE CITY.",
+     "BEFORE PUMPS CAUGHT UP."),
+    (("collegehill",), "COLLEGE HILL HAD A COLLEGE?", "ONCE.",
+     "THE NAME STAYED."),
+    (("collegehill",), "NORTH BROADWAY'S EAST.", "TRUCKS ALL NIGHT.",
+     "SAME AS ALWAYS."),
+    (("collegehill",), "THE TOWER LIGHTS UP.", "WHEN?", "WHEN SOMEBODY PAYS."),
+
     # ------------------------------------------------------------------ ville
     (("ville",), "SUMNER WAS THE FIRST.", "FIRST OUT HERE, ANYWAY.",
      "EIGHTEEN SEVENTY-FIVE."),
@@ -1181,6 +1239,12 @@ STL_SOLO_BARKS = (
     (("loop",), "SOMEBODY'S BUSKING AGAIN."),
     (("wellston",), "THE 94 RUNS THROUGH HERE."),
     (("wellston",), "MY GRANDMOTHER'S HOUSE WAS THERE."),
+    (("wellsgoodfellow",), "CITY LINE'S ONE BLOCK WEST."),
+    (("wellsgoodfellow",), "DON'T CALL THIS WELLSTON."),
+    (("fairground",), "PARK LOOP'S A GOOD WALK."),
+    (("fairground",), "PARADE PRACTICE AGAIN."),
+    (("collegehill",), "RED TOWER'S THAT WAY."),
+    (("collegehill",), "YOU CAN SEE BOTH STANDPIPES."),
     (("west",), "VALIDATE YOUR TICKET."),
     (("west",), "FOUR CITIES IN A MILE."),
     (("cwe",), "WHOLE STREET SMELLS LIKE BREAD."),
@@ -1269,6 +1333,9 @@ STL_PANIC_LINES = (
 STL_PANIC_BY_HOOD = {
     'loop': ("NOT ON DELMAR!", "MIND THE TRACK!"),
     'wellston': ("NOT ON THIS BLOCK!", "SOMEBODY CALL IT IN!"),
+    'wellsgoodfellow': ("NOT ACROSS GOODFELLOW!", "THAT'S THE CITY LINE!"),
+    'fairground': ("NOT THROUGH THE PARK!", "THE BALL FIELD'S FULL!"),
+    'collegehill': ("NOT BY THE RED TOWER!", "WATCH THE HILL!"),
     'west': ("THIS IS CLAYTON!", "I PAY TAXES FOR THIS!"),
     'cwe': ("NOT ON EUCLID!", "GET BEHIND THE GATES!"),
     'forestpark': ("THERE ARE CHILDREN HERE!", "NOT IN THE PARK!"),
@@ -1860,6 +1927,7 @@ METROLINK_WAYPOINTS = (
 )
 #: named stops, west to east: (col, row, name)
 METROLINK_STATIONS = (
+    (3, 23, "ROCK ROAD"),
     (6, 23, "WELLSTON"),
     (12, 25, "DELMAR LOOP"),
     (20, 26, "FOREST PK-DEBALIVIERE"),
@@ -1995,6 +2063,7 @@ LANDMARK_LAYOUT = {
     "Soulard Farmers Market": "market",  # open sheds you walk the aisles of
     "Union Station": "trainshed",        # one arched entry, a shed of columns
     "Compton Hill Water Tower": "tower",  # one solid tile in an open lawn
+    "Bissell Street Water Tower": "tower",
     "Bevo Mill": "tower",
     "Cherokee Street": "strip",          # two shop rows with the street between
     # Henry Shaw's garden is a GARDEN. It had no entry here at all, so it fell
@@ -2058,6 +2127,9 @@ LANDMARKS = [
     # lands above Forest Park's north-west corner, which puts the Delmar
     # Divide on a real row.
     (1, 15, 15, 5, "building", "Delmar Loop", (150, 84, 76)),
+    # --- North City anchors ------------------------------------------------
+    (51, 10, 6, 5, "park", "Fairground Park", COLOR_PARK),
+    (80, 10, 5, 5, "building", "Bissell Street Water Tower", (178, 146, 112)),
     # --- South city ---
     # Ted Drewes on Chippewa: a low white custard stand set back behind its
     # lot, with the queue that never goes away. It was at (37,53) - NORTH of
@@ -2098,6 +2170,10 @@ LANDMARKS = [
 LANDMARK_PLAQUES = {
     "Gateway Arch":
         "630 feet, and exactly as wide. Saarinen, finished 1965.",
+    "Fairground Park":
+        "A 131-acre North City park, home to generations of games and gatherings.",
+    "Bissell Street Water Tower":
+        "The 206-foot Red Water Tower has watched over North City since 1885.",
     "Busch Stadium":
         "Sited so the Arch stands over centre field.",
     "Downtown":
@@ -2214,6 +2290,7 @@ CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 
 # and streaming preserves a car's variant forever. Reserve a real fleet slot so
 # the detail is part of St. Louis rather than something tests alone can see.
 GUARANTEED_AMBIENT_VARIANTS = ('garbage_truck', 'metrobus_70')
+ROUTE_70_COL = 57
 
 # Rare local jokes belong at destinations, not clogging the ambient-traffic
 # pool. There is exactly one of each, parked where a player can deliberately
@@ -3041,6 +3118,9 @@ HOOD_REGIONS = (
     (31, 24, 49, 43, 'cwe'),           # Central West End, Euclid, the Basilica
     (8, 24, 30, 43, 'forestpark'),     # Forest Park itself and its ring
     (0, 10, 26, 23, 'loop'),           # the Delmar Loop, University City
+    (8, 0, 26, 9, 'wellsgoodfellow'),   # city neighborhood, east of Wellston
+    (43, 0, 57, 14, 'fairground'),      # Fairground Park and O'Fallon
+    (63, 0, 85, 14, 'collegehill'),     # College Hill and the standpipes
     (0, 0, 26, 9, 'wellston'),         # Wells-Goodfellow, Wellston
     (27, 0, 62, 23, 'ville'),          # The Ville, Fairground, JeffVanderLou
     (63, 0, 99, 25, 'oldnorth'),       # Old North, Hyde Park, College Hill
@@ -3072,7 +3152,10 @@ HOOD_NAMES = {
     'cwe': "CENTRAL WEST END",
     'forestpark': "FOREST PARK",
     'loop': "THE DELMAR LOOP",
-    'wellston': "WELLS-GOODFELLOW",
+    'wellston': "WELLSTON",
+    'wellsgoodfellow': "WELLS-GOODFELLOW",
+    'fairground': "FAIRGROUND",
+    'collegehill': "COLLEGE HILL",
     'ville': "THE VILLE",
     'oldnorth': "OLD NORTH",
     'west': "CLAYTON",
@@ -3114,6 +3197,12 @@ HOOD_SIGNS = {
     # Wells-Goodfellow / Wellston: corner stores, churches, the old loop
     'wellston': (SIGN_WELLSTON, SIGN_CHURCH, SIGN_GROCERY, SIGN_BARBER,
                  SIGN_LIQUOR, SIGN_BEAUTY, SIGN_BBQ),
+    'wellsgoodfellow': (SIGN_CHURCH, SIGN_GROCERY, SIGN_BARBER,
+                        SIGN_LIQUOR, SIGN_BEAUTY, SIGN_BBQ),
+    'fairground': (SIGN_CHURCH, SIGN_GROCERY, SIGN_BARBER,
+                   SIGN_BEAUTY, SIGN_BBQ),
+    'collegehill': (SIGN_CHURCH, SIGN_GROCERY, SIGN_BARBER,
+                    SIGN_LIQUOR, SIGN_BBQ),
     # Clayton and the inner county: banks, coffee, a Straub's
     'west': (SIGN_CLAYTON, SIGN_BANK, SIGN_CAFE, SIGN_BAKERY, SIGN_STRAUBS,
              SIGN_SCHNUCKS, SIGN_TAVERN),
@@ -3184,6 +3273,9 @@ HOOD_SIGNS = {
 HOOD_HOUSES = {
     'loop': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
     'wellston': ('gable_brick', 'shotgun', 'flat_front', 'gable_brick'),
+    'wellsgoodfellow': ('gable_brick', 'shotgun', 'flat_front', 'gable_brick'),
+    'fairground': ('gable_brick', 'mansard', 'shotgun', 'gable_brick'),
+    'collegehill': ('gable_brick', 'flat_front', 'shotgun', 'mansard'),
     'west': ('mansard', 'painted_lady', 'gable_brick'),
     'cwe': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
     'forestpark': ('mansard', 'painted_lady', 'gable_brick'),
@@ -3215,6 +3307,9 @@ HOOD_HOUSES = {
 HOOD_BRICKS = {
     'loop': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4]),
     'wellston': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[6]),
+    'wellsgoodfellow': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[6]),
+    'fairground': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[3]),
+    'collegehill': (CITY_BRICKS[0], CITY_BRICKS[3], CITY_BRICKS[6]),
     'west': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4], CITY_BRICKS[4]),
     'cwe': (CITY_BRICKS[4], CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[0]),
     'forestpark': (CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[4]),
@@ -3245,6 +3340,7 @@ HOOD_BRICKS = {
 # nothing but procedural storefronts.
 HOOD_ATLAS_ALIAS = {
     'wellston': 'north', 'forestpark': 'cwe', 'shaw': 'south',
+    'wellsgoodfellow': 'north', 'fairground': 'north', 'collegehill': 'north',
     'riverfront': 'downtown', 'bentonpark': 'soulard', 'lafayette': 'soulard',
     'comptonhts': 'cwe', 'dogtown': 'hill', 'towergrove': 'south',
     'ville': 'north', 'oldnorth': 'north', 'southampton': 'south',
@@ -7933,12 +8029,17 @@ def traffic_init_car(car):
     if traffic__is_grid_road(col, row):
         st['safe_pos'] = car.rect.center
 
-    # Candidate axes: whichever corridor(s) this tile belongs to.
+    # Candidate axes: whichever corridor(s) this tile belongs to. Route 70 is
+    # a route, not a livery that gets to wander down Chippewa.
     cands = []
     if traffic__is_road(col, row) and row in traffic__ROAD_LINES:
         cands.extend(((0, row), (2, row)))
     if traffic__is_road(col, row) and col in traffic__ROAD_LINES:
         cands.extend(((1, col), (3, col)))
+    if car.variant == 'metrobus_70':
+        st['fixed_line'] = ROUTE_70_COL
+        cands = [item for item in cands
+                 if item[0] in (1, 3) and item[1] == ROUTE_70_COL]
     if not cands:
         # A parked/player-abandoned car may legitimately be on a driveway,
         # diagonal, rail cut or plaza. Do not invent a cardinal corridor and
@@ -8066,6 +8167,11 @@ def traffic__next_junction(st, d, px, py):
 
 def traffic__choose_exit(st, jcol, jrow, d):
     """Pick a legal exit, preferring straight on; U-turn only as a last resort."""
+    if st.get('fixed_line') is not None:
+        if traffic__segment_clear(jcol, jrow, d):
+            return d
+        reverse = (d + 2) % 4
+        return reverse if traffic__segment_clear(jcol, jrow, reverse) else d
     opts = []
     reverse = (d + 2) % 4
     u_ok = False
@@ -8530,10 +8636,12 @@ lm_LANDMARK_ART = {
     "Busch Stadium": "stadium",
     "Anheuser-Busch Brewery": "brewery",
     "Forest Park": "forest_park",
+    "Fairground Park": "forest_park",
     "Tower Grove Park": "tower_grove",
     "Ted Drewes": "ted_drewes",
     "Ted Drewes on Grand": "ted_drewes",
     "Compton Hill Water Tower": "water_tower",
+    "Bissell Street Water Tower": "water_tower",
     "Bevo Mill": "bevo",
     "Old Courthouse": "courthouse",
     "Union Station": "union_station",
@@ -11603,7 +11711,10 @@ class Job:
                         "A WALK OF FAME STAR"),
         "Forest Park": ("MUNY COSTUMES", "A JEWEL BOX PALM",
                         "SOMETHING FROM THE ZOO"),
+        "Fairground Park": ("MAY DAY BANNERS", "A CRATE OF BASEBALLS",
+                            "PARK PAVILION CHAIRS"),
         "Compton Hill Water Tower": ("A PRESSURE GAUGE", "206 STEPS OF SCAFFOLD"),
+        "Bissell Street Water Tower": ("A STANDPIPE GAUGE", "RED BRICK SAMPLES"),
         "Bevo Mill": ("BUREK, STILL WARM", "A SACK OF FLOUR"),
         "Cherokee Street": ("A PALLET OF ANTIQUES", "PAN DULCE AT DAWN",
                             "A LETTERPRESS DRAWER"),
@@ -12948,16 +13059,19 @@ class Game:
             guaranteed = (GUARANTEED_AMBIENT_VARIANTS[traffic_index]
                           if traffic_index < len(GUARANTEED_AMBIENT_VARIANTS)
                           else None)
+            variant = guaranteed or random.choice(CIVILIAN_WEIGHTED)
             # Put the guaranteed civic vehicles in the near ring on boot. A
             # guarantee somewhere in a 100x100 map is still invisible in play.
             spawn_outer = 360 if guaranteed else POP_KEEP_RADIUS
-            spot = self.free_spawn_spot(
-                tries=24, grid_traffic=True, ax=px, ay=py, road_only=True,
-                rmin=140, rmax=spawn_outer)
+            spot = (self.route_70_spawn(py)
+                    if variant == 'metrobus_70' else
+                    self.free_spawn_spot(
+                        tries=24, grid_traffic=True, ax=px, ay=py, road_only=True,
+                        rmin=140, rmax=spawn_outer))
             if spot is None:
                 spot = self.fallback_traffic_spawn()
             cx, cy = spot if spot else random_open_spawn(road_only=True)
-            self.cars.append(Car(cx, cy, variant=guaranteed))
+            self.cars.append(Car(cx, cy, variant=variant))
 
         self.rail = build_rail_vehicles()
         self.rail_crossings = build_rail_crossings()
@@ -14693,6 +14807,19 @@ class Game:
                 return spot
         return None
 
+    def route_70_spawn(self, near_y, skip=None):
+        """Nearest free Grand Boulevard tile for the permanent Route 70 bus."""
+        rows = sorted(range(2, MAP_TILES_H - 2),
+                      key=lambda row: abs((row * TILE_SIZE + TILE_SIZE // 2) - near_y))
+        for row in rows:
+            if not traffic__is_grid_road(ROUTE_70_COL, row):
+                continue
+            spot = (ROUTE_70_COL * TILE_SIZE + TILE_SIZE // 2,
+                    row * TILE_SIZE + TILE_SIZE // 2)
+            if self.spot_is_free(*spot, skip=skip):
+                return spot
+        return None
+
     def fallback_traffic_spawn(self, skip=None):
         """Find a guaranteed free cardinal-road centre without random retries."""
         candidates = []
@@ -14789,7 +14916,8 @@ class Game:
             if car.parked and car.variant in SHOWCASE_VARIANTS:
                 continue
             dx, dy = car.rect.centerx - ax, car.rect.centery - ay
-            d2 = dx * dx + dy * dy
+            d2 = (dy * dy if car.variant == 'metrobus_70'
+                  else dx * dx + dy * dy)
             # A deadlocked knot of traffic well off-screen is worth breaking up
             # even though it has not drifted out of range. car.stall is counted
             # in the traffic loop in update(), which visits every car.
@@ -14806,9 +14934,11 @@ class Game:
                 car.angle = bay[2]
                 car.velocity = 0.0
             else:
-                spot = self.free_spawn_spot(skip=car, ax=ax, ay=ay,
-                                            road_only=True, heading=heading,
-                                            grid_traffic=True)
+                spot = (self.route_70_spawn(ay, skip=car)
+                        if car.variant == 'metrobus_70' else
+                        self.free_spawn_spot(skip=car, ax=ax, ay=ay,
+                                             road_only=True, heading=heading,
+                                             grid_traffic=True))
                 if spot is None:
                     spot = self.fallback_traffic_spawn(skip=car)
                 if spot is None:
