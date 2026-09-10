@@ -13,9 +13,11 @@ handling, police or traffic change.
     camera       does the view ever lose the car, across all eight headings
     handling     yaw rate and turning radius against speed
     handbrake    how far the back end comes round in a second
+    reverse      launch, brake-to-reverse, reverse yaw, and wall retreat
     corner       a competent driver braking into a 90-degree grid corner
     cornerhb     ... and the same corner taken on the handbrake
     police       whether a flat-out straight-line escape exists, per star
+    foot          whether sprinting can open a gap on a one-star beat cop
     cophandling  how hard a five-star cruiser can turn
     drive        can the grid be driven at speed at all (see GridDriver)
     wear         where a chase car's health actually goes
@@ -34,6 +36,7 @@ import math
 import os
 import random
 import sys
+import tempfile
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -55,10 +58,14 @@ def game():
     g.wanted_level = 0
     g.police = []
     g.foot_police = []
+    g.foot_cop_respawn = 0
     g.bust_meter = 0
     g.heat_timer = 0
     g.freeze = 0
     g.shake = 0
+    g.player_stamina = M.PLAYER_STAMINA_MAX
+    g.sprinting = False
+    g.sprint_ready = True
     g.grub = {}
     g.frenzy = None
     # Probe cars are appended to g.cars and abandoned as parked when the probe
@@ -211,6 +218,82 @@ def probe_handbrake():
     return turned
 
 
+def probe_reverse():
+    """Measure whether reverse is usable, legible, steerable, and unwedged."""
+    g = game()
+    x, y = straight_road_point()
+
+    # From rest: when does integer Rect movement first become visible, and how
+    # much ground does one second of held reverse produce?
+    car = put_in_car(g, x, y, 0.0)
+    start_x = car.rect.centerx
+    first_move = None
+    for frame in range(1, M.FPS + 1):
+        drive(g, car, throttle=-1.0)
+        if first_move is None and car.rect.centerx < start_x:
+            first_move = frame
+    print(f"  standstill: first rearward pixel frame {first_move}, "
+          f"1.0s speed {car.velocity:.2f}, distance {start_x - car.rect.centerx}px, "
+          f"gear {car.drive_gear()}")
+
+    # Full forward speed through braking, neutral, and into reverse.
+    car = put_in_car(g, x, y, 0.0)
+    car.velocity = car.max_speed
+    start_x = car.rect.centerx
+    zero_frame = reverse_origin_frame = None
+    for frame in range(1, M.FPS * 2 + 1):
+        drive(g, car, throttle=-1.0)
+        if zero_frame is None and car.velocity <= 0.0:
+            zero_frame = frame
+        if reverse_origin_frame is None and car.rect.centerx < start_x:
+            reverse_origin_frame = frame
+    print(f"  transition: velocity crossed zero frame {zero_frame}, "
+          f"back past start frame {reverse_origin_frame}, "
+          f"2.0s displacement {car.rect.centerx - start_x:+d}px")
+
+    # Positive steering input must yaw in the opposite direction while backing.
+    yaws = {}
+    for label, velocity in (("forward", 2.0), ("reverse", -2.0)):
+        car = put_in_car(g, x, y, 0.0)
+        home = car.rect.center
+        for _ in range(20):
+            car.rect.center = home
+            car.velocity = velocity
+            drive(g, car, throttle=0.0, steer=1.0)
+        yaws[label] = math.degrees(car.angle)
+    print(f"  steering: right input forward yaw {yaws['forward']:+.1f} deg, "
+          f"reverse yaw {yaws['reverse']:+.1f} deg")
+
+    # Put the bumper against a solid tile, register a head-on, then back away.
+    wall = None
+    for row in range(4, M.MAP_TILES_H - 4):
+        for col in range(4, M.MAP_TILES_W - 4):
+            if (M.GAME_MAP[row][col]['collidable']
+                    and M.tile_type_at(col - 1, row) == M.TILE_ROAD
+                    and M.tile_type_at(col - 2, row) == M.TILE_ROAD):
+                wall = (col, row)
+                break
+        if wall is not None:
+            break
+    col, row = wall
+    wall_left = col * M.TILE_SIZE
+    car = put_in_car(g, wall_left - M.VEHICLE_DEFAULT_W // 2 - 1,
+                     row * M.TILE_SIZE + M.TILE_SIZE // 2, 0.0)
+    car.velocity = 2.0
+    hits = 0
+    for _ in range(20):
+        car.input_throttle = 1.0
+        car.input_steer = 0.0
+        hits += bool(car.physics_step())
+    contact_x = car.rect.centerx
+    for _ in range(45):
+        drive(g, car, throttle=-1.0)
+    print(f"  wall: {hits} head-on contacts, retreated "
+          f"{contact_x - car.rect.centerx}px, final speed {car.velocity:.2f}, "
+          f"blocked {M.is_blocked(car.rect)}")
+    return first_move, zero_frame, yaws, contact_x - car.rect.centerx
+
+
 def probe_corner(handbrake=False, label="brake-and-turn"):
     """A competent driver taking a real 90 degree grid corner.
 
@@ -325,6 +408,43 @@ def probe_police():
     g.police = []
 
 
+def probe_foot_escape():
+    """Ten seconds down an open street, holding sprint whenever it is ready."""
+    g = game()
+    if g.driving is not None:
+        g.driving.driver = None
+        g.driving = None
+    x, y = straight_road_point()
+    g.player_rect.center = (x, y)
+    g.sync_player_float()
+    g.player_dir = [1.0, 0.0]
+    g.sprinting = True
+    g.wanted_level = 1
+    cop = M.FootCop(x - 120, y)
+    cop.angle = 0.0
+    cop.alert = 'chase'
+    cop.last_seen = g.player_rect.center
+    g.foot_police = [cop]
+    min_gap = 10 ** 9
+    lost_at = None
+    for step in range(M.FPS * 10):
+        g.move_player_on_foot()
+        seen, _touching = g.update_foot_police(
+            1, g.player_rect, g.player_rect.center)
+        gap = math.hypot(cop.rect.centerx - g.player_rect.centerx,
+                         cop.rect.centery - g.player_rect.centery)
+        min_gap = min(min_gap, gap)
+        if not seen and lost_at is None:
+            lost_at = step
+    final_gap = math.hypot(cop.rect.centerx - g.player_rect.centerx,
+                           cop.rect.centery - g.player_rect.centery)
+    lost = f"{lost_at / M.FPS:.1f}s" if lost_at is not None else "never"
+    print(f"  start 120px  closest {min_gap:.0f}px  final {final_gap:.0f}px"
+          f"  sight broken {lost}  stamina {g.player_stamina:.0f}/{M.PLAYER_STAMINA_MAX:.0f}")
+    g.wanted_level = 0
+    g.foot_police = []
+
+
 def probe_cop_handling():
     g = game()
     x, y = open_point()
@@ -389,6 +509,68 @@ def probe_traffic(steps=1800):
     print(f"  mean traffic speed: {sum(speeds)/len(speeds):.2f} "
           f"/ {M.traffic_TRAFFIC_MAX_SPEED:.2f} cap")
     return sum(overlaps) / len(overlaps), max(stalled)
+
+
+def probe_junctions(steps=2000):
+    """Where the residual traffic overlaps happen, and whether they are junctions."""
+    g = game()
+    x, y = straight_road_point()
+    put_in_car(g, x, y, 0.0)
+    by_tile = {}
+    events = junction_events = 0
+    for _ in range(steps):
+        g.driving.input_throttle = 0.0
+        g.driving.input_steer = 0.0
+        g.update()
+        moving = [c for c in g.cars if c.driver is None and not c.parked]
+        for i, a in enumerate(moving):
+            for b in moving[i + 1:]:
+                if not a.rect.colliderect(b.rect):
+                    continue
+                over = a.rect.clip(b.rect)
+                col = over.centerx // M.TILE_SIZE
+                row = over.centery // M.TILE_SIZE
+                tile = (col, row)
+                by_tile[tile] = by_tile.get(tile, 0) + 1
+                events += 1
+                if M.traffic__is_junction(col, row):
+                    junction_events += 1
+    pct = 100.0 * junction_events / max(1, events)
+    busiest = sorted(by_tile.items(), key=lambda item: (-item[1], item[0]))[:8]
+    print(f"  overlap events: {events}; on junctions: {junction_events} ({pct:.1f}%)")
+    print("  busiest tiles: " + ", ".join(
+        f"{tile}={count}{'*' if M.traffic__is_junction(*tile) else ''}"
+        for tile, count in busiest))
+    return events, junction_events, by_tile
+
+
+def probe_visuals():
+    """Render the map trouble spots for side-by-side visual inspection."""
+    out_dir = os.environ.get(
+        'GTASTL_SHOT_DIR', os.path.join(tempfile.gettempdir(), 'gtastl-visuals'))
+    os.makedirs(out_dir, exist_ok=True)
+    g = game()
+    g.driving = None
+    views = {
+        'arch_eads': (86, 35),
+        'downtown_routes': (68, 48),
+        'hill_hydrants': (24, 53),
+        'manchester': (31, 44),
+        'gravois_bevo': (37, 85),
+    }
+    for name, (col, row) in views.items():
+        g.player_fx = col * M.TILE_SIZE + M.TILE_SIZE * 0.5
+        g.player_fy = row * M.TILE_SIZE + M.TILE_SIZE * 0.5
+        g.player_rect.center = (round(g.player_fx), round(g.player_fy))
+        g.camera.snap_to(g.player_rect)
+        g.draw()
+        path = os.path.join(out_dir, f'{name}.png')
+        pygame.image.save(g.screen, path)
+        print(f"  wrote {path}")
+    overview = g.build_map_overview()
+    path = os.path.join(out_dir, 'map_overview.png')
+    pygame.image.save(overview, path)
+    print(f"  wrote {path}")
 
 
 def probe_onscreen(steps=900):
@@ -639,6 +821,10 @@ def probe_chase(star=3, steps=3600, seed=7):
     g.wanted_level = star
     g.heat_timer = 0
     g.cop_dispatch = 0
+    # This probe compares fixed response tiers. The scripted driver clips
+    # traffic and pedestrians; without locking offence cooldowns those bumps
+    # silently turn every labelled one-to-four-star run into a five-star run.
+    g.infraction_at = {key: 10 ** 9 for key in M.INFRACTION_COOLDOWN}
     d = GridDriver(car, rng)
     ended = None
     cause = "escaped"
@@ -682,6 +868,9 @@ def probe_wear(steps=3600, seed=5):
     rng = random.Random(seed)
     x, y = straight_road_point()
     car = put_in_car(g, x, y, 0.0)
+    # Measure ordinary city wear, not the five-star response earned when the
+    # scripted driver shoulders traffic during the route.
+    g.infraction_at = {key: 10 ** 9 for key in M.INFRACTION_COOLDOWN}
     tally = {'wall': 0.0, 'traffic': 0.0, 'cop': 0.0, 'other': 0.0}
     real = M.Car.crash_damage
     src = {'k': 'other'}
@@ -719,11 +908,15 @@ PROBES = {
     'camera': probe_camera,
     'handling': probe_handling,
     'handbrake': probe_handbrake,
+    'reverse': probe_reverse,
     'corner': probe_corner,
     'cornerhb': probe_corner_hb,
     'police': probe_police,
+    'foot': probe_foot_escape,
     'cophandling': probe_cop_handling,
     'traffic': probe_traffic,
+    'junctions': probe_junctions,
+    'visuals': probe_visuals,
     'onscreen': probe_onscreen,
     'chase': probe_chase,
     'chases': probe_chase_all,
@@ -733,8 +926,14 @@ PROBES = {
 
 
 def main():
+    global _G
     which = sys.argv[1:] or list(PROBES)
     for name in which:
+        # Probes mutate traffic, population, police, and the controlled car.
+        # Reusing that state made `traffic onscreen` disagree with `onscreen`
+        # by as much as 0.6 visible cars. Every named measurement gets the
+        # same deterministic city now, regardless of command order.
+        _G = None
         print(f"\n=== {name} ===")
         PROBES[name]()
     print()

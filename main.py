@@ -7,6 +7,9 @@ import json
 import math
 import random
 
+import missions as mission_logic
+import throwables as throwable_logic
+
 # ============================================================
 # STL-GTA: a gritty, top-down, GTA1-style driving sandbox
 # set in a stylized St. Louis. Rendered at a chunky internal
@@ -34,6 +37,11 @@ PLAYER_SIZE = 28
 # every key-tap feel like a lunge. 3.6 is still arcade-fast, but gives corners,
 # pedestrians and storefronts enough time to register.
 PLAYER_SPEED = 3.6
+PLAYER_SPRINT_SPEED = 5.0
+PLAYER_STAMINA_MAX = FPS * 3.0
+PLAYER_STAMINA_DRAIN = 1.0
+PLAYER_STAMINA_REGEN = 0.65
+PLAYER_STAMINA_HIDDEN_REGEN = 1.05
 FOOT_ACCEL_RESPONSE = 0.42    # fraction of the gap to target speed closed/step
 FOOT_BRAKE_RESPONSE = 0.58    # stopping stays a little crisper than starting
 
@@ -55,8 +63,8 @@ SHADOW_DY = 3
 # does not have room for that many cars once each one is also braking for its
 # neighbours. Fewer cars, moving properly, read as a busier city than more
 # cars stacked in a knot.
-PARKED_CAR_COUNT = 22       # kerbside cars available to steal
-MOVING_CAR_COUNT = 13       # ambient traffic actually in motion
+PARKED_CAR_COUNT = 22       # includes two fixed local showcase vehicles below
+MOVING_CAR_COUNT = 10       # calmer local bubble; parked cars keep theft plentiful
 PEDESTRIAN_COUNT = 72       # people on the street
 
 # --- Population streaming -------------------------------------------------
@@ -99,6 +107,8 @@ PLAYER_THROTTLE_RESPONSE = 0.44   # progressive pedal, not an on/off switch
 PLAYER_POWER_FADE = 0.55
 PLAYER_COAST_DRAG = 0.9885   # lifting off no longer scrubs a third of your speed
 PLAYER_BRAKE = 0.40
+PLAYER_REVERSE_ACCEL = 0.20
+PLAYER_REVERSE_RATIO = 0.62  # reverse is useful, but never the fastest escape line
 
 # --- Cornering ------------------------------------------------------------
 # The old model integrated steer_angle and then multiplied the yaw by
@@ -142,12 +152,208 @@ CAM_LEAD_EASE = 0.075        # how fast the lead follows a change of direction
 CAM_SAFE_MARGIN_X = 96       # px of frame the player may never be pushed into
 CAM_SAFE_MARGIN_Y = 62
 CAM_FOOT_LEAD = 30.0         # on foot: a fixed nudge, there is no speed to read
-# The street grid. Every 8th tile index, starting at 4, is a road line. These
-# two numbers are the single source of truth - the props, parking and traffic
-# sections all derive from them rather than re-hardcoding 4 and 8.
-ROAD_ORIGIN = 4
-ROAD_STEP = 8
-ROAD_LINES = set(range(ROAD_ORIGIN, MAP_TILES_W, ROAD_STEP))
+# --- The street network ----------------------------------------------------
+# This used to be `set(range(4, MAP_TILES_W, 8))` in both directions: a perfect
+# square lattice, every block the same size, not one street with a name. No
+# city looks like that and St. Louis looks like it least of all - the whole
+# character of driving here is that the grid is interrupted. Three things
+# changed:
+#
+#   1. The lines are now an explicit, IRREGULAR list. County blocks out west
+#      are long, downtown blocks are short, exactly as they are on the ground.
+#   2. Every line carries a real street name and a class. Arterials are wider
+#      and carry the traffic; locals are the side streets.
+#   3. The named DIAGONALS exist. Gravois, Manchester and Natural Bridge do
+#      not run at right angles to anything, which is the single most St. Louis
+#      fact about driving here, and the reason "TAKE GRAVOIS, THEY'LL NEVER
+#      FOLLOW" is a thing somebody yells at you.
+#
+# Anything that needs "is this a road line" asks ROAD_LINES / STREET_AT; the
+# old ROAD_ORIGIN / ROAD_STEP pair is kept only because the props and parking
+# sections advertise them, and a uniform step is no longer meaningful.
+#
+# One shared list of line indices for both axes. A very large amount of this
+# file asks "is index i a road line" without saying which axis it means
+# (is_road_crossing, the traffic lane model, parking, cop navigation), so
+# giving the two axes different spacings would quietly desync all of it. The
+# irregularity - which is the part you can actually see - lives in the gaps.
+ROAD_LINE_LIST = (2, 9, 15, 21, 27, 32, 37, 43, 50, 57, 63, 68, 73, 79, 86, 93)
+ROAD_LINES = set(ROAD_LINE_LIST)
+
+# The names, per axis. Ordered west-to-east and north-to-south to match the
+# geography the LANDMARKS table traces. A line that falls inside a park or a
+# landmark simply does not exist there, which is correct: Forest Park has no
+# through streets, and neither does Tower Grove Park.
+NS_STREET_NAMES = {
+    2:  "BIG BEND BLVD",
+    9:  "SKINKER BLVD",
+    15: "HAMPTON AVE",
+    21: "MACKLIND AVE",
+    27: "ARSENAL ST",           # the short north-south leg out west
+    32: "KINGSHIGHWAY",         # Forest Park's east wall, the CWE's west
+    37: "VANDEVENTER",
+    43: "MORGANFORD RD",
+    50: "COMPTON AVE",
+    57: "GRAND BLVD",           # runs straight through Grand Center
+    63: "JEFFERSON AVE",
+    68: "14TH ST",
+    73: "TUCKER BLVD",
+    79: "BROADWAY",
+    86: "4TH ST",
+    93: "WHARF ST",
+}
+EW_STREET_NAMES = {
+    2:  "RIVERVIEW BLVD",
+    9:  "NATURAL BRIDGE",
+    15: "ST LOUIS AVE",
+    21: "DELMAR BLVD",          # the Loop rides it; so does the Divide
+    27: "LINDELL BLVD",         # Forest Park's north wall
+    32: "OLIVE ST",              # downtown approach to the Eads Bridge
+    37: "MARKET ST",            # downtown to the Arch, on the Arch's own axis
+    43: "CHOUTEAU AVE",
+    50: "ARSENAL ST",           # carries the Poplar Street Bridge
+    57: "MAGNOLIA AVE",         # Tower Grove Park's north wall
+    63: "GRAVOIS AVE",          # the grid leg; the diagonal is the real one
+    68: "CHEROKEE ST",
+    73: "MERAMEC ST",
+    79: "CHIPPEWA ST",          # Ted Drewes is on it, which is the point
+    86: "DELOR ST",
+    93: "LOUGHBOROUGH",
+}
+ARTERIAL_NS = frozenset((2, 9, 15, 32, 57, 63, 73, 79))
+ARTERIAL_EW = frozenset((9, 21, 27, 37, 43, 50, 79, 93))
+ARTERIAL_LINES = ARTERIAL_NS | ARTERIAL_EW
+
+# Compatibility: the props and parking sections re-export these. There is no
+# single step any more, so this is the *median* gap - used only for sizing
+# heuristics (how far apart to scatter a prop), never to decide road-ness.
+# Anything that wants to know whether an index is a street must ask ROAD_LINES.
+ROAD_ORIGIN = min(ROAD_LINE_LIST)
+ROAD_STEP = 6
+
+
+def street_name(col, row):
+    """The street a tile is on, or None. A diagonal wins over the grid: if you
+    are on Gravois you are on Gravois, whatever it happens to be crossing."""
+    diagonal = DIAGONAL_AT.get((col, row))
+    if diagonal:
+        return diagonal
+    on_ns = col in ROAD_LINES
+    on_ew = row in ROAD_LINES
+    if on_ns and on_ew:
+        return f"{NS_STREET_NAMES.get(col, '')} & {EW_STREET_NAMES.get(row, '')}".strip(" &")
+    if on_ns:
+        return NS_STREET_NAMES.get(col)
+    if on_ew:
+        return EW_STREET_NAMES.get(row)
+    return None
+
+# The diagonals, as (name, (col0,row0), (col1,row1), width in tiles). These are
+# stamped AFTER the landmarks, so they cut the grid the way the real ones cut
+# the city instead of being erased by the first district they touch.
+#
+# Gravois leaves downtown heading south-west and does not stop being annoying
+# until Affton; it crosses Morganford at Bevo Mill, which is why the windmill
+# is where it is. Manchester runs west-south-west out through the Grove.
+# Natural Bridge runs north-west out of downtown toward the airport.
+# (name, polyline of (col,row), width in tiles). A polyline, not a segment,
+# because the real ones bend: Gravois leaves downtown between Union Station
+# and the ballpark, runs down the EAST side of Tower Grove Park - the park is
+# west of Gravois, ask anyone - and only then swings out to the windmill at
+# Morganford, which is why Bevo Mill sits in the fork.
+DIAGONAL_STREETS = (
+    # One tile is already a complete two-lane street (the regular streets use
+    # the same 64px envelope). The old two-tile stamp made every diagonal a
+    # 128px asphalt plaza. Gravois also aimed its centreline through Bevo Mill;
+    # this bend passes east of the mill before turning south-west.
+    ("GRAVOIS AVE", ((71, 51), (52, 73), (50, 77), (39, 83),
+                     (36, 88), (24, 96)), 1),
+    ("MANCHESTER AVE", ((58, 40), (2, 47)), 1),
+    ("NATURAL BRIDGE", ((66, 30), (8, 4)), 1),
+)
+
+
+def _diagonal_run(points, width):
+    """Every tile of a multi-leg diagonal, in order, de-duplicated."""
+    out, seen = [], set()
+    for a, b in zip(points, points[1:]):
+        for t in _diagonal_tiles(a, b, width):
+            if t not in seen:
+                seen.add(t)
+                out.append(t)
+    return tuple(out)
+
+
+def _diagonal_headings(points, width):
+    """tile -> the unit vector the street is actually travelling there.
+
+    The tiles are a 4-connected staircase because collision and reachability
+    are 4-connected, but the *street* is not a staircase: it runs at about 40
+    degrees. Renderers need the real heading, or every tile gets boxed in
+    square kerbs and the road reads as a flight of stairs, which is exactly
+    what it looked like.
+    """
+    out = {}
+    for a, b in zip(points, points[1:]):
+        dc, dr = b[0] - a[0], b[1] - a[1]
+        mag = math.hypot(dc, dr) or 1.0
+        unit = (dc / mag, dr / mag)
+        for t in _diagonal_tiles(a, b, width):
+            out.setdefault(t, unit)
+    return out
+
+
+def _diagonal_tiles(start, end, width):
+    """A 4-connected staircase between two points, `width` tiles thick.
+
+    Deliberately NOT a raw Bresenham line. Bresenham steps diagonally, which
+    leaves consecutive tiles touching only at a corner - and every reachability
+    check in this file (and every car collider) is 4-connected, so a corner
+    touch is a wall. Stepping one axis at a time costs nothing visually at
+    64px per tile and gives a road you can actually drive down.
+    """
+    (c0, r0), (c1, r1) = start, end
+    dc, dr = c1 - c0, r1 - r0
+    steps = max(abs(dc), abs(dr))
+    if steps == 0:
+        return ()
+    # Thicken across the shallow axis, so a mostly-east-west diagonal gets its
+    # extra lanes stacked north-south and still reads as one road.
+    thicken_rows = abs(dc) >= abs(dr)
+    tiles, seen = [], set()
+    col, row = c0, r0
+
+    def claim(c, r):
+        for w in range(width):
+            t = (c, r + w) if thicken_rows else (c + w, r)
+            if t not in seen:
+                seen.add(t)
+                tiles.append(t)
+
+    claim(col, row)
+    for i in range(1, steps + 1):
+        want_c = c0 + int(round(dc * i / steps))
+        want_r = r0 + int(round(dr * i / steps))
+        while col != want_c or row != want_r:
+            if col != want_c:
+                col += 1 if want_c > col else -1
+            else:
+                row += 1 if want_r > row else -1
+            claim(col, row)
+    return tuple(t for t in tiles
+                 if 0 <= t[0] < MAP_TILES_W and 0 <= t[1] < MAP_TILES_H)
+
+
+#: (col,row) -> street name, for every tile any diagonal occupies.
+DIAGONAL_AT = {}
+#: (col,row) -> (ux, uy), the direction the diagonal runs through that tile.
+DIAGONAL_DIR = {}
+for _dname, _dpts, _dw in DIAGONAL_STREETS:
+    for _t in _diagonal_run(_dpts, _dw):
+        DIAGONAL_AT.setdefault(_t, _dname)
+    for _t, _u in _diagonal_headings(_dpts, _dw).items():
+        DIAGONAL_DIR.setdefault(_t, _u)
+del _dname, _dpts, _dw, _t, _u
 
 # Speedometer scale. A bare 8.4 was calibrated against a top speed the car no
 # longer has, so the needle topped out at 54 - derive it instead, and a stock
@@ -183,7 +389,7 @@ PAD_LB, PAD_RB, PAD_BACK, PAD_START = 4, 5, 6, 7
 # behave identically however you pressed them.
 PAD_BUTTON_KEYS = {
     PAD_A: pygame.K_e,          # jack / leave a car
-    PAD_RB: pygame.K_e,
+    PAD_RB: pygame.K_q,          # cycle weapon
     PAD_X: pygame.K_SPACE,      # punch or shoot
     PAD_B: pygame.K_SPACE,
     PAD_Y: pygame.K_m,          # full city map
@@ -229,8 +435,8 @@ INFRACTION_COOLDOWN = {
 }
 COP_SPAWN_MIN = 420         # px: cops arrive from off-screen, not from downtown
 COP_SPAWN_MAX = 900
-BUST_CONTACT_STEPS = 54     # ~0.9s of sustained contact before you get busted
-BUST_RELIEF = 3             # bust meter bleed-off per step once you break away
+BUST_CONTACT_STEPS = 90     # ~1.5s of sustained contact before you get busted
+BUST_RELIEF = 6             # bust meter drains quickly once you break the hold
 # You cannot be pulled out of a moving car. Below this, a cruiser leaning on
 # you counts as an arrest in progress; above it, it is just a ram - it hurts
 # and it shunts you, but the door stays shut. Without this one number a single
@@ -277,7 +483,7 @@ COP_PATROL_STEPS = FPS * 8  # circling the block after the search runs dry
 # used to do - gives the top of the ladder no identity and the bottom no
 # chance. Index == wanted level.
 COP_COUNT_BY_STAR = (0, 0, 1, 2, 3, 4)      # cruisers
-COP_FOOT_BY_STAR = (0, 1, 1, 1, 0, 0)       # beat cops on foot
+COP_FOOT_BY_STAR = (0, 1, 1, 1, 2, 3)       # beat cops / tactical foot response
 # Every one of these used to sit ABOVE the player's own top speed, so a
 # straight-line flee from two stars closed 274px in ten seconds and there was
 # no such thing as outrunning the police - only outliving them. Escalation is
@@ -296,15 +502,45 @@ COP_FOV_BY_STAR = (0.0, 0.95, 1.00, 1.05, 1.10, 1.20)     # radians, half-angle
 # used to conjure a cruiser on top of you inside a second.
 COP_RESPONSE_BY_STAR = (0, FPS * 3, FPS * 2, FPS * 1, FPS // 2, 0)
 
+# --- High-heat containment -------------------------------------------------
+# Four stars changes the shape of the pursuit instead of merely adding another
+# faster cruiser. Dispatch closes a road ahead with two parked units and a
+# spike strip; five stars fields a second closure and replaces passed blocks
+# faster. Placement is deterministic and only accepts complete footprints on
+# non-collidable road geometry.
+ROADBLOCK_COUNT_BY_STAR = (0, 0, 0, 0, 1, 2)
+ROADBLOCK_AHEAD_MIN = 360
+ROADBLOCK_AHEAD_MAX = 980
+ROADBLOCK_PREFERRED = (520, 760)
+ROADBLOCK_RETIRE_BEHIND = 360
+ROADBLOCK_RETIRE_DISTANCE = 620
+ROADBLOCK_REDEPLOY_BY_STAR = (0, 0, 0, 0, FPS * 4, FPS * 2)
+ROADBLOCK_STRIP_LONG = 52
+ROADBLOCK_STRIP_THICK = 10
+ROADBLOCK_HIT_COOLDOWN = FPS
+SPIKE_PUNCTURE_STEPS = FPS * 8
+SPIKE_SPEED_SCALE = 0.48
+SPIKE_STEER_SCALE = 0.58
+SPIKE_ENTRY_SPEED_SCALE = 0.62
+SPIKE_DAMAGE = 8.0
+
 # --- Beat cops on foot ----------------------------------------------------
 # The art has been baked since the pedestrian pass (peds_COP_KEY) and never
 # had any behaviour attached. A foot cop is the only unit that can actually
 # complete an arrest on a player who is also on foot: a cruiser doing 10 px a
 # step runs you over long before the bust meter fills.
-COP_FOOT_SPEED = 4.0        # px/step, just faster than the player's 3.6
-COP_FOOT_SIGHT = 210
-COP_FOOT_FOV = 1.10
-COP_FOOT_GIVEUP = FPS * 20  # he is not chasing you across the whole city
+COP_FOOT_SEARCH_SPEED = 3.10
+COP_FOOT_CHASE_SPEED = 3.85
+COP_FOOT_BURST_SPEED = 4.15
+COP_FOOT_BURST_STEPS = FPS
+COP_FOOT_SPEED = COP_FOOT_CHASE_SPEED  # compatibility / tuning reference
+COP_FOOT_SIGHT = 185
+COP_FOOT_FOV = 0.95
+COP_FOOT_GIVEUP = FPS * 9
+COP_FOOT_RESPAWN = FPS * 4
+COP_FOOT_HP = 70.0
+COP_FOOT_HIT_STUN = 18
+COP_FOOT_KNOCKDOWN = FPS * 2
 
 # The crime scene. Cops dispatched for a star are sent to where the offence
 # happened, not conjured with a fix on the player - without this a low star
@@ -364,6 +600,758 @@ HS_QUESTION = "WHERE'D YOU GO TO HIGH SCHOOL?"
 HS_ANSWERS = ("SLUH", "CBC", "MEHLVILLE", "KIRKWOOD", "VASHON", "ROSATI")
 HS_REPLIES = ("OH.", "OH, OKAY.", "HUH.", "OH, YOU KNOW MY COUSIN.",
               "MY BROTHER WENT THERE.")
+
+# Short, local two-person scenes. The first field is either None (citywide) or
+# a tuple of neighbourhood keys from hood_at(). They appear both when you brush
+# past somebody and occasionally between two calm pedestrians near the player.
+#
+# This table used to hold 29 scenes: 15 citywide and 14 hood-tagged, spread
+# over 11 neighbourhoods. Measured, that meant 83-100% of everything you heard
+# ANYWHERE in the city came out of the same 15-item bag, `west` had no local
+# lines at all, and selection was a bare random.choice with no memory - so it
+# repeated itself back to back. On a 7-second cooldown a five-minute walk drew
+# about forty scenes from a pool of sixteen.
+#
+# It now holds ~300, every one of the 24 neighbourhoods has at least ten of its
+# own, and STL_CHATTER deals them from a shuffled bag that will not repeat a
+# scene until the deck runs out. What you hear in Soulard is mostly Soulard.
+CHATTER_COOLDOWN = FPS * 7
+CHATTER_CHECK_STEPS = FPS * 3
+CHATTER_BARGE_CHANCE = 3
+CHATTER_LOCAL_BIAS = 0.72     # how often a scene comes from the local deck
+CHATTER_RECENT = 14           # scenes remembered across a hood boundary
+
+STL_CONVERSATIONS = (
+    # ---------------------------------------------------------------- citywide
+    (None, "CITY OR COUNTY?", "I KNEW THIS WOULD HAPPEN."),
+    (None, "TAKE 40.", "THE SIGN SAYS 64.", "I SAID 40."),
+    (None, "WHICH SCHNUCKS?", "THE ONE BY THE OLD SCHNUCKS."),
+    (None, "TAKING KINGSHIGHWAY?", "NOT IF I WANT TO ARRIVE."),
+    (None, "WHERE ON KINGSHIGHWAY?", "NORTH OR SOUTH OF MANCHESTER?",
+     "THAT'S WHAT I'M ASKING."),
+    (None, "THAT LIGHT WAS RED.", "IT WAS ST. LOUIS YELLOW."),
+    # The city and county test the outdoor sirens the first MONDAY at eleven.
+    (None, "TORNADO SIREN?", "FIRST MONDAY. ELEVEN SHARP."),
+    (None, "HOW MUCH SNOW?", "ENOUGH TO BUY ALL THE BREAD."),
+    (None, "T-RAVS?", "YOU BROUGHT MARINARA, RIGHT?"),
+    (None, "THE CARDS ARE REBUILDING.", "SINCE WHEN DO WE SAY THAT?"),
+    (None, "CITY MUSEUM WITH KIDS?", "BRING KNEE PADS."),
+    (None, "TAKE GRAVOIS.", "WHICH PART?", "EXACTLY."),
+    (None, "THAT POTHOLE HAS TENURE.", "THE CONE DOES TOO."),
+    (None, "MEET AT THE OLD ARENA.", "IT'S BEEN GONE THIRTY YEARS.",
+     "YOU KNOW WHERE I MEAN."),
+    (None, "KSHE AGAIN?", "ALWAYS."),
+    (None, "THE CITY'S IN NO COUNTY.", "SINCE 1876.", "WE VOTED FOR THAT."),
+    (None, "EARNINGS TAX?", "ONE PERCENT.", "FOREVER."),
+    (None, "GO CRAZY, FOLKS.", "DON'T. I'LL CRY."),
+    (None, "THAT'S A WINNER.", "SAY IT AGAIN."),
+    (None, "KMOX AT ELEVEN TWENTY.", "IT COMES IN FROM ANYWHERE."),
+    (None, "OPENING DAY IS A HOLIDAY.", "NOT LEGALLY.",
+     "LEGALLY IS NOT THE POINT."),
+    (None, "PORK STEAK SEASON?", "IT'S ALWAYS PORK STEAK SEASON."),
+    (None, "MAULL'S OR NOTHING.", "NOTHING, THEN.", "GET OUT."),
+    (None, "IT'S CUSTARD.", "I SAID ICE CREAM.", "YOU SAID WRONG."),
+    (None, "PROVEL ISN'T CHEESE.", "SAY THAT LOUDER."),
+    (None, "ST. PAUL SANDWICH?", "EGG FOO YOUNG ON WHITE.", "WITH PICKLE."),
+    (None, "HOOSIER.", "THAT MEANS SOMETHING ELSE EVERYWHERE.", "NOT HERE."),
+    (None, "YOU WARSHED IT?", "I WARSHED IT."),
+    (None, "FARTY-FAR.", "FORTY-FOUR.", "THAT'S WHAT I SAID."),
+    (None, "WHERE'D YOU PARK?", "BY WHERE THE BANK USED TO BE."),
+    (None, "IS IT HUMID?", "IT'S SEPTEMBER."),
+    (None, "THE MUNY'S FREE SEATS.", "FIFTEEN HUNDRED OF THEM.",
+     "SINCE NINETEEN NINETEEN."),
+    (None, "THE ZOO'S FREE TOO.", "AND THE ART MUSEUM.", "WE VOTED FOR THAT."),
+    (None, "SEEN THE RIVER?", "IT'S DOING WHAT IT DOES."),
+    (None, "EIGHTY-EIGHT MUNICIPALITIES.", "IN ONE COUNTY.", "EIGHTY-EIGHT."),
+    (None, "WHOSE SPEED TRAP IS THIS?", "DEPENDS WHICH BLOCK."),
+    (None, "BOARD OF ALDERMEN?", "FOURTEEN NOW.", "USED TO BE TWENTY-EIGHT."),
+    (None, "THE BLUES WON IT.", "TWENTY-NINETEEN.", "I STILL HEAR THAT SONG."),
+    (None, "PLAY GLORIA.", "IT'S TUESDAY.", "PLAY GLORIA."),
+    (None, "KA-KAW.", "KA-KAW."),
+    (None, "WHAT IS A BILLIKEN?", "NOBODY KNOWS.", "THAT'S THE ANSWER."),
+    (None, "THE RAMS LEFT.", "WE GOT PAID.", "STILL."),
+    (None, "TURKEY DAY GAME?", "WEBSTER AND KIRKWOOD.",
+     "OLDEST WEST OF THE RIVER."),
+    (None, "MIZZOU OR ILLINI?", "IN THIS ECONOMY?"),
+    (None, "FROZEN CUSTARD IN JANUARY?", "THEY SELL TREES IN JANUARY.",
+     "I'LL TAKE BOTH."),
+    (None, "GOOEY BUTTER FOR BREAKFAST?", "IT HAS BUTTER. BREAKFAST FOOD."),
+    (None, "SLINGER AT MIDNIGHT?", "I RESPECT MYSELF. SO YES."),
+    (None, "IMO'S IS A SQUARE.", "BEYOND COMPARE.", "DON'T ENCOURAGE HIM."),
+    (None, "GRAND OR CHIPPEWA?", "IS IT SUMMER?", "CHIPPEWA THEN."),
+    (None, "THE FLOOD OF NINETY-THREE.", "MY BASEMENT REMEMBERS."),
+    (None, "GUMBO FLATS.", "THEY CALL IT THE VALLEY NOW.", "IT'S GUMBO FLATS."),
+    (None, "SEEN A VESS BOTTLE?", "THE BIG ONE?", "THERE'S ONLY THE BIG ONE."),
+    (None, "CHAIN OF ROCKS BEND.", "TWENTY-TWO DEGREES.", "IN A BRIDGE."),
+    (None, "WHERE'S THE HODIAMONT?", "UNDER ALL THIS.", "STILL THERE."),
+    (None, "DOES METROLINK GO SOUTH?", "NO.", "STILL NO."),
+
+    # ------------------------------------------------------------------- loop
+    (("loop",), "THE LOOP TROLLEY?", "DON'T START."),
+    (("loop",), "IT RUNS TWO MILES.", "WHEN IT RUNS."),
+    (("loop",), "WHOSE STAR IS THAT?", "READ IT.", "OH. OF COURSE IT IS."),
+    (("loop",), "DARTS AT BLUEBERRY HILL?", "I'VE LOST THERE FOR YEARS."),
+    (("loop",), "CHUCK BERRY PLAYED HERE.", "MONTHLY.", "DOWNSTAIRS."),
+    (("loop",), "U CITY OR THE CITY?", "THE LINE'S RIGHT THERE.",
+     "IT ALWAYS IS."),
+    (("loop",), "PARKING ON DELMAR?", "THE GARAGE.", "NOBODY USES THE GARAGE."),
+    (("loop",), "FITZ'S BOTTLES IN THE WINDOW.", "I WATCH IT EVERY TIME.",
+     "SO DOES EVERYONE."),
+    (("loop",), "TIVOLI STILL OPEN?", "ASK AGAIN NEXT YEAR."),
+    (("loop",), "THE LIONS ON THE GATES.", "THAT'S HOW YOU KNOW."),
+
+    # --------------------------------------------------------------- wellston
+    (("wellston",), "THE OLD LOOP TERMINAL.", "BUSES CAME FROM EVERYWHERE.",
+     "NOT ANYMORE."),
+    (("wellston",), "WELLS-GOODFELLOW.", "SAY THE WHOLE THING.",
+     "PEOPLE SHORTEN IT."),
+    (("wellston",), "THE CORNER STORE'S BACK?", "NEW AWNING AND ALL."),
+    (("wellston",), "THAT CHURCH IS OLDER THAN THE STREET.",
+     "MOST OF THEM ARE."),
+    (("wellston",), "WHO CUTS YOUR HAIR?", "SAME MAN SINCE I WAS NINE."),
+    (("wellston",), "THEY TOOK THE WHOLE BLOCK.", "THEY'LL CALL IT GREEN SPACE.",
+     "IT'S A LOT."),
+    (("wellston",), "BUS COMES WHEN?", "SOON IS THE SCHEDULE."),
+    (("wellston",), "THAT'S A BRICK THIEF.", "THEY TAKE THE WHOLE WALL.",
+     "FOR PATIOS SOMEPLACE ELSE."),
+    (("wellston",), "GARDEN'S COMING IN.", "TOMATOES OUT OF A VACANT LOT.",
+     "BEST ONES THERE ARE."),
+    (("wellston",), "YOU FROM OVER NORTH?", "BORN AND STAYED."),
+
+    # ------------------------------------------------------------------- west
+    (("west",), "CLAYTON OR THE CITY?", "WHICHEVER TAXES ME LESS.",
+     "THAT'S BOTH."),
+    (("west",), "PARKING GARAGE IS FIFTEEN.", "AN HOUR?", "A HALF HOUR."),
+    (("west",), "THE COUNTY SEAT'S RIGHT THERE.",
+     "AND NO COUNTY OWNS THE CITY.", "CORRECT."),
+    (("west",), "STRAUB'S BAG?", "I DIDN'T WANT ANYONE TO SEE.",
+     "EVERYONE SAW."),
+    (("west",), "SCHOOL DISTRICT LINES.", "THAT'S WHY THE HOUSE COSTS THAT."),
+    (("west",), "LUNCH IN CLAYTON?", "BRING THE EXPENSE ACCOUNT."),
+    (("west",), "MAPLEWOOD'S GOT GOOD FOOD NOW.", "SINCE WHEN?",
+     "SINCE A WHILE."),
+    (("west",), "RICHMOND HEIGHTS OR BRENTWOOD?", "YOU CROSSED FOUR CITIES.",
+     "IN A MILE."),
+    (("west",), "WHOSE POLICE ARE THOSE?",
+     "DEPENDS ON THE SIDE OF THE STREET."),
+    (("west",), "BIG BEND MEETS EVERYTHING.", "AND AGREES WITH NOTHING."),
+
+    # -------------------------------------------------------------------- cwe
+    (("cwe",), "COFFEE ON EUCLID?", "ONLY IF YOU FIND PARKING."),
+    (("cwe",), "THE BASILICA'S MOSAICS.", "FORTY-ONE MILLION PIECES.",
+     "I COUNTED TWO."),
+    (("cwe",), "LEFT BANK STILL THERE?", "SOME THINGS HOLD."),
+    (("cwe",), "THE CHASE.", "MY PARENTS DANCED THERE.",
+     "EVERYONE'S PARENTS DID."),
+    (("cwe",), "STRAUB'S PRICES?", "YOU'RE PAYING FOR THE BAG."),
+    (("cwe",), "T.S. ELIOT GREW UP HERE.", "AND LEFT.", "AND SAID SO."),
+    (("cwe",), "GASLIGHT SQUARE'S GONE.", "MY UNCLE WON'T ACCEPT IT."),
+    (("cwe",), "THAT'S A PRIVATE STREET.", "WITH GATES.", "AND OPINIONS."),
+    (("cwe",), "HOSPITAL PARKING?", "TAKE THE METROLINK.",
+     "THAT'S ACTUALLY RIGHT."),
+    (("cwe",), "MANSARD ROOF.", "EVERY ONE OF THEM.",
+     "LIMESTONE UNDERNEATH."),
+
+    # ------------------------------------------------------------- forestpark
+    (("forestpark",), "BIGGER THAN CENTRAL PARK.", "SAY IT LOUDER.",
+     "BIGGER THAN CENTRAL PARK."),
+    (("forestpark",), "THE ZOO'S FREE.", "THE ART MUSEUM'S FREE.",
+     "THE TAX PAYS FOR IT."),
+    (("forestpark",), "SLEDDING ART HILL?", "IF IT SNOWS.", "IT'LL SNOW."),
+    (("forestpark",), "THE FAIR WAS RIGHT HERE.", "NINETEEN OH FOUR.",
+     "THEY LEFT US THE BASIN."),
+    (("forestpark",), "WHO'S THE STATUE?", "SAINT LOUIS HIMSELF.",
+     "ON A HORSE."),
+    (("forestpark",), "MUNY TONIGHT?", "FREE SEATS AT THE BACK.",
+     "GET THERE AT SIX."),
+    (("forestpark",), "THE JEWEL BOX IS GLASS.", "ALL OF IT.",
+     "SINCE THIRTY-SIX."),
+    (("forestpark",), "BOATHOUSE OR PICNIC?", "BOTH. IN THAT ORDER."),
+    (("forestpark",), "DON'T DRIVE ACROSS THE BASIN.", "IT'S WATER.",
+     "PEOPLE TRY."),
+    (("forestpark",), "GOLF, TENNIS, A ZOO, A THEATER.", "IN ONE PARK.",
+     "AND A PLANETARIUM."),
+
+    # ------------------------------------------------------------------ grand
+    (("grand",), "GRAND IS CLOSED.", "WHICH BLOCK? YES."),
+    (("grand",), "THE FOX IS BYZANTINE.", "AND SIAMESE.",
+     "AT THE SAME TIME."),
+    (("grand",), "POWELL OR THE SHELDON?", "DEPENDS WHO'S PLAYING."),
+    (("grand",), "SLU'S RIGHT THERE.", "WHAT IS A BILLIKEN?", "STOP ASKING."),
+    (("grand",), "THIS WAS ALL THEATERS.", "IT'S THEATERS AGAIN.",
+     "TOOK A WHILE."),
+    (("grand",), "JAZZ ST. LOUIS TONIGHT.", "MILES CAME FROM ACROSS THE RIVER.",
+     "EAST SIDE."),
+    (("grand",), "SCOTT JOPLIN LIVED NEAR HERE.", "THE HOUSE IS STILL UP."),
+    (("grand",), "PARKING FOR THE FOX?", "PAY THE MAN WITH THE FLAG.",
+     "ALWAYS PAY HIM."),
+    (("grand",), "GRAND VIADUCT AGAIN?", "THEY REBUILT IT ONCE.",
+     "THEY'LL DO IT AGAIN."),
+    (("grand",), "INTERMISSION LINE?", "AROUND THE LOBBY.", "TWICE."),
+
+    # ------------------------------------------------------------------ grove
+    (("grove",), "MANCHESTER IS MOVING.", "NOT THIS LIGHT, IT ISN'T."),
+    (("grove",), "THIS WAS ALL WAREHOUSES.", "NOW IT'S ALL PATIOS."),
+    (("grove",), "THE SIGN OVER THE STREET.",
+     "THAT'S HOW YOU KNOW YOU'RE IN IT."),
+    (("grove",), "URBAN CHESTNUT?", "THE BIERGARTEN'S ROUND BACK."),
+    (("grove",), "PRIDE ON MANCHESTER.", "THE WHOLE STREET.", "ALL DAY."),
+    (("grove",), "FOREST PARK SOUTHEAST.", "NOBODY SAYS THAT.",
+     "THE MAP DOES."),
+    (("grove",), "PARKING BEHIND THE BAR?", "THAT'S SOMEBODY'S ALLEY."),
+    (("grove",), "THE HOSPITAL'S EATING THE BLOCK.", "SLOWLY.", "STEADILY."),
+    (("grove",), "TAQUERIA AFTER MIDNIGHT?", "THAT'S THE WHOLE PLAN."),
+    (("grove",), "THAT USED TO BE A TIRE SHOP.",
+     "EVERYTHING USED TO BE A TIRE SHOP."),
+
+    # ------------------------------------------------------------------- shaw
+    (("shaw",), "SHAW'S GARDEN.", "IT'S THE BOTANICAL GARDEN.",
+     "IT'S SHAW'S GARDEN."),
+    (("shaw",), "THE CLIMATRON'S A FULLER DOME.",
+     "FIRST ONE MADE A GREENHOUSE.", "NINETEEN SIXTY."),
+    (("shaw",), "SEIWA-EN IS THE BIGGEST.", "IN NORTH AMERICA.",
+     "AND IT'S RIGHT THERE."),
+    (("shaw",), "THE LINNEAN HOUSE.", "OLDEST GREENHOUSE OUT HERE.",
+     "STILL RUNNING."),
+    (("shaw",), "HENRY SHAW'S BURIED IN IT.", "IN THE GARDEN?",
+     "IN THE GARDEN."),
+    (("shaw",), "ORCHID SHOW LINE?", "OUT TO THE GATE."),
+    (("shaw",), "THE BLOCK'S ALL BRICK.", "AND ALL THE SAME YEAR.",
+     "ONE BUILDER."),
+    (("shaw",), "TOWER GROVE AVENUE.", "THE PARK'S THAT WAY.",
+     "THE GARDEN'S THIS WAY."),
+    (("shaw",), "KINGSHIGHWAY TO VANDEVENTER.", "THAT'S THE WHOLE THING.",
+     "IT'S ENOUGH."),
+    (("shaw",), "SMELL THAT?", "THAT'S THE GARDEN.",
+     "IN APRIL IT'S UNFAIR."),
+
+    # --------------------------------------------------------------- downtown
+    (("downtown",), "PARK ON TUCKER?", "NOT WITH THAT SIGN.", "WHICH SIGN?"),
+    (("downtown",), "WASHINGTON AVENUE LOFTS.", "USED TO BE SHOE FACTORIES.",
+     "ALL OF THEM."),
+    (("downtown",), "THE WAINWRIGHT'S THE FIRST.", "ONE OF THEM.",
+     "SULLIVAN BUILT IT."),
+    (("downtown",), "DRED SCOTT WAS TRIED HERE.", "IN THAT COURTHOUSE.",
+     "TWICE."),
+    (("downtown",), "THE WHISPERING ARCH.", "STAND AT THE OTHER END.",
+     "I'LL SAY SOMETHING RUDE."),
+    (("downtown",), "SCHOOL BUS ON THE ROOF.", "CITY MUSEUM.",
+     "OF COURSE IT IS."),
+    (("downtown",), "GAME LETTING OUT?", "FORTY THOUSAND ON ONE STREET."),
+    (("downtown",), "SLINGER AFTER THE GAME?", "THAT'S THE TRADITION."),
+    (("downtown",), "THE OLD POST OFFICE.", "THEY ALMOST LOST IT.", "TWICE."),
+    (("downtown",), "WHICH NUMBERED STREET?", "BROADWAY IS FIFTH.",
+     "THAT HELPS NOBODY."),
+
+    # ------------------------------------------------------------- riverfront
+    (("riverfront",), "COBBLESTONES.", "IN HEELS?", "IN ANY SHOES."),
+    (("riverfront",), "THE EADS WAS THE FIRST.", "STEEL ARCH OVER THIS RIVER.",
+     "EIGHTEEN SEVENTY-FOUR."),
+    (("riverfront",), "THE ARCH IS SIX-THIRTY.", "FEET?",
+     "FEET. AND JUST AS WIDE."),
+    (("riverfront",), "THE TRAM PODS ARE TINY.", "FIVE PEOPLE.",
+     "KNEES TOUCHING."),
+    (("riverfront",), "YOU CAN WALK UNDER IT.", "PEOPLE FORGET THAT.",
+     "STRAIGHT UNDER."),
+    (("riverfront",), "SAARINEN WON THE COMPETITION.",
+     "HIS FATHER GOT THE TELEGRAM.", "BY MISTAKE."),
+    (("riverfront",), "THE LANDING'S QUIET NOW.", "IT HAD ITS DECADE."),
+    (("riverfront",), "RIVER'S UP.", "IT'S ALWAYS EITHER UP OR DOWN."),
+    (("riverfront",), "THAT BARGE IS A QUARTER MILE.",
+     "THEY TIE FIFTEEN TOGETHER.", "AND STEER IT."),
+    (("riverfront",), "SUNRISE THROUGH THE LEGS.", "WORTH THE ALARM.",
+     "ONCE."),
+
+    # ---------------------------------------------------------------- soulard
+    (("soulard",), "SOULARD PARKING?", "THAT'S A GOOD ONE."),
+    (("soulard",), "MARKET'S OPEN SINCE SEVENTEEN SEVENTY-NINE.",
+     "BEFORE THE COUNTRY.", "BY A LITTLE."),
+    (("soulard",), "MARDI GRAS?", "PARK IN BENTON PARK.",
+     "AND WALK. AND WALK."),
+    (("soulard",), "MCGURK'S GARDEN'S FULL.", "IT'S ALWAYS FULL.",
+     "IT'S WORTH IT."),
+    (("soulard",), "GUS'S PRETZELS ON ARSENAL.", "GET THE BRATWURST ONE.",
+     "GET TWO."),
+    (("soulard",), "THESE ARE ALL FRENCH LOTS.", "LONG AND THIN.",
+     "THAT'S WHY THE ALLEYS."),
+    (("soulard",), "BEADS IN THE TREES.", "SINCE FEBRUARY.",
+     "SINCE SOME FEBRUARY."),
+    (("soulard",), "THAT'S A BALCONY, NOT A PORCH.", "IT'S IRON.",
+     "IT'S ORIGINAL."),
+    (("soulard",), "SMELL THE BREWERY?", "THAT'S THE HOPS.",
+     "SOME DAYS IT'S THE MASH."),
+    (("soulard",), "ANOTHER CORNER BAR?", "THERE'S ONE ON EVERY CORNER.",
+     "THAT'S THE DESIGN."),
+
+    # ------------------------------------------------------------- bentonpark
+    (("bentonpark",), "THE BREWERY TOUR'S FREE.", "AND THEY POUR AT THE END.",
+     "TWO."),
+    (("bentonpark",), "CLYDESDALES COMING THROUGH.", "EIGHT OF THEM.",
+     "STAND BACK."),
+    (("bentonpark",), "THE LEMP MANSION.", "HAUNTED?", "ASK THE STAFF."),
+    (("bentonpark",), "THE LEMP CAVES ARE UNDER US.", "ACTUALLY UNDER US?",
+     "RIGHT NOW."),
+    (("bentonpark",), "THE BREW HOUSE IS A LANDMARK.", "A NATIONAL ONE.",
+     "LOOK AT THE IRONWORK."),
+    (("bentonpark",), "BEECHWOOD AGED.", "THAT'S REAL.",
+     "THEY REALLY DO THAT."),
+    (("bentonpark",), "VENICE CAFE.", "THE WHOLE BUILDING'S MOSAIC.",
+     "INSIDE AND OUT."),
+    (("bentonpark",), "PICK YOUR ALLEY.", "THEY ALL COME OUT SOMEWHERE.",
+     "EVENTUALLY."),
+    (("bentonpark",), "THAT'S A CARRIAGE HOUSE.", "SOMEBODY LIVES IN IT.",
+     "SOMEBODY ALWAYS DOES."),
+    (("bentonpark",), "SMELLS LIKE BREAD.", "IT'S BEER.",
+     "IT'S BREAD THAT GAVE UP."),
+
+    # -------------------------------------------------------------- lafayette
+    (("lafayette",), "OLDEST PARK WEST OF THE RIVER.", "SAYS WHO?",
+     "SAYS THE PARK."),
+    (("lafayette",), "THE TORNADO TOOK THIS BLOCK.", "EIGHTEEN NINETY-SIX.",
+     "THEY BUILT IT BACK."),
+    (("lafayette",), "PAINTED LADIES.", "EVERY COLOUR ON THE SQUARE.",
+     "AND A COMMITTEE."),
+    (("lafayette",), "THAT IRON FENCE IS ORIGINAL.", "MOST OF IT.",
+     "THE REST IS PATIENT."),
+    (("lafayette",), "THIS WAS ALL BOARDED UP.", "IN THE SEVENTIES.",
+     "PEOPLE FORGET."),
+    (("lafayette",), "PARK'S FULL OF DOGS.", "THAT IS THE PARK'S JOB."),
+    (("lafayette",), "MANSARD AND A TURRET.", "ON A ROWHOUSE.",
+     "THEY HAD MONEY."),
+    (("lafayette",), "WALK TO DOWNTOWN?", "TEN MINUTES.",
+     "IF THE TRAIN'S NOT THROUGH."),
+    (("lafayette",), "THE GAZEBO'S BOOKED.", "IT'S ALWAYS BOOKED.",
+     "SOMEBODY'S ALWAYS MARRYING."),
+    (("lafayette",), "SQUARE OR PARK?", "THE PARK'S IN THE SQUARE.",
+     "NOW YOU'VE GOT IT."),
+
+    # ------------------------------------------------------------- comptonhts
+    (("comptonhts",), "THREE WATER TOWERS LEFT.", "IN THE WHOLE COUNTRY?",
+     "SEVEN. WE HAVE THREE."),
+    (("comptonhts",), "THAT ONE'S THE PRETTY ONE.", "COMPTON HILL.",
+     "YOU CAN CLIMB IT SOMETIMES."),
+    (("comptonhts",), "TWO HUNDRED SIX STEPS.", "TO THE TOP.",
+     "I COUNTED ONCE."),
+    (("comptonhts",), "PRIVATE PLACE.", "GATES AND ALL.", "DON'T DRIVE IN."),
+    (("comptonhts",), "THESE STREETS HAVE RULES.", "WRITTEN DOWN?",
+     "WRITTEN DOWN."),
+    (("comptonhts",), "IT NEVER HELD WATER.", "IT'S A WATER TOWER.",
+     "IT HELD THE PRESSURE."),
+    (("comptonhts",), "THE RESERVOIR'S BEHIND IT.", "STILL WORKING.",
+     "STILL FENCED."),
+    (("comptonhts",), "TOWER GROVE OR COMPTON HILL?", "DIFFERENT TOWERS.",
+     "DIFFERENT NEIGHBOURHOODS."),
+    (("comptonhts",), "THAT'S LIMESTONE, NOT PAINT.", "ALL OF IT.",
+     "THEY DON'T BUILD THAT."),
+    (("comptonhts",), "WHO LIVED HERE?", "BREWERS.",
+     "ALL OF THEM. BREWERS."),
+
+    # ------------------------------------------------------------------- hill
+    (("hill",), "THE HILL SHORTCUT?", "FOLLOW THE HYDRANTS."),
+    (("hill",), "GREEN, WHITE AND RED.", "EVERY HYDRANT.",
+     "THAT'S THE BORDER."),
+    (("hill",), "BERRA AND GARAGIOLA.", "SAME STREET.",
+     "ACROSS FROM EACH OTHER."),
+    (("hill",), "ELIZABETH AVENUE.", "THAT'S THE ONE.",
+     "THERE'S A SIGN NOW."),
+    (("hill",), "GIOIA'S HOT SALAMI.", "GET IT ON A SANDWICH.",
+     "GET IT ON ANYTHING."),
+    (("hill",), "VOLPI'S BEEN HERE A CENTURY.", "AND THEN SOME.",
+     "SINCE NINETEEN OH TWO."),
+    (("hill",), "BOCCE TONIGHT?", "IF IT'S DRY.",
+     "IT'S ALWAYS DRY ENOUGH."),
+    (("hill",), "THE HOUSES ARE FOUR ROOMS.", "AND SPOTLESS.",
+     "AND FULL OF PEOPLE."),
+    (("hill",), "MISSOURI BAKING OR THE OTHER?", "MISSOURI BAKING.",
+     "OBVIOUSLY."),
+    (("hill",), "SUNDAY GRAVY?", "STARTED IT AT SEVEN.", "IN THE MORNING."),
+
+    # ---------------------------------------------------------------- dogtown
+    (("dogtown",), "THE REAL PARADE'S HERE.", "DOWNTOWN'S IS BIGGER.",
+     "OURS IS REAL."),
+    (("dogtown",), "SEVENTEENTH OF MARCH.", "WHATEVER DAY IT LANDS ON.",
+     "WE DON'T MOVE IT."),
+    (("dogtown",), "WHY DOGTOWN?", "NOBODY AGREES.",
+     "THAT'S THE BEST PART."),
+    (("dogtown",), "CLAYTON-TAMM.", "THAT'S THE MAP NAME.", "IT'S DOGTOWN."),
+    (("dogtown",), "MINERS BUILT THESE.", "CLAY MINERS.",
+     "RIGHT UNDER THE PARK."),
+    (("dogtown",), "PARK'S RIGHT THERE.", "WALK TO THE ZOO.", "PEOPLE DO."),
+    (("dogtown",), "TAMM AVENUE ON A SATURDAY.", "EVERY PUB.", "EVERY ONE."),
+    (("dogtown",), "THAT'S A SHOTGUN HOUSE.", "AND THE ONE BEHIND IT.",
+     "AND THE ONE BEHIND THAT."),
+    (("dogtown",), "SEE THE FLAGS?", "IRISH TRICOLOUR.", "ALL YEAR."),
+    (("dogtown",), "PARKING ON PARADE DAY?", "NO.", "JUST NO."),
+
+    # ------------------------------------------------------------- towergrove
+    (("towergrove",), "TWO HUNDRED EIGHTY-NINE ACRES.",
+     "SHAW GAVE IT TO THE CITY.", "AND KEPT PAYING FOR IT."),
+    (("towergrove",), "THE RUINS AREN'T RUINS.", "THEY BUILT THEM LIKE THAT.",
+     "OUT OF A BURNT HOTEL."),
+    (("towergrove",), "TWELVE PAVILIONS.", "COUNT THEM SOMETIME.", "TWELVE."),
+    (("towergrove",), "FARMERS MARKET SATURDAY?", "GET THERE EARLY.",
+     "EARLIER THAN THAT."),
+    (("towergrove",), "MOKABE'S IS STILL OPEN.", "IT'S ALWAYS BEEN OPEN.",
+     "THAT'S THE POINT."),
+    (("towergrove",), "THE PALM HOUSE.", "THAT'S THE PIPER.",
+     "IT'S THE OLDEST ONE."),
+    (("towergrove",), "SOUTH GRAND'S FOUR BLOCKS.", "AND SEVEN COUNTRIES.",
+     "AT LEAST."),
+    (("towergrove",), "PARK OR PARK?", "THE PARK, OR THE NEIGHBOURHOOD?",
+     "SEE, THAT'S THE PROBLEM."),
+    (("towergrove",), "THE CENTRAL ALLEE.", "STRAIGHT AS A RULER.",
+     "A MILE OF IT."),
+    (("towergrove",), "IT'S GARDENESQUE.", "THAT'S A REAL WORD.",
+     "IT IS HERE."),
+
+    # --------------------------------------------------------------- cherokee
+    (("cherokee",), "ANTIQUES OR TACOS?", "THAT IS NOT A REAL CHOICE."),
+    (("cherokee",), "EAST END'S ANTIQUES.", "WEST END'S MERCADOS.",
+     "WALK THE WHOLE THING."),
+    (("cherokee",), "CINCO DE MAYO ON CHEROKEE.", "THE STREET CLOSES.",
+     "ALL OF IT."),
+    (("cherokee",), "PANADERIA'S OPEN?", "SIX IN THE MORNING.",
+     "GET THE CONCHA."),
+    (("cherokee",), "MEET AT THE BIG STATUE.", "IT'S BEEN THERE FOREVER.",
+     "EVERYBODY MEETS THERE."),
+    (("cherokee",), "PRINT SHOP IN THE BACK.", "LETTERPRESS.",
+     "STILL RUNNING."),
+    (("cherokee",), "THERE'S A CAVE UNDER HERE.", "CHEROKEE CAVE.",
+     "THEY SEALED IT."),
+    (("cherokee",), "RECORD STORE'S MOVED.", "TWO DOORS DOWN.",
+     "SAME BINS."),
+    (("cherokee",), "HOW DO YOU SAY IT?", "SAY IT LIKE YOU LIVE HERE.",
+     "CHER-O-KEE."),
+    (("cherokee",), "EVERYTHING'S CASH.", "MOST THINGS.", "BRING CASH."),
+
+    # ------------------------------------------------------------------ ville
+    (("ville",), "SUMNER WAS THE FIRST.", "FIRST OUT HERE, ANYWAY.",
+     "EIGHTEEN SEVENTY-FIVE."),
+    (("ville",), "CHUCK BERRY WENT THERE.", "AND TINA.", "AND ARTHUR ASHE."),
+    (("ville",), "DICK GREGORY TOO.", "SAME HALLS.", "ALL OF THEM."),
+    (("ville",), "ANNIE MALONE MADE MILLIONS.", "AND GAVE IT BACK.",
+     "TO THIS BLOCK."),
+    (("ville",), "THE MAY DAY PARADE.", "STILL RUNS.", "OVER A CENTURY."),
+    (("ville",), "HOMER G. PHILLIPS.", "THEY TRAINED DOCTORS HERE.",
+     "WHEN NOWHERE ELSE WOULD."),
+    (("ville",), "THIS WAS THE PLACE TO BE.", "IT HAD TO BE.",
+     "SO WE MADE IT THE PLACE."),
+    (("ville",), "FAIRGROUND PARK'S THAT WAY.", "THE POOL.",
+     "THAT'S A LONGER STORY."),
+    (("ville",), "SOUL FOOD ON THE CORNER?", "SINCE BEFORE YOU.",
+     "SINCE BEFORE ME."),
+    (("ville",), "THEY CALL IT THE VILLE.", "JUST THE VILLE.",
+     "EVERYBODY KNOWS."),
+
+    # --------------------------------------------------------------- oldnorth
+    (("oldnorth",), "CROWN CANDY LINE?", "WORTH IT. BRING CASH."),
+    (("oldnorth",), "SINCE NINETEEN THIRTEEN.", "SAME FAMILY.",
+     "SAME BOOTHS."),
+    (("oldnorth",), "FIVE MALTS IN THIRTY MINUTES.", "AND THEY'RE FREE.",
+     "NOBODY WINS."),
+    (("oldnorth",), "GET THE BLT.", "HOW MUCH BACON?", "YOU'LL SEE."),
+    (("oldnorth",), "OLD NORTH OR HYDE PARK?", "DEPENDS WHO'S ASKING."),
+    (("oldnorth",), "FOURTEENTH STREET MALL.", "THEY CLOSED IT TO CARS.",
+     "THEN OPENED IT BACK."),
+    (("oldnorth",), "THAT'S A GERMAN CHURCH.", "HYDE PARK'S FULL OF THEM.",
+     "SPIRES EVERYWHERE."),
+    (("oldnorth",), "BRICK BY BRICK.", "THAT'S HOW THEY'RE DOING IT.",
+     "HOUSE BY HOUSE."),
+    (("oldnorth",), "SOME OF THE OLDEST BLOCKS.", "IN THE WHOLE CITY.",
+     "EIGHTEEN FORTIES."),
+    (("oldnorth",), "CUT THROUGH FAIRGROUND PARK?", "NOT DURING THE PARADE."),
+
+    # ------------------------------------------------------------ southampton
+    (("southampton",), "TED DREWES ON CHIPPEWA.", "THE LINE'S IN THE STREET.",
+     "IT'S SUPPOSED TO BE."),
+    (("southampton",), "CONCRETE, NOT A SHAKE.", "THEY TURN IT OVER.",
+     "IF IT FALLS OUT IT'S FREE."),
+    (("southampton",), "THEY SELL CHRISTMAS TREES.", "SAME LOT.",
+     "SAME FAMILY."),
+    (("southampton",), "ROUTE SIXTY-SIX RAN HERE.", "RIGHT DOWN CHIPPEWA.",
+     "THAT'S WHY THE STAND'S THERE."),
+    (("southampton",), "BUNGALOW OR TWO-FAMILY?", "COUNT THE FRONT DOORS."),
+    (("southampton",), "THE ALLEY'S STILL OPEN.", "LEAGUE NIGHT'S TUESDAY.",
+     "DON'T COME TUESDAY."),
+    (("southampton",), "GRAVOIS CUTS RIGHT THROUGH.", "IT DOES THAT EVERYWHERE.",
+     "IT'S ITS WHOLE PERSONALITY."),
+    (("southampton",), "SOUTHTOWN FAMOUS-BARR.", "IT'S A HARDWARE STORE NOW.",
+     "I KNOW WHAT IT IS."),
+    (("southampton",), "EVERY YARD'S GOT A STATUE.", "MARY IN A BATHTUB.",
+     "THAT'S THE STYLE."),
+    (("southampton",), "PRINCETON HEIGHTS?", "SOUTHAMPTON.",
+     "SAME FOUR BLOCKS, DIFFERENT ARGUMENT."),
+
+    # ------------------------------------------------------------------- bevo
+    (("bevo",), "MEET ME BY THE WINDMILL.", "WHICH WINDMILL?",
+     "THERE IS ONE WINDMILL."),
+    (("bevo",), "BUSCH BUILT IT.", "AS A ROADHOUSE.",
+     "HALFWAY TO HIS FARM."),
+    (("bevo",), "GRBIC OR THE OTHER ONE?", "GRBIC.", "GET THE BUREK."),
+    (("bevo",), "CEVAPI WITH THE FLATBREAD.", "AND THE ONIONS.",
+     "ALL OF THE ONIONS."),
+    (("bevo",), "LITTLE BOSNIA.", "BIGGEST OUTSIDE BOSNIA.", "RIGHT HERE."),
+    (("bevo",), "THEY CAME IN THE NINETIES.", "AND BOUGHT THE BLOCK.",
+     "AND FIXED THE BLOCK."),
+    (("bevo",), "GRAVOIS AND MORGANFORD.", "THAT'S THE CORNER.",
+     "THAT'S WHY THE MILL'S THERE."),
+    (("bevo",), "COFFEE'S DIFFERENT HERE.", "IT COMES IN A LITTLE POT.",
+     "DRINK IT SLOW."),
+    (("bevo",), "DUTCHTOWN'S NEXT OVER.", "IT'S ALL DUTCHTOWN TO ME.",
+     "DON'T SAY THAT HERE."),
+    (("bevo",), "THE MILL'S BEEN CLOSED.", "AND OPEN.",
+     "AND CLOSED. IT'LL BE BACK."),
+
+    # ---------------------------------------------------------------- sthills
+    (("sthills",), "FRANCIS PARK IN OCTOBER.", "THE WHOLE LOOP.",
+     "EVERYBODY WALKS IT."),
+    (("sthills",), "THE OTHER TED DREWES.", "THERE ARE TWO.",
+     "PEOPLE WILL CORRECT YOU."),
+    (("sthills",), "WHICH PARISH?", "THAT'S HOW WE GIVE DIRECTIONS.",
+     "STILL."),
+    (("sthills",), "THESE ARE ALL LIMESTONE.", "AND ART DECO.",
+     "ONE DEVELOPER, ONE DECADE."),
+    (("sthills",), "HAMPTON TO KINGSHIGHWAY.", "THAT'S THE HILLS.",
+     "ROUGHLY."),
+    (("sthills",), "THE LEAVES IN THE PARK.", "PEOPLE DRIVE OVER FOR IT.",
+     "FROM THE COUNTY."),
+    (("sthills",), "EVERY HOUSE HAS A CHIMNEY.", "AND NONE OF THEM WORK.",
+     "THEY'RE FOR LOOKS."),
+    (("sthills",), "IT'S THE CITY.", "IT DOESN'T FEEL LIKE THE CITY.",
+     "IT'S STILL THE CITY."),
+    (("sthills",), "BOWLING OR THE PARISH HALL?", "SAME PEOPLE.",
+     "SAME NIGHT."),
+    (("sthills",), "CHIPPEWA OR WATSON?", "WATSON'S FASTER.",
+     "CHIPPEWA'S PRETTIER."),
+
+    # ------------------------------------------------------------- carondelet
+    (("carondelet",), "VIDE POCHE.", "EMPTY POCKET.",
+     "THE FRENCH NAMED US THAT."),
+    (("carondelet",), "IT WAS ITS OWN TOWN.", "UNTIL EIGHTEEN SEVENTY.",
+     "THEN THE CITY TOOK IT."),
+    (("carondelet",), "BLUES CITY DELI.", "THE LINE'S OUT THE DOOR.",
+     "THERE'S A BAND AT LUNCH."),
+    (("carondelet",), "THE IVORY TRIANGLE.", "THAT'S THE NAME.",
+     "IT'S ACTUALLY A TRIANGLE."),
+    (("carondelet",), "THE MILL'S DOWN THERE.", "STILL RUNNING.",
+     "STILL LOUD."),
+    (("carondelet",), "SUSAN BLOW STARTED IT HERE.", "THE FIRST KINDERGARTEN.",
+     "IN THE COUNTRY."),
+    (("carondelet",), "THE RIVER'S RIGHT THERE.", "YOU CAN'T GET TO IT.",
+     "THAT'S THE PROBLEM."),
+    (("carondelet",), "HOLLY HILLS BOULEVARD.", "THAT'S A NICE DRIVE.",
+     "TAKE IT SLOW."),
+    (("carondelet",), "SOUTH BROADWAY GOES ON.", "ALL THE WAY DOWN.",
+     "PAST EVERYTHING."),
+    (("carondelet",), "FURTHEST SOUTH IN THE CITY.", "AND THE OLDEST.",
+     "BOTH."),
+)
+
+# One-liners from a single pedestrian. Same tagging shape as the scenes above.
+STL_SOLO_BARKS = (
+    (None, "IT'S THE HUMIDITY."),
+    (None, "PARK ANYWHERE, HE SAYS."),
+    (None, "THAT'S NOT A LANE."),
+    (None, "COULD USE A SLINGER."),
+    (None, "SIREN TESTING AGAIN."),
+    (None, "MY KNEE SAYS RAIN."),
+    (None, "SIX WEEKS OF CONSTRUCTION."),
+    (None, "THEY REPAVED IT WRONG."),
+    (None, "I'M NOT PAYING TO PARK."),
+    (None, "GO CARDS."),
+    (None, "LET'S GO BLUES."),
+    (None, "IT WAS BETTER BEFORE."),
+    (None, "IT'S GETTING BETTER."),
+    (None, "I TOOK 40. IT'S 40."),
+    (None, "THIRTY MINUTES ANYWHERE."),
+    (None, "THAT'S A COUNTY PLATE."),
+    (None, "GRAVOIS AGAIN."),
+    (None, "PUT IT ON A PORK STEAK."),
+    (None, "WHERE'D YOU GO TO SCHOOL, THOUGH."),
+    (None, "BREAD AND MILK. JUST IN CASE."),
+    (("loop",), "MIND THE TROLLEY TRACK."),
+    (("loop",), "SOMEBODY'S BUSKING AGAIN."),
+    (("wellston",), "THE 94 RUNS THROUGH HERE."),
+    (("wellston",), "MY GRANDMOTHER'S HOUSE WAS THERE."),
+    (("west",), "VALIDATE YOUR TICKET."),
+    (("west",), "FOUR CITIES IN A MILE."),
+    (("cwe",), "WHOLE STREET SMELLS LIKE BREAD."),
+    (("cwe",), "THE GATES CLOSE AT NINE."),
+    (("forestpark",), "WHERE'D THEY PUT THE ELEPHANTS?"),
+    (("forestpark",), "IT'S ALL FREE, YOU KNOW."),
+    (("grand",), "CURTAIN'S AT EIGHT."),
+    (("grand",), "THAT ORGAN'S ORIGINAL."),
+    (("grove",), "PATIO'S OPEN."),
+    (("grove",), "IT WAS A MACHINE SHOP."),
+    (("shaw",), "THE DOME'S THAT WAY."),
+    (("shaw",), "ORCHIDS THROUGH MARCH."),
+    (("downtown",), "GAME'S IN THE SEVENTH."),
+    (("downtown",), "THAT'S TWELVE DOLLARS TO PARK."),
+    (("riverfront",), "WATCH THE COBBLES."),
+    (("riverfront",), "TRAM'S GOT AN HOUR WAIT."),
+    (("soulard",), "BEADS FROM FEBRUARY."),
+    (("soulard",), "MARKET CLOSES AT FIVE."),
+    (("bentonpark",), "THAT'S THE MASH YOU SMELL."),
+    (("bentonpark",), "HORSES COME THROUGH AT TWO."),
+    (("lafayette",), "MIND THE IRONWORK."),
+    (("lafayette",), "THE COMMITTEE WILL HEAR ABOUT IT."),
+    (("comptonhts",), "DON'T DRIVE UP THE PRIVATE."),
+    (("comptonhts",), "TOWER'S OPEN THE FULL MOON."),
+    (("hill",), "LOOK AT THE HYDRANT."),
+    (("hill",), "GRAVY'S ON SINCE SEVEN."),
+    (("dogtown",), "PARADE'S IN MARCH."),
+    (("dogtown",), "TAMM'S PACKED ALREADY."),
+    (("towergrove",), "MARKET'S TILL NOON."),
+    (("towergrove",), "MIND THE PAVILION, IT'S BOOKED."),
+    (("cherokee",), "CASH ONLY, FRIEND."),
+    (("cherokee",), "SHOP'S OPEN TILL SEVEN."),
+    (("ville",), "PARADE COMES DOWN THIS WAY."),
+    (("ville",), "THAT SCHOOL MADE PEOPLE."),
+    (("oldnorth",), "LINE'S ALREADY ROUND THE CORNER."),
+    (("oldnorth",), "BRING CASH FOR THE MALT."),
+    (("southampton",), "CONCRETE'S WORTH THE WAIT."),
+    (("southampton",), "SIXTY-SIX CAME THROUGH HERE."),
+    (("bevo",), "MILL'S CLOSED AGAIN."),
+    (("bevo",), "BUREK'S OUT OF THE OVEN."),
+    (("sthills",), "WALK THE PARK LOOP."),
+    (("sthills",), "WHICH PARISH ARE YOU?"),
+    (("carondelet",), "MILL'S ON SECOND SHIFT."),
+    (("carondelet",), "DELI'S GOT A BAND TODAY."),
+)
+
+# What somebody says when they watch you do something. Not tagged by hood:
+# these are reactions, and they read as reactions anywhere.
+STL_REACTION_BARKS = (
+    "THAT'S NOT YOUR CAR.", "HE TOOK THE BUS!", "IN A REFUSE TRUCK?",
+    "THAT'S THE SIDEWALK!", "MY LAWN!", "CALL SOMEBODY!",
+    "HE'S HEADED FOR GRAVOIS.", "GOOD LUCK ON KINGSHIGHWAY.",
+    "THAT'S A TRANS AM.", "KSHE'S ON IN THERE.", "SLOW DOWN, IT'S A SCHOOL DAY.",
+    "THAT'S A ONE WAY!", "YOU'RE ON THE TRACKS!", "THE GATE'S DOWN!",
+    "PARK IT ANYWHERE, WHY DON'T YOU.", "COUNTY PLATES. FIGURES.",
+    "I'M CALLING THE ALDERMAN.", "MY COUSIN DRIVES ONE OF THOSE.",
+    "THAT'LL BUFF OUT.", "TELL ME THAT'S INSURED.",
+    "WHERE'D YOU LEARN THAT, THE COUNTY?", "HE'S GOING THE WRONG WAY UP TUCKER.",
+    "NOT THROUGH THE MARKET!", "THAT'S A HISTORIC WALL!",
+    "SOMEBODY GET A PLATE NUMBER.", "HE HIT THE CONE. THE FAMOUS ONE.",
+    "THAT'S A METROBUS, MAN.", "YOU CAN'T DRIVE ON THE BASIN!",
+)
+
+# Cop radio and shouts. A few are St. Louis specific, because the jurisdiction
+# question is a genuine feature of being chased around here.
+STL_COP_BARKS = (
+    "PULL IT OVER.", "CITY UNIT, EASTBOUND.", "SUSPECT ON GRAVOIS.",
+    "HE'S HEADED FOR THE COUNTY LINE.", "THAT'S NOT OUR JURISDICTION.",
+    "IT IS NOW.", "LOST HIM IN THE GANGWAYS.", "CHECK THE ALLEY.",
+    "UNITS TO KINGSHIGHWAY.", "HE CROSSED DELMAR.", "BLOCK THE BRIDGE.",
+    "HE'S IN THE PARK. AGAIN.", "STOP THE VEHICLE.", "OUT OF THE CAR.",
+    "DO NOT RUN.", "HE'S RUNNING.", "SOUTHBOUND ON BROADWAY.",
+    "WE HAVE HIM ON TUCKER.", "HOLD AT THE CROSSING.",
+    "TRAIN'S COMING, HOLD UP.", "HE WENT DOWN CHEROKEE.",
+    "GET AHEAD OF HIM AT ARSENAL.",
+)
+
+# Panic lines, per neighbourhood, with a citywide fallback. All five of these
+# used to be citywide, so a chase through Soulard and a chase through the Ville
+# sounded exactly the same.
+STL_PANIC_LINES = (
+    "I DIDN'T SEE A THING!", "THAT IS NOT A LANE!", "NOT THE PARKED CAR!",
+    "WHO TAUGHT YOU TO DRIVE?", "TAKE GRAVOIS, THEY'LL NEVER FOLLOW!",
+    "CALL SOMEBODY!", "GET OFF THE STREET!", "NOT AGAIN!",
+)
+STL_PANIC_BY_HOOD = {
+    'loop': ("NOT ON DELMAR!", "MIND THE TRACK!"),
+    'wellston': ("NOT ON THIS BLOCK!", "SOMEBODY CALL IT IN!"),
+    'west': ("THIS IS CLAYTON!", "I PAY TAXES FOR THIS!"),
+    'cwe': ("NOT ON EUCLID!", "GET BEHIND THE GATES!"),
+    'forestpark': ("THERE ARE CHILDREN HERE!", "NOT IN THE PARK!"),
+    'grand': ("THE SHOW'S LETTING OUT!", "NOT ON GRAND!"),
+    'grove': ("NOT ON MANCHESTER!", "GET IN THE BAR!"),
+    'shaw': ("NOT BY THE GARDEN!", "MIND THE GLASSHOUSE!"),
+    'downtown': ("NOT ON WASHINGTON!", "SOMEBODY GET SECURITY!"),
+    'riverfront': ("WATCH THE COBBLES!", "NOT BY THE ARCH!"),
+    'soulard': ("NOT THROUGH THE MARKET!", "MIND THE BALCONY!"),
+    'bentonpark': ("NOT BY THE BREWERY!", "THE HORSES ARE OUT!"),
+    'lafayette': ("NOT THE IRONWORK!", "THAT FENCE IS ORIGINAL!"),
+    'comptonhts': ("THIS IS A PRIVATE PLACE!", "NOT UP THE HILL!"),
+    'hill': ("NOT ON THE HILL!", "MIND THE BOCCE COURT!"),
+    'dogtown': ("NOT ON TAMM!", "THE PARADE'S IN MARCH!"),
+    'towergrove': ("NOT THROUGH THE MARKET!", "MIND THE PAVILION!"),
+    'cherokee': ("NOT ON CHEROKEE!", "GET IN THE SHOP!"),
+    'ville': ("NOT ON THIS STREET!", "THE CHILDREN ARE OUT!"),
+    'oldnorth': ("NOT BY CROWN CANDY!", "THE LINE'S RIGHT THERE!"),
+    'southampton': ("THERE'S A LINE OUT THERE!", "NOT ON CHIPPEWA!"),
+    'bevo': ("NOT BY THE MILL!", "GET INSIDE!"),
+    'sthills': ("NOT IN FRANCIS PARK!", "THIS IS A QUIET STREET!"),
+    'carondelet': ("NOT DOWN BROADWAY!", "SOMEBODY STOP HIM!"),
+}
+
+
+def _scene_index(scenes):
+    """Split a tagged table into (citywide, {hood: [...]})."""
+    wide, local = [], {}
+    for scene in scenes:
+        hoods = scene[0]
+        if hoods is None:
+            wide.append(scene)
+            continue
+        for hood in hoods:
+            local.setdefault(hood, []).append(scene)
+    return tuple(wide), {k: tuple(v) for k, v in local.items()}
+
+
+STL_CITYWIDE, STL_LOCAL_BY_HOOD = _scene_index(STL_CONVERSATIONS)
+SOLO_CITYWIDE, SOLO_BY_HOOD = _scene_index(STL_SOLO_BARKS)
+
+
+class ChatterBag:
+    """Deal scenes without replacement.
+
+    A bare random.choice over a 16-item pool repeats itself constantly, and
+    the old chatter did exactly that - which is the single biggest reason the
+    city sounded like it only knew fifteen things. This deals from a shuffled
+    deck per key, reshuffles only when the deck is empty, and keeps a short
+    global memory so crossing a neighbourhood boundary does not immediately
+    replay what you just heard on the other side.
+    """
+
+    def __init__(self, recent=CHATTER_RECENT):
+        self.decks = {}
+        self.recent = collections.deque(maxlen=recent)
+
+    def deal(self, key, pool, rng=random):
+        pool = tuple(pool)
+        if not pool:
+            return None
+        deck = self.decks.get(key)
+        if not deck:
+            deck = list(pool)
+            rng.shuffle(deck)
+            # Do not let a fresh shuffle open with something just heard.
+            # Preferred: anything not in the recent window at all. Guaranteed:
+            # never the card dealt immediately before - which matters most
+            # when the deck is smaller than the window, because then every
+            # card is "recent" and the soft rule has nothing to pick.
+            if len(deck) > 1:
+                last = self.recent[-1] if self.recent else None
+                pick = next((i for i, sc in enumerate(deck)
+                             if sc not in self.recent), None)
+                if pick is None:
+                    pick = next((i for i, sc in enumerate(deck)
+                                 if sc != last), 0)
+                if pick:
+                    deck[0], deck[pick] = deck[pick], deck[0]
+            self.decks[key] = deck
+        scene = deck.pop(0)
+        self.recent.append(scene)
+        return scene
+
+    def pick(self, hood, wide, by_hood, rng=random, bias=CHATTER_LOCAL_BIAS):
+        """A local scene most of the time, a citywide one the rest."""
+        local = by_hood.get(hood, ())
+        if local and (not wide or rng.random() < bias):
+            return self.deal(('local', hood), local, rng)
+        return self.deal(('wide',), wide, rng)
+
 
 # Character-creator list: regular campuses serving a high-school grade across
 # the core St. Louis metro, with current whole-school enrollment >= 100. That
@@ -653,6 +1641,18 @@ JOB_OFFER_SECONDS = 100
 # straight away. This replaces two seconds of silence with a decision.
 JOB_CHAIN_WINDOW = FPS * 6
 JOB_CHAIN_BONUS = 0.20
+JOB_MASTERY_BONUS = 200     # first completion of each run type
+JOB_KIND_ORDER = ('courier', 'rush', 'hot', 'heavy')
+
+# --- Side jobs ------------------------------------------------------------
+# One contact rotates through three very different verbs. E accepts it on
+# foot; active side work temporarily owns the objective marker and HUD.
+SIDE_MISSION_CONTACT_NAMES = ("City Museum", "Grand Center Arts District",
+                              "Bevo Mill")
+SIDE_MISSION_CONTACT_RADIUS = 38
+SIDE_MISSION_TARGET_RADIUS = 20
+SIDE_MISSION_COOLDOWN = FPS * 5
+SIDE_MISSION_MARKER_COLORS = ((232, 92, 188), (126, 42, 104))
 
 # --- The body shop --------------------------------------------------------
 # Kingshighway. Drive in hot, come out a different colour. The classic GTA
@@ -709,13 +1709,48 @@ DECAL_MAX = 64              # ground stains kept before the oldest is dropped
 PUNCH_RANGE = 30            # px from the player's centre
 PUNCH_ARC = 1.15            # radians, half-angle of the swing
 PUNCH_COOLDOWN = 16         # steps between swings
-PUNCH_DAMAGE = 26.0         # against a car
-SHOOT_COOLDOWN = 11
+PUNCH_DAMAGE = 26.0         # against a car / actor
+BAT_RANGE = 39
+BAT_ARC = 1.35
+BAT_COOLDOWN = 22
+BAT_DAMAGE = 82.0
+SHOOT_COOLDOWN = 11         # pistol compatibility reference
 BULLET_SPEED = 13.0
 BULLET_LIFE = 42            # steps (~9 tiles of travel)
-BULLET_DAMAGE = 34.0
+BULLET_DAMAGE = 34.0        # pistol compatibility reference
 PISTOL_AMMO = 24            # rounds per pickup
-WEAPON_PICKUP_COUNT = 9
+SHOTGUN_AMMO = 10
+SMG_AMMO = 72
+WEAPON_ORDER = ('fists', 'bat', 'pistol', 'shotgun', 'smg',
+                throwable_logic.TIMED_EXPLOSIVE, throwable_logic.FIRE_BOTTLE)
+WEAPON_PICKUP_KINDS = ('pistol', 'bat', 'shotgun', 'smg',
+                       throwable_logic.TIMED_EXPLOSIVE,
+                       throwable_logic.FIRE_BOTTLE)
+WEAPON_DEFS = {
+    'fists': {'label': 'FISTS', 'melee': True, 'range': PUNCH_RANGE,
+              'arc': PUNCH_ARC, 'cooldown': PUNCH_COOLDOWN,
+              'damage': PUNCH_DAMAGE, 'car_damage': PUNCH_DAMAGE},
+    'bat': {'label': 'BASEBALL BAT', 'melee': True, 'range': BAT_RANGE,
+            'arc': BAT_ARC, 'cooldown': BAT_COOLDOWN,
+            'damage': BAT_DAMAGE, 'car_damage': 44.0},
+    'pistol': {'label': 'PISTOL', 'ammo': PISTOL_AMMO, 'cooldown': SHOOT_COOLDOWN,
+               'damage': BULLET_DAMAGE, 'speed': BULLET_SPEED,
+               'life': BULLET_LIFE, 'pellets': 1, 'spread': 0.0},
+    'shotgun': {'label': 'SHOTGUN', 'ammo': SHOTGUN_AMMO, 'cooldown': 30,
+                'damage': 30.0, 'speed': 12.0, 'life': 24,
+                'pellets': 6, 'spread': 0.30},
+    'smg': {'label': 'SMG', 'ammo': SMG_AMMO, 'cooldown': 4,
+            'damage': 19.0, 'speed': 14.0, 'life': 38,
+            'pellets': 1, 'spread': 0.06},
+    throwable_logic.TIMED_EXPLOSIVE: {
+        'label': 'SATCHEL', 'ammo': 2, 'cooldown': 42, 'throwable': True,
+    },
+    throwable_logic.FIRE_BOTTLE: {
+        'label': 'FIRE BOTTLE', 'ammo': 2, 'cooldown': 30,
+        'throwable': True,
+    },
+}
+WEAPON_PICKUP_COUNT = 18
 WEAPON_RESPAWN = FPS * 25
 
 # --- St. Louis grub: the power-up layer ----------------------------------
@@ -789,6 +1824,62 @@ TILE_WATER = 2
 TILE_BUILDING = 3
 TILE_PARK = 4
 TILE_PLAZA = 5              # walkable landmark ground: plazas, alleys, concourses
+TILE_RAIL = 6               # dedicated, non-road rail right-of-way
+
+# --- MetroLink -------------------------------------------------------------
+# This was one dead-straight row across the entire map at row 53, chosen
+# because row 53 happened to be free of collisions. Two things wrong with
+# that. It ran through the Compton Hill Water Tower's lawn; and row 53 is
+# south city, where the real MetroLink conspicuously does not go - which is a
+# thing people here complain about, not a thing to build.
+#
+# The Red Line's actual alignment comes in from the north-west beside Delmar,
+# runs east along Forest Park's north edge, serves the Central West End and
+# Grand, swings south around downtown and crosses the Mississippi on the Eads.
+# It is a polyline, so the trains follow a polyline.
+#
+# Waypoints are (col, row) and every leg is axis-aligned. At this compressed
+# scale the central corridor turns east on Olive and crosses the Eads north of
+# the Arch grounds. The previous alignment dropped to Chouteau and then ran
+# through the middle of the Arch footprint to reach the river.
+METROLINK_WAYPOINTS = (
+    (0, 23), (12, 23),      # in from the west, parallel to Delmar
+    (12, 26), (62, 26),     # south a block, then east past the park and the CWE
+    (62, 32),               # compact downtown connector, west of the Arch
+    (82, 32),               # Olive to Laclede's Landing and the Eads
+)
+#: named stops, west to east: (col, row, name)
+METROLINK_STATIONS = (
+    (6, 23, "WELLSTON"),
+    (12, 25, "DELMAR LOOP"),
+    (20, 26, "FOREST PK-DEBALIVIERE"),
+    (34, 26, "CENTRAL WEST END"),
+    (50, 26, "GRAND"),
+    (62, 30, "UNION STATION"),
+    (68, 32, "CIVIC CENTER"),
+    (76, 32, "8TH & PINE"),
+    (86, 32, "LACLEDE'S LANDING"),
+)
+METROLINK_TRACK_OFFSETS = (-10, 10)
+# The Loop Trolley. It runs on Delmar and it does not go very far, which is
+# the entire joke and also the entire truth: about two miles, Loop to the
+# History Museum. It used to run the full width of the map.
+# The Clydesdale beat: west along Gravois' grid leg, then south down Broadway
+# past the brewery. Both legs are clear of buildings, and neither of them is
+# the river.
+CLYDESDALE_ROW = 63
+CLYDESDALE_WEST = 59
+CLYDESDALE_COL = 79
+CLYDESDALE_SOUTH = 72
+
+TROLLEY_ROW = 21
+TROLLEY_COL_MIN = 0
+TROLLEY_COL_MAX = 34
+RAIL_GATE_WARNING_DISTANCE = 360.0
+RAIL_GATE_ARM_RATE = 0.028
+RAIL_GATE_STOP_DISTANCE = 92.0
+RAIL_GATE_LANE_HALF_WIDTH = 25.0
+RAIL_TRAIN_COLLISION_DAMAGE = 220.0
 
 # --- Urban palette: gritty 90s-console St. Louis. Aged asphalt and grime,
 #     but brick-forward and a stop brighter than pure GTA1 monochrome so the
@@ -896,6 +1987,19 @@ LANDMARK_LAYOUT = {
     "Compton Hill Water Tower": "tower",  # one solid tile in an open lawn
     "Bevo Mill": "tower",
     "Cherokee Street": "strip",          # two shop rows with the street between
+    # Henry Shaw's garden is a GARDEN. It had no entry here at all, so it fell
+    # through to the default "district" layout and generated a ring of
+    # buildings around a courtyard - a wall of masonry standing in the middle
+    # of the Missouri Botanical Garden. The only solid mass in a garden is the
+    # glass: the Climatron, the Linnean House, Shaw's own house.
+    "Missouri Botanical Garden": "garden",
+    # Brick blocks with yard streets between them, matching the art.
+    "Anheuser-Busch Brewery": "brewery",
+    # The four districts whose own art draws its own street grid.
+    "Central West End": "blocks",
+    "The Hill": "blocks",
+    "Delmar Loop": "blocks",
+    "Grand Center Arts District": "blocks",
 }
 LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
 
@@ -910,12 +2014,15 @@ LANDMARKS = [
     (82, 40, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
     # Busch III was sited so the Arch stands over centre field; the two used
     # to be half a map apart, with downtown fused onto the ballpark.
-    (72, 43, 10, 10, "building", "Busch Stadium", (118, 108, 122)),
+    # Fit the bowl inside the short downtown block. Chouteau (row 43), Poplar
+    # (row 50), Broadway (73) and 7th (79) now remain actual asphalt instead
+    # of sidewalk seams around a landmark painted over the road graph.
+    (74, 44, 5, 6, "building", "Busch Stadium", (118, 108, 122)),
     (63, 32, 12, 10, "building", "Downtown", (104, 100, 112)),
     # Soulard Market and the brewery were one landmark and are a mile and a
     # half apart: the market is 7th & Lafayette, the brewery is down past
     # Arsenal by the river, and you can smell which is which.
-    (72, 54, 7, 5, "building", "Soulard Farmers Market", (168, 120, 72)),
+    (74, 51, 5, 6, "building", "Soulard Farmers Market", (168, 120, 72)),
     (67, 66, 10, 9, "building", "Anheuser-Busch Brewery", (150, 92, 58)),
     # --- Midtown spine, running north-west from downtown ---
     # Grand & Washington is most of a mile NORTH of Market Street; Grand
@@ -946,9 +2053,11 @@ LANDMARKS = [
     # the Arch's own row, which is the whole composition.
     (76, 33, 5, 5, "building", "Old Courthouse", (196, 190, 172)),
     # Union Station: the headhouse, the shed, and the clock tower.
-    (61, 44, 10, 6, "building", "Union Station", (176, 166, 142)),
+    # These sit inside their irregular city blocks instead of on top of the
+    # road graph. Market/Chouteau and the 18th/Tucker corridors stay car-wide.
+    (64, 44, 4, 6, "building", "Union Station", (176, 166, 142)),
     # City Museum: a former shoe factory with a school bus on the roof.
-    (55, 44, 6, 5, "building", "City Museum", (150, 66, 58)),
+    (58, 44, 5, 6, "building", "City Museum", (150, 66, 58)),
     # --- South city ---
     # Compton Hill Water Tower: one of three still standing, which is more
     # than any other city in the country has, and locals will tell you.
@@ -961,10 +2070,82 @@ LANDMARKS = [
     (54, 76, 16, 4, "building", "Cherokee Street", (168, 100, 62)),
 ]
 
-# Road rows carried across the Mississippi. 44 is the Eads, level with the
-# Arch; 52 is the Poplar Street Bridge. Both must be in the road grid
-# (range(4, MAP_TILES_W, 8)) or they would be a bridge to nowhere.
-RIVER_BRIDGES = (44, 52)
+# One line of real St. Louis for every landmark and every named feature
+# inside one. Discovery used to fire "Discovered: X!" and nothing else, which
+# is a scoring event, not a city. Everything here is checkable.
+LANDMARK_PLAQUES = {
+    "Gateway Arch":
+        "630 feet, and exactly as wide. Saarinen, finished 1965.",
+    "Busch Stadium":
+        "Sited so the Arch stands over centre field.",
+    "Downtown":
+        "The Wainwright of 1891 is one of the first true skyscrapers.",
+    "Soulard Farmers Market":
+        "Trading since 1779 - older than the country it is in.",
+    "Anheuser-Busch Brewery":
+        "The Brew House is a National Historic Landmark. So are the horses.",
+    "Grand Center Arts District":
+        "The Fox opened in 1929 and seats over 4,000.",
+    "Central West End":
+        "The Basilica holds the largest mosaic collection in the world.",
+    "Forest Park":
+        "1,300 acres - half again the size of Central Park.",
+    "Delmar Loop":
+        "Chuck Berry played Blueberry Hill monthly for 17 years.",
+    "Ted Drewes":
+        "Frozen custard on Route 66 since 1930. Christmas trees after.",
+    "Ted Drewes on Grand":
+        "The other one. There are two, and people will correct you.",
+    "The Hill":
+        "Yogi Berra and Joe Garagiola grew up across the street from each other.",
+    "Tower Grove Park":
+        "289 acres of Henry Shaw's Victorian Gardenesque, given to the city.",
+    "Old Courthouse":
+        "Dred Scott sued for his freedom here, in 1846.",
+    "Union Station":
+        "Once the largest and busiest train station in the world.",
+    "City Museum":
+        "A shoe factory that Bob Cassilly turned inside out.",
+    "Compton Hill Water Tower":
+        "One of only seven standing water towers left in the country.",
+    "Missouri Botanical Garden":
+        "Open to the public since 1859, and never once closed.",
+    "Bevo Mill":
+        "Built by August Busch in 1917, halfway to his farm.",
+    "Cherokee Street":
+        "Antiques at one end, mercados at the other, cash at both.",
+    # named places inside a landmark
+    "The Grand Basin":
+        "Dug for the 1904 World's Fair and never filled in.",
+    "Art Hill":
+        "Free art museum at the top, sledding down it the moment it snows.",
+    "Saint Louis Art Museum":
+        "Built as the Fair's Palace of Fine Art. Still free.",
+    "The Muny":
+        "America's oldest and largest outdoor theatre - 1,500 free seats since 1919.",
+    "Saint Louis Zoo":
+        "Free, by a tax the region voted on itself.",
+    "The Jewel Box":
+        "A greenhouse of glass and steel, 1936, in the middle of a park.",
+    "The Climatron":
+        "Buckminster Fuller's dome, 1960 - the first geodesic conservatory.",
+    "Seiwa-en":
+        "14 acres: the largest Japanese garden in North America.",
+    "The Linnean House":
+        "1882. The oldest continuously operating greenhouse west of the Mississippi.",
+    "Tower Grove House":
+        "Henry Shaw's country home. He is buried a few steps away.",
+}
+
+# Road rows carried across the Mississippi. The Eads is north of the Arch;
+# putting it on row 43 made both the bridge and MetroLink bisect the memorial
+# grounds. Row 32 is the north-downtown approach, and row 50 remains the
+# southern Poplar Street crossing. Both are named grid streets.
+RIVER_BRIDGES = (32, 50)
+# Tiny land remnants left between the two river-bank offsets. They have no
+# connection to the street flood fill and read as accidental concrete islands.
+RIVER_POCKET_TILES = ((89, 12), (90, 12), (82, 18), (83, 18),
+                      (89, 60), (90, 60))
 
 # --- Features inside a landmark -------------------------------------------
 # Forest Park is one landmark, but it contains four or five places a St.
@@ -983,6 +2164,13 @@ LANDMARK_FEATURES = (
     ("Forest Park", "The Muny", 0.720, 0.150, 0.170, 0.160, False),
     ("Forest Park", "Saint Louis Zoo", 0.210, 0.720, 0.210, 0.150, False),
     ("Forest Park", "The Jewel Box", 0.470, 0.760, 0.110, 0.090, False),
+    # The garden's own named places. The Climatron is the one you can pick out
+    # from across the map, so it gets to be discoverable in its own right the
+    # way the Grand Basin is; Seiwa-en is real water you have to go round.
+    ("Missouri Botanical Garden", "The Climatron", 0.230, 0.130, 0.260, 0.300, False),
+    ("Missouri Botanical Garden", "Seiwa-en", 0.620, 0.280, 0.260, 0.300, True),
+    ("Missouri Botanical Garden", "The Linnean House", 0.120, 0.700, 0.380, 0.140, False),
+    ("Missouri Botanical Garden", "Tower Grove House", 0.740, 0.700, 0.140, 0.140, False),
 )
 
 CIVILIAN_VARIANTS = ['sedan', 'coupe', 'van', 'pickup', 'taxi', 'trans_am']
@@ -999,6 +2187,15 @@ CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 
                       + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
                       + ['bus'] * 1 + ['metrobus_70'] * 1
                       + ['garbage_truck'] * 1 + ['trans_am'] * 1)
+
+# Rare local jokes belong at destinations, not clogging the ambient-traffic
+# pool. There is exactly one of each, parked where a player can deliberately
+# go find and steal it.
+SHOWCASE_VEHICLES = (
+    ('mudfoot', "Busch Stadium"),
+    ('grocery_cart', "Soulard Farmers Market"),
+)
+SHOWCASE_VARIANTS = frozenset(v for v, _name in SHOWCASE_VEHICLES)
 
 # Default car collider. The kerbside parking layout is sized against this, so
 # it is a named constant both places can assert on rather than a loose 34/18.
@@ -1036,6 +2233,11 @@ VEHICLE_TUNING = {
     'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.86),
     'vespa':         dict(w=16, h=12, acceleration=0.42, max_steer=0.060, speed_factor=1.15),
     'trans_am':      dict(w=34, h=18, acceleration=0.38, max_steer=0.052, speed_factor=1.12),
+    # St. Louis built the original monster-truck legend; this affectionate
+    # unbranded homage has the huge footprint, durability and pothole manners.
+    'mudfoot':       dict(w=46, h=28, acceleration=0.34, max_steer=0.038, speed_factor=1.06),
+    # A giant supermarket parade cart once rolled through local childhoods.
+    'grocery_cart':  dict(w=48, h=24, acceleration=0.18, max_steer=0.050, speed_factor=0.72),
 }
 
 # (variant, colour) -> ([sprite] * 24, [shadow] * 24), filled by bake_car_sprites().
@@ -1086,7 +2288,8 @@ def bake_car_sprites():
             sets[(variant, c)] = entry
     # St. Louis service vehicles: fixed liveries, so one bake covers every
     # colour slot the spawner might ask for (same trick as the taxi).
-    for variant in ('garbage_truck', 'bus', 'metrobus_70', 'box_truck', 'vespa'):
+    for variant in ('garbage_truck', 'bus', 'metrobus_70', 'box_truck', 'vespa',
+                    'mudfoot', 'grocery_cart'):
         frames = _scale_frames(cars_bake_variant(variant), SPRITE_SCALE_CAR)
         entry = (frames, [cars_make_shadow(f) for f in frames])
         for c in CAR_COLORS:
@@ -1143,9 +2346,9 @@ def _hash2(a, b, salt=0):
 
 
 # --- City block fabric ----------------------------------------------------
-# The road grid is range(4, W, 8), so each block is the 7x7 span of tiles
-# between two road lines. Every such block gets a deterministic character so
-# the world reads as a dense brick city instead of empty lawn.
+# Blocks are the irregular spans between the named road lines. Every span gets
+# a deterministic character so the world reads as a dense brick city instead
+# of empty lawn.
 BLOCK_BUILT = 0
 BLOCK_PARK = 1
 BLOCK_LOT = 2
@@ -1161,7 +2364,27 @@ def _block_kind(bx, by):
 
 
 def _block_brick(bx, by):
-    return CITY_BRICKS[_hash2(bx, by, 99) % len(CITY_BRICKS)]
+    # Sample a tile inside the block. The grid is irregular, so walk the real
+    # line list rather than multiplying by a step that no longer exists.
+    lines = sorted(ROAD_LINES)
+    col = lines[min(bx, len(lines) - 1)] + 1
+    row = lines[min(by, len(lines) - 1)] + 1
+    pool = HOOD_BRICKS.get(hood_at(col, row), tuple(CITY_BRICKS))
+    return pool[_hash2(bx, by, 99) % len(pool)]
+
+
+def _block_spans(limit):
+    """Return the [start, end) non-road spans between named streets."""
+    lines = sorted(ROAD_LINES)
+    spans = []
+    prev = -1
+    for line in lines:
+        if line - 1 >= prev + 1:
+            spans.append((prev + 1, line))
+        prev = line
+    if prev + 1 < limit:
+        spans.append((prev + 1, limit))
+    return [(start, end) for start, end in spans if end > start]
 
 
 def _fill_city_blocks(game_map):
@@ -1172,15 +2395,24 @@ def _fill_city_blocks(game_map):
     occasional mid-block alley, so peds have somewhere to walk and blocks are
     not solid walls.
     """
-    for by, top in enumerate(range(5, MAP_TILES_H, 8)):
-        for bx, left in enumerate(range(5, MAP_TILES_W, 8)):
+    col_spans = _block_spans(MAP_TILES_W)
+    row_spans = _block_spans(MAP_TILES_H)
+    for by, (top, bottom) in enumerate(row_spans):
+        for bx, (left, right) in enumerate(col_spans):
+            bw, bh = right - left, bottom - top
+            if bw <= 0 or bh <= 0:
+                continue
             kind = _block_kind(bx, by)
             brick = _block_brick(bx, by)
-            alley_col = 3 if (_hash2(bx, by, 7) & 1) else -1
-            alley_row = 3 if (_hash2(bx, by, 13) & 1) else -1
-            courtyard = _hash2(bx, by, 21) % 5 == 0
-            for j in range(7):
-                for i in range(7):
+            # Alleys and courtyards are placed as a FRACTION of the block, so
+            # a short downtown block and a long county block both get one in
+            # the middle instead of the short one having its alley fall
+            # outside it entirely.
+            alley_col = bw // 2 if (bw >= 5 and _hash2(bx, by, 7) & 1) else -1
+            alley_row = bh // 2 if (bh >= 5 and _hash2(bx, by, 13) & 1) else -1
+            courtyard = bw >= 5 and bh >= 5 and _hash2(bx, by, 21) % 5 == 0
+            for j in range(bh):
+                for i in range(bw):
                     x, y = left + i, top + j
                     if not (0 <= x < MAP_TILES_W and 0 <= y < MAP_TILES_H):
                         continue
@@ -1195,7 +2427,7 @@ def _fill_city_blocks(game_map):
                     elif kind == BLOCK_LOT:
                         game_map[y][x] = {'type': TILE_PLAZA, 'collidable': False,
                                           'landmark': None, 'color': COLOR_LOT}
-                    elif walk or (courtyard and 2 <= i <= 4 and 2 <= j <= 4):
+                    elif walk or (courtyard and 1 < i < bw - 2 and 1 < j < bh - 2):
                         game_map[y][x] = {'type': TILE_PLAZA, 'collidable': False,
                                           'landmark': None, 'color': COLOR_SIDEWALK}
                     else:
@@ -1223,7 +2455,7 @@ def build_map():
     """Generate the tile grid: roads on a grid, the Mississippi down the east
     side, a dense brick block fabric between the roads, landmarks on top."""
     game_map = [[None] * MAP_TILES_W for _ in range(MAP_TILES_H)]
-    road_lines = set(range(4, MAP_TILES_W, 8))
+    road_lines = ROAD_LINES          # the named, irregular network
 
     for y in range(MAP_TILES_H):
         for x in range(MAP_TILES_W):
@@ -1244,8 +2476,61 @@ def build_map():
                 game_map[y][x] = _landmark_tile(x - lx, y - ly, lw, lh, kind, name, color)
 
     _stamp_features(game_map)
+    _stamp_diagonals(game_map)
+    # The river goes in before the rail, not after: it rebuilds the bridge
+    # decks wholesale, which used to wipe the rail tag straight back off the
+    # Eads and leave the MetroLink running on untagged road.
     _stamp_river(game_map)
+    _stamp_rail_corridors(game_map)
     return game_map
+
+
+#: Landmarks a diagonal is allowed to cut through. These are neighbourhoods
+#: with a district/strip layout - a street through them is what they are made
+#: of. The single-building landmarks (the Arch's legs, the stadium bowl, the
+#: market sheds, a water tower) are never cut.
+DIAGONAL_MAY_CUT = frozenset((
+    "Downtown", "Central West End", "Grand Center Arts District",
+    "The Hill", "Delmar Loop", "Cherokee Street",
+))
+
+
+def _stamp_diagonals(game_map):
+    """Cut Gravois, Manchester and Natural Bridge across the finished grid.
+
+    Stamped after the landmarks on purpose. A diagonal that the first district
+    it touches erases is not an arterial, it is a driveway - and the whole
+    point of Gravois is that it ignores everything in its way for nine miles.
+    What it will not do is punch a hole through a landmark whose shape IS the
+    landmark, so DIAGONAL_MAY_CUT gates it.
+    """
+    for name, points, width in DIAGONAL_STREETS:
+        for (col, row) in _diagonal_run(points, width):
+            tile = game_map[row][col]
+            if tile['type'] == TILE_WATER:
+                continue                       # never bridge on a whim
+            owner = tile.get('landmark')
+            if owner is not None and owner not in DIAGONAL_MAY_CUT:
+                continue
+            game_map[row][col] = {
+                'type': TILE_ROAD, 'collidable': False,
+                'landmark': owner, 'color': COLOR_ROAD,
+                'street': name, 'diagonal': True,
+            }
+
+
+#: feature name -> the landmark it belongs to. _stamp_features renames a tile
+#: to the feature that claims it ("The Climatron"), which silently broke every
+#: "does this tile belong to a landmark with hand-made art" test - so the
+#: generic building passes drew procedural houses straight over the dome.
+LANDMARK_FEATURE_PARENT = {name: parent
+                           for (parent, name, _fx, _fy, _fw, _fh, _s)
+                           in LANDMARK_FEATURES}
+
+
+def landmark_owner(name):
+    """The landmark a tile belongs to, following a feature up to its parent."""
+    return LANDMARK_FEATURE_PARENT.get(name, name)
 
 
 def _stamp_features(game_map):
@@ -1274,6 +2559,149 @@ def _stamp_features(game_map):
                     tile['collidable'] = True
 
 
+def _metrolink_route():
+    """The full waypoint list, with the last leg run out over the Eads."""
+    pts = list(METROLINK_WAYPOINTS)
+    end_row = pts[-1][1]
+    pts.append((MAP_TILES_W - 1, end_row))
+    return tuple(pts)
+
+
+METROLINK_ROUTE = _metrolink_route()
+METROLINK_ROW = METROLINK_WAYPOINTS[3][1]   # the long east-west leg, row 26
+
+
+def metrolink_segments():
+    """Axis-aligned (c0, r0, c1, r1, axis) legs, west to east."""
+    legs = []
+    for (c0, r0), (c1, r1) in zip(METROLINK_ROUTE, METROLINK_ROUTE[1:]):
+        if c0 == c1 and r0 == r1:
+            continue
+        if c0 != c1 and r0 != r1:
+            raise AssertionError(f"MetroLink leg {(c0, r0)}->{(c1, r1)} is not axis-aligned")
+        legs.append((c0, r0, c1, r1, 'h' if r0 == r1 else 'v'))
+    return tuple(legs)
+
+
+METROLINK_SEGMENTS = metrolink_segments()
+
+
+def metrolink_tiles():
+    """Ordered, de-duplicated (col, row, axis) the alignment occupies."""
+    out, seen = [], set()
+    for c0, r0, c1, r1, axis in METROLINK_SEGMENTS:
+        if axis == 'h':
+            step = 1 if c1 >= c0 else -1
+            leg = [(c, r0) for c in range(c0, c1 + step, step)]
+        else:
+            step = 1 if r1 >= r0 else -1
+            leg = [(c0, r) for r in range(r0, r1 + step, step)]
+        for (c, r) in leg:
+            if (c, r) in seen:
+                # a corner shared with the previous leg: the later leg's axis
+                # wins, because that is the direction the train leaves on
+                out = [e for e in out if (e[0], e[1]) != (c, r)]
+            seen.add((c, r))
+            out.append((c, r, axis))
+    return tuple(out)
+
+
+METROLINK_TILES = metrolink_tiles()
+
+
+def _stamp_rail_corridors(game_map):
+    """Cut the MetroLink right-of-way in after the landmarks are stamped.
+
+    Three kinds of tile, because a light rail line is three different things
+    along its length:
+
+      * dedicated - its own ballasted right-of-way. It CARVES: a rail cut goes
+        through the block fabric rather than politely going round it, which is
+        what a right-of-way is and why the alignment can be chosen for
+        geography instead of for whichever row happened to be empty.
+      * crossing  - a street crosses it at grade. Keep the road, hang gates.
+      * embedded  - the rail runs along a street or a district's open ground.
+        Keep the tile exactly as it is and only inset the rails.
+    """
+    # A landmark whose collision shape IS the landmark (a stadium bowl, the
+    # market sheds, a water tower, the Arch grounds) is never touched.
+    protected = {name for name, layout in LANDMARK_LAYOUT.items()
+                 if layout not in ("district", "strip")}
+    for (col, row, axis) in METROLINK_TILES:
+        if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
+            continue
+        existing = game_map[row][col]
+        if existing['type'] == TILE_WATER:
+            continue
+        owner = existing.get('landmark')
+        parallel_road = (row in ROAD_LINES) if axis == 'h' else (col in ROAD_LINES)
+        cross_road = (col in ROAD_LINES) if axis == 'h' else (row in ROAD_LINES)
+        if owner is not None and owner in protected:
+            continue                       # never cut a landmark that is a shape
+        if parallel_road or owner is not None:
+            existing['rail'] = 'metrolink'
+            existing['rail_axis'] = axis
+            existing['rail_crossing'] = False
+            existing['rail_embedded'] = True
+        elif cross_road:
+            existing['type'] = TILE_ROAD
+            existing['collidable'] = False
+            existing['color'] = COLOR_ROAD
+            existing['rail'] = 'metrolink'
+            existing['rail_axis'] = axis
+            existing['rail_crossing'] = True
+        else:
+            game_map[row][col] = {
+                'type': TILE_RAIL, 'collidable': False,
+                'landmark': owner, 'color': (72, 68, 62),
+                'rail': 'metrolink', 'rail_axis': axis,
+                'rail_crossing': False, 'rail_embedded': False,
+            }
+
+    # Corner pads. A train is longer than the 64px tile it turns through, so
+    # a bare right-angle would leave its body hanging over the block on the
+    # inside of the curve. Reserving the tiles around each corner is both what
+    # a real curve radius looks like and what keeps the body on reserved rail.
+    # Every interior corner of the ROUTE, not of the waypoint list: the
+    # route appends the run out over the Eads, which turns the last
+    # waypoint into a corner that would otherwise get no radius.
+    corners = {(c, r) for (c, r) in METROLINK_ROUTE[1:-1]}
+    for (col, row) in corners:
+        for dc in (-1, 0, 1):
+            for dr in (-1, 0, 1):
+                c, r = col + dc, row + dr
+                if not (0 <= c < MAP_TILES_W and 0 <= r < MAP_TILES_H):
+                    continue
+                tile = game_map[r][c]
+                if tile['type'] == TILE_WATER or tile.get('rail'):
+                    continue
+                owner = tile.get('landmark')
+                if owner is not None and owner in protected:
+                    # A curve may clip a protected landmark's OPEN ground -
+                    # the stadium's outer apron, the Arch's plaza. Inset the
+                    # rails and leave the tile exactly as it is; never carve.
+                    if not tile['collidable']:
+                        tile['rail'] = 'metrolink'
+                        tile['rail_axis'] = 'h'
+                        tile['rail_crossing'] = False
+                        tile['rail_embedded'] = True
+                    continue
+                game_map[r][c] = {
+                    'type': TILE_RAIL, 'collidable': False,
+                    'landmark': owner, 'color': (72, 68, 62),
+                    'rail': 'metrolink', 'rail_axis': 'h',
+                    'rail_crossing': False, 'rail_embedded': False,
+                }
+
+    # The Loop trolley is street-running: rails inset into Delmar, no separate
+    # right-of-way and no gates. It also stops after two miles, like the real
+    # one, instead of crossing the entire city.
+    for col in range(TROLLEY_COL_MIN, min(TROLLEY_COL_MAX + 1, river_bank(TROLLEY_ROW))):
+        tile = game_map[TROLLEY_ROW][col]
+        if tile['type'] == TILE_ROAD and not tile['collidable']:
+            tile['rail'] = 'trolley'
+
+
 def _stamp_river(game_map):
     """Cut the Mississippi in last, over everything else.
 
@@ -1296,7 +2724,10 @@ def _stamp_river(game_map):
                                   'landmark': None, 'color': COLOR_GRASS_DARK}
             else:
                 game_map[y][x] = {'type': TILE_WATER, 'collidable': True,
-                                  'landmark': None, 'color': COLOR_WATER}
+                                   'landmark': None, 'color': COLOR_WATER}
+    for x, y in RIVER_POCKET_TILES:
+        game_map[y][x] = {'type': TILE_WATER, 'collidable': True,
+                          'landmark': None, 'color': COLOR_WATER}
 
 
 def _blend(a, b, t):
@@ -1371,91 +2802,351 @@ SIGN_CHURCH = ("CHURCH", (60, 58, 72), (238, 234, 220))
 SIGN_BEAUTY = ("BEAUTY", (128, 64, 108), (248, 236, 240))
 SIGN_LIQUOR = ("LIQUOR", (120, 48, 44), (246, 230, 190))
 
-# Nine neighbourhoods, not four. The old four-way split had 'arts' covering
-# the Delmar Loop, the Central West End and Grand Center all at once, which
-# is how the FOX marquee ended up hanging on Delmar - a mile and a half and
-# an entirely different city from where the Fox is.
-HOOD_SIGNS = {
-    # The Loop: theatres, records, vintage, Fitz's bottling its own root beer
-    'loop': (SIGN_TIVOLI, SIGN_PAGEANT, SIGN_FITZ, SIGN_VINTAGE, SIGN_RECORDS,
-             SIGN_TATTOO, SIGN_CAFE),
-    # Central West End: Straub's, gaslamps, private places, coffee
-    'cwe': (SIGN_STRAUBS, SIGN_GASLIGHT, SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN,
-            SIGN_IMOS),
-    # Grand Center: the Fox, Powell Hall, the Sheldon. The Fox lives HERE.
-    'grand': (SIGN_FOX, SIGN_POWELL, SIGN_SHELDON, SIGN_JAZZ, SIGN_CAFE),
-    # The Grove, on Manchester - nightlife, and nowhere near Grand Center
-    'grove': (SIGN_GROVE, SIGN_ATOMIC, SIGN_RAINBOW, SIGN_TAVERN, SIGN_TATTOO),
-    # Downtown and the riverfront
-    'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_UNION, SIGN_CITYMUS,
-                 SIGN_LAUNDRY, SIGN_BODEGA, SIGN_IMOS),
-    # Soulard: the market, McGurk's, and one week a year of Mardi Gras
-    'soulard': (SIGN_MCGURKS, SIGN_MARKET, SIGN_MARDI, SIGN_OYSTER,
-                SIGN_TAVERN, SIGN_BODEGA),
-    # The Hill: the real Italian names. Imo's is deliberately NOT here.
-    'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_RAVIOLI, SIGN_VOLPI,
-             SIGN_GIOIA, SIGN_BOCCE),
-    # Cherokee Street: antiques at the east end, mercados at the west
-    'cherokee': (SIGN_ANTIQUES, SIGN_MERCADO, SIGN_TAQUERIA, SIGN_PANADERIA,
-                 SIGN_CASALOMA, SIGN_TATTOO),
-    # North city: Crown Candy, corner stores, churches
-    'north': (SIGN_CROWNCNDY, SIGN_CROWN, SIGN_BBQ, SIGN_CHURCH, SIGN_BEAUTY,
-              SIGN_LIQUOR),
-    # South city: Bevo, the Bosnian corner, Schnucks, Maull's, custard
-    'south': (SIGN_CUSTARD, SIGN_FROZEN, SIGN_SCHNUCKS, SIGN_MAULLS,
-              SIGN_GRBIC, SIGN_CEVAPI, SIGN_BEVO, SIGN_IMOS, SIGN_HARDWARE,
-              SIGN_TAVERN, SIGN_BBQ),
-}
-HOOD_HOUSES = {
-    'loop': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
-    'cwe': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
-    'grand': ('mansard', 'gable_brick', 'painted_lady'),
-    'grove': ('gable_brick', 'gable_brick', 'shotgun', 'mansard'),
-    'downtown': ('mansard', 'mansard', 'gable_brick', 'painted_lady'),
-    'soulard': ('flat_front', 'gable_brick', 'gable_brick', 'mansard', 'shotgun'),
-    'hill': ('flat_front', 'flat_front', 'shotgun', 'shotgun', 'gable_brick',
-             'gable_brick', 'mansard'),
-    'cherokee': ('flat_front', 'gable_brick', 'painted_lady', 'shotgun', 'mansard'),
-    'north': ('gable_brick', 'mansard', 'gable_brick', 'shotgun'),
-    'south': ('flat_front', 'flat_front', 'shotgun', 'gable_brick', 'gable_brick',
-              'painted_lady', 'mansard'),
+# --- signs for the neighbourhoods the old coarse map could not tell apart ---
+SIGN_LANDING = ("LANDING", (96, 84, 66), (238, 226, 198))
+SIGN_COBBLES = ("COBBLES", (78, 72, 68), (226, 220, 206))
+SIGN_MORGAN = ("MORGAN ST", (70, 66, 78), (232, 228, 214))
+SIGN_MUNY = ("THE MUNY", (58, 48, 96), (244, 226, 160))
+SIGN_FREEZOO = ("FREE ZOO", (48, 96, 66), (240, 238, 216))
+SIGN_ARTMUS = ("ART MUSEUM", (110, 104, 92), (244, 240, 226))
+SIGN_JEWELBOX = ("JEWEL BOX", (62, 96, 74), (236, 244, 226))
+SIGN_BOATHOUSE = ("BOATHOUSE", (72, 88, 116), (232, 240, 246))
+SIGN_DOGTOWN = ("DOGTOWN", (30, 96, 56), (240, 236, 214))
+SIGN_PARADE = ("PARADE", (34, 88, 52), (244, 232, 176))
+SIGN_PUB = ("PUB", (46, 72, 54), (232, 228, 210))
+SIGN_CLIMATRON = ("CLIMATRON", (48, 104, 92), (226, 244, 238))
+SIGN_SHAWS = ("SHAW'S", (58, 96, 62), (238, 240, 218))
+SIGN_ORCHIDS = ("ORCHIDS", (108, 66, 118), (246, 230, 244))
+SIGN_NURSERY = ("NURSERY", (66, 100, 60), (236, 242, 214))
+SIGN_TOWERGRV = ("TOWER GRV", (62, 92, 58), (238, 240, 216))
+SIGN_RUINS = ("THE RUINS", (120, 114, 96), (242, 236, 216))
+SIGN_FARMERS = ("FARMERS", (150, 112, 52), (246, 238, 206))
+SIGN_PALMHOUSE = ("PALM HOUSE", (70, 104, 78), (234, 244, 224))
+SIGN_MOKABES = ("MOKABE'S", (92, 64, 104), (242, 228, 246))
+SIGN_WATERTWR = ("WATER TWR", (140, 132, 110), (246, 240, 220))
+SIGN_MANSION = ("MANSION", (86, 62, 58), (240, 226, 208))
+SIGN_LAFAYETTE = ("LAFAYETTE", (98, 70, 116), (244, 230, 246))
+SIGN_IRONWORK = ("IRONWORK", (54, 52, 58), (226, 224, 216))
+SIGN_LEMP = ("LEMP", (92, 46, 44), (240, 220, 196))
+SIGN_BREWERY = ("BREWERY", (146, 92, 44), (248, 234, 196))
+SIGN_CLYDES = ("CLYDESDALE", (110, 66, 40), (244, 230, 200))
+SIGN_VENICE = ("VENICE", (120, 60, 130), (248, 228, 246))
+SIGN_GUS = ("GUS'S", (156, 108, 48), (250, 238, 208))
+SIGN_BEADS = ("BEADS", (110, 62, 140), (248, 216, 120))
+SIGN_BOWLING = ("BOWLING", (58, 68, 110), (236, 238, 248))
+SIGN_SOUTHTOWN = ("SOUTHTOWN", (86, 76, 62), (238, 232, 212))
+SIGN_BUREK = ("BUREK", (104, 84, 60), (244, 232, 206))
+SIGN_MILL = ("THE MILL", (140, 96, 48), (246, 234, 204))
+SIGN_FRANCIS = ("FRANCIS PK", (56, 92, 62), (236, 240, 216))
+SIGN_PARISH = ("PARISH", (66, 62, 84), (238, 234, 220))
+SIGN_VIDEPOCHE = ("VIDE POCHE", (78, 70, 90), (238, 232, 220))
+SIGN_BLUESCITY = ("BLUES CITY", (44, 62, 100), (238, 240, 250))
+SIGN_IVORY = ("IVORY", (140, 132, 118), (246, 242, 228))
+SIGN_SUMNER = ("SUMNER", (64, 60, 96), (242, 236, 220))
+SIGN_ANNIEM = ("ANNIE M.", (128, 70, 110), (250, 238, 242))
+SIGN_BARBER = ("BARBER", (52, 68, 104), (240, 240, 248))
+SIGN_SOULFOOD = ("SOUL FOOD", (128, 76, 40), (248, 232, 198))
+SIGN_OLDNORTH = ("OLD NORTH", (110, 68, 54), (242, 226, 202))
+SIGN_HYDEPARK = ("HYDE PARK", (74, 88, 62), (238, 240, 216))
+SIGN_GROCERY = ("GROCERY", (60, 84, 68), (236, 238, 218))
+SIGN_CLAYTON = ("CLAYTON", (74, 80, 96), (236, 240, 246))
+SIGN_BANK = ("BANK", (56, 62, 76), (232, 234, 240))
+SIGN_WASHAVE = ("WASH AVE", (72, 68, 80), (234, 230, 240))
+SIGN_LOFTS = ("LOFTS", (86, 80, 74), (236, 232, 222))
+SIGN_BILLIKEN = ("BILLIKEN", (58, 46, 92), (244, 226, 160))
+SIGN_BASILICA = ("BASILICA", (72, 92, 118), (246, 238, 210))
+SIGN_LEFTBANK = ("LEFT BANK", (66, 74, 92), (238, 236, 224))
+SIGN_CHASE = ("THE CHASE", (94, 80, 62), (244, 236, 212))
+SIGN_EUCLID = ("EUCLID", (88, 70, 96), (242, 232, 240))
+SIGN_BLUEBERRY = ("BLUEBERRY", (52, 58, 118), (238, 236, 250))
+SIGN_CHUCKB = ("CHUCK B", (40, 44, 62), (242, 224, 120))
+SIGN_TROLLEY = ("TROLLEY", (108, 62, 50), (242, 228, 202))
+SIGN_WALKFAME = ("WALK FAME", (58, 52, 46), (246, 220, 120))
+SIGN_MOBAKING = ("MO BAKING", (166, 130, 66), (56, 40, 26))
+SIGN_URBANCHES = ("URBAN CH", (72, 96, 68), (238, 240, 216))
+SIGN_CINCO = ("CINCO", (176, 96, 44), (250, 240, 202))
+SIGN_WELLSTON = ("WELLSTON", (92, 78, 66), (238, 230, 214))
+
+# Twenty-four neighbourhoods, not eleven. The eleven-way split still did real
+# violence to the map, and it showed up as signs hanging in the wrong city:
+# 'south' alone was 30.6% of the whole map - Tower Grove AND Shaw AND Dutchtown
+# AND Bevo AND Carondelet AND St. Louis Hills AND Lafayette Square, plus the
+# overflow from Forest Park and Union Station, all drawing shop signs from one
+# eleven-item bag. The Botanical Garden came back 'grove', so Manchester Ave
+# nightlife signage hung round Shaw's Garden; City Museum came back 'south', so
+# a downtown loft block advertised Ted Drewes and Bevo Mill; half of Cherokee
+# Street came back 'soulard', so McGurk's hung on Cherokee.
+#
+# HOOD_REGIONS is a priority-ordered list of (col0, row0, col1, row1, hood),
+# inclusive, first match wins - which is far easier to assert against a
+# landmark footprint than a ladder of ifs, and test_smoke does exactly that.
+HOOD_REGIONS = (
+    # --- the river and downtown -------------------------------------------
+    (82, 26, 99, 55, 'riverfront'),    # Laclede's Landing, the Arch grounds
+    (50, 24, 62, 43, 'grand'),         # Grand Center, Midtown, SLU
+    (54, 26, 81, 50, 'downtown'),      # Washington Ave, the ballpark, the lofts
+    # --- the central corridor ---------------------------------------------
+    (31, 24, 49, 43, 'cwe'),           # Central West End, Euclid, the Basilica
+    (8, 24, 30, 43, 'forestpark'),     # Forest Park itself and its ring
+    (0, 10, 26, 23, 'loop'),           # the Delmar Loop, University City
+    (0, 0, 26, 9, 'wellston'),         # Wells-Goodfellow, Wellston
+    (27, 0, 62, 23, 'ville'),          # The Ville, Fairground, JeffVanderLou
+    (63, 0, 99, 25, 'oldnorth'),       # Old North, Hyde Park, College Hill
+    (0, 24, 7, 62, 'west'),            # Clayton, Richmond Heights, Maplewood
+    # --- the near south ----------------------------------------------------
+    (28, 44, 40, 54, 'shaw'),          # Shaw: Henry Shaw's garden is in it
+    (24, 44, 45, 54, 'grove'),         # The Grove, Forest Park Southeast
+    (18, 55, 37, 68, 'hill'),          # The Hill
+    (8, 44, 23, 62, 'dogtown'),        # Dogtown, Clayton-Tamm
+    (44, 44, 53, 58, 'comptonhts'),    # Compton Heights, the water tower
+    (54, 51, 62, 65, 'lafayette'),     # Lafayette Square
+    (63, 51, 99, 64, 'soulard'),       # Soulard, the market, Mardi Gras
+    (50, 74, 71, 85, 'cherokee'),      # Cherokee Street, Gravois Park
+    (59, 65, 99, 79, 'bentonpark'),    # Benton Park, the brewery, Lemp
+    (38, 53, 58, 73, 'towergrove'),    # Tower Grove Park and Tower Grove South
+    # --- the deep south ----------------------------------------------------
+    (38, 74, 49, 88, 'southampton'),   # Southampton, Princeton Heights
+    (24, 69, 49, 99, 'bevo'),          # Bevo Mill, Little Bosnia, Dutchtown
+    (0, 63, 23, 99, 'sthills'),        # St. Louis Hills, Francis Park
+    (50, 80, 99, 99, 'carondelet'),    # Carondelet, Patch, Holly Hills
+)
+HOOD_FALLBACK = 'bevo'
+
+#: What the city calls each one out loud. Shown when you cross a boundary.
+HOOD_NAMES = {
+    'riverfront': "LACLEDE'S LANDING",
+    'downtown': "DOWNTOWN",
+    'grand': "GRAND CENTER",
+    'cwe': "CENTRAL WEST END",
+    'forestpark': "FOREST PARK",
+    'loop': "THE DELMAR LOOP",
+    'wellston': "WELLS-GOODFELLOW",
+    'ville': "THE VILLE",
+    'oldnorth': "OLD NORTH",
+    'west': "CLAYTON",
+    'shaw': "SHAW",
+    'grove': "THE GROVE",
+    'hill': "THE HILL",
+    'dogtown': "DOGTOWN",
+    'comptonhts': "COMPTON HEIGHTS",
+    'lafayette': "LAFAYETTE SQUARE",
+    'soulard': "SOULARD",
+    'cherokee': "CHEROKEE STREET",
+    'bentonpark': "BENTON PARK",
+    'towergrove': "TOWER GROVE",
+    'southampton': "SOUTHAMPTON",
+    'bevo': "BEVO MILL",
+    'sthills': "ST. LOUIS HILLS",
+    'carondelet': "CARONDELET",
 }
 
 
 def hood_at(col, row):
-    """Which neighbourhood a tile is in, first match wins.
-
-    Traced onto the same geography the LANDMARKS table uses (north up, river
-    east). The previous version had four regions and did real violence to the
-    map: (80, 20) - north city - came back 'downtown', and (20, 80) - St.
-    Louis Hills, three miles from The Hill - came back 'hill'.
-    """
-    if row < 22 and col >= 46:
-        return 'north'                    # Old North, Hyde Park, the Ville
-    if 12 <= row <= 22 and col < 22:
-        return 'loop'                     # Delmar Loop, University City
-    if row < 26 and col < 46:
-        return 'west'                     # Skinker-DeBaliviere, DeBaliviere
-    if 24 <= row <= 38 and 28 <= col <= 46:
-        return 'cwe'
-    if 26 <= row <= 42 and 48 <= col <= 62:
-        return 'grand'                    # Grand Center, midtown
-    if col >= 62 and row <= 50:
-        return 'downtown'
-    if col >= 62 and row > 50:
-        return 'soulard'                  # Soulard, Benton Park, the brewery
-    if 40 <= row <= 52 and 26 <= col <= 46:
-        return 'grove'                    # Manchester Ave
-    if 50 <= row <= 66 and col <= 36:
-        return 'hill'
-    if 68 <= row <= 80 and 44 <= col <= 70:
-        return 'cherokee'
-    return 'south'                        # Bevo, Carondelet, St. Louis Hills
+    """Which neighbourhood a tile is in, first match wins."""
+    for (c0, r0, c1, r1, hood) in HOOD_REGIONS:
+        if c0 <= col <= c1 and r0 <= row <= r1:
+            return hood
+    return HOOD_FALLBACK
 
 
-HOOD_SIGNS['west'] = (SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN, SIGN_LAUNDRY,
-                      SIGN_IMOS)
-HOOD_HOUSES['west'] = ('mansard', 'painted_lady', 'gable_brick')
+def hood_name(hood):
+    return HOOD_NAMES.get(hood, hood.upper())
+
+
+HOOD_SIGNS = {
+    # The Loop: theatres, records, vintage, Fitz's bottling its own root beer,
+    # Chuck Berry on the Walk of Fame, and a trolley nobody will stop bringing up
+    'loop': (SIGN_TIVOLI, SIGN_PAGEANT, SIGN_FITZ, SIGN_VINTAGE, SIGN_RECORDS,
+             SIGN_TATTOO, SIGN_CAFE, SIGN_BLUEBERRY, SIGN_CHUCKB, SIGN_TROLLEY,
+             SIGN_WALKFAME),
+    # Wells-Goodfellow / Wellston: corner stores, churches, the old loop
+    'wellston': (SIGN_WELLSTON, SIGN_CHURCH, SIGN_GROCERY, SIGN_BARBER,
+                 SIGN_LIQUOR, SIGN_BEAUTY, SIGN_BBQ),
+    # Clayton and the inner county: banks, coffee, a Straub's
+    'west': (SIGN_CLAYTON, SIGN_BANK, SIGN_CAFE, SIGN_BAKERY, SIGN_STRAUBS,
+             SIGN_SCHNUCKS, SIGN_TAVERN),
+    # Central West End: limestone, mansard, Euclid, the Basilica's mosaics
+    'cwe': (SIGN_STRAUBS, SIGN_GASLIGHT, SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN,
+            SIGN_BASILICA, SIGN_LEFTBANK, SIGN_CHASE, SIGN_EUCLID),
+    # Forest Park: everything in it is free, which locals will tell you
+    'forestpark': (SIGN_MUNY, SIGN_FREEZOO, SIGN_ARTMUS, SIGN_JEWELBOX,
+                   SIGN_BOATHOUSE, SIGN_CAFE),
+    # Grand Center: the Fox, Powell, the Sheldon, Jazz St. Louis, SLU
+    'grand': (SIGN_FOX, SIGN_POWELL, SIGN_SHELDON, SIGN_JAZZ, SIGN_CAFE,
+              SIGN_BILLIKEN),
+    # The Grove: Manchester, converted industrial storefronts, Urban Chestnut
+    'grove': (SIGN_GROVE, SIGN_ATOMIC, SIGN_RAINBOW, SIGN_TAVERN, SIGN_TATTOO,
+              SIGN_URBANCHES),
+    # Shaw: Henry Shaw's garden, and the nurseries that grew up around it
+    'shaw': (SIGN_CLIMATRON, SIGN_SHAWS, SIGN_ORCHIDS, SIGN_NURSERY,
+             SIGN_CAFE, SIGN_BAKERY, SIGN_TAVERN),
+    # Downtown: Washington Ave lofts, the oyster bar, Union Station, City Museum
+    'downtown': (SIGN_OYSTER, SIGN_SLINGERS, SIGN_UNION, SIGN_CITYMUS,
+                 SIGN_LAUNDRY, SIGN_BODEGA, SIGN_IMOS, SIGN_WASHAVE, SIGN_LOFTS),
+    # Laclede's Landing: cobblestones, warehouses, the riverboats
+    'riverfront': (SIGN_LANDING, SIGN_COBBLES, SIGN_MORGAN, SIGN_TAVERN,
+                   SIGN_OYSTER),
+    # Soulard: McGurk's, the market since 1779, Mardi Gras, Gus's pretzels
+    'soulard': (SIGN_MCGURKS, SIGN_MARKET, SIGN_MARDI, SIGN_OYSTER,
+                SIGN_TAVERN, SIGN_BODEGA, SIGN_GUS, SIGN_BEADS),
+    # Benton Park: the brewery, the Clydesdales, Lemp, the Venice Cafe
+    'bentonpark': (SIGN_BREWERY, SIGN_CLYDES, SIGN_LEMP, SIGN_VENICE,
+                   SIGN_TAVERN, SIGN_BODEGA),
+    # Lafayette Square: the oldest park west of the Mississippi, and its iron
+    'lafayette': (SIGN_LAFAYETTE, SIGN_IRONWORK, SIGN_MANSION, SIGN_CAFE,
+                  SIGN_TAVERN),
+    # Compton Heights: the water tower, and the mansions behind the private
+    'comptonhts': (SIGN_WATERTWR, SIGN_MANSION, SIGN_CAFE, SIGN_CHURCH,
+                   SIGN_HARDWARE),
+    # The Hill: delis, ravioli, Volpi, Gioia's, bocce, Missouri Baking
+    'hill': (SIGN_DELI, SIGN_PIZZERIA, SIGN_BAKERY, SIGN_RAVIOLI, SIGN_VOLPI,
+             SIGN_GIOIA, SIGN_BOCCE, SIGN_MOBAKING),
+    # Dogtown: the parade that locals insist is the real one, and the pubs
+    'dogtown': (SIGN_DOGTOWN, SIGN_PARADE, SIGN_PUB, SIGN_TAVERN, SIGN_PARISH,
+                SIGN_HARDWARE),
+    # Tower Grove: the park, the Ruins, the farmers market, Mokabe's
+    'towergrove': (SIGN_TOWERGRV, SIGN_RUINS, SIGN_FARMERS, SIGN_PALMHOUSE,
+                   SIGN_MOKABES, SIGN_CAFE, SIGN_TAVERN),
+    # Cherokee: antiques at the east end, mercados and Cinco at the west
+    'cherokee': (SIGN_ANTIQUES, SIGN_MERCADO, SIGN_TAQUERIA, SIGN_PANADERIA,
+                 SIGN_CASALOMA, SIGN_TATTOO, SIGN_CINCO, SIGN_RECORDS),
+    # The Ville: Sumner, Annie Malone, the churches, the barber shops
+    'ville': (SIGN_SUMNER, SIGN_ANNIEM, SIGN_BARBER, SIGN_SOULFOOD,
+              SIGN_CHURCH, SIGN_BEAUTY, SIGN_BBQ, SIGN_LIQUOR),
+    # Old North: Crown Candy since 1913, and the corner groceries
+    'oldnorth': (SIGN_CROWNCNDY, SIGN_CROWN, SIGN_OLDNORTH, SIGN_HYDEPARK,
+                 SIGN_GROCERY, SIGN_CHURCH, SIGN_BBQ),
+    # Southampton / Princeton Heights: Ted Drewes on Chippewa, bowling, bungalows
+    'southampton': (SIGN_CUSTARD, SIGN_FROZEN, SIGN_BOWLING, SIGN_SOUTHTOWN,
+                    SIGN_HARDWARE, SIGN_SCHNUCKS, SIGN_IMOS),
+    # Bevo: the windmill, and Little Bosnia around it
+    'bevo': (SIGN_BEVO, SIGN_MILL, SIGN_GRBIC, SIGN_CEVAPI, SIGN_BUREK,
+             SIGN_TAVERN, SIGN_HARDWARE, SIGN_MAULLS),
+    # St. Louis Hills: Ted Drewes, Francis Park, the parish, the bowling alley
+    'sthills': (SIGN_CUSTARD, SIGN_FRANCIS, SIGN_PARISH, SIGN_BOWLING,
+                SIGN_SCHNUCKS, SIGN_HARDWARE, SIGN_IMOS),
+    # Carondelet: Vide Poche, Blues City Deli, the Ivory Triangle
+    'carondelet': (SIGN_VIDEPOCHE, SIGN_BLUESCITY, SIGN_IVORY, SIGN_TAVERN,
+                   SIGN_CHURCH, SIGN_BBQ, SIGN_HARDWARE),
+}
+HOOD_HOUSES = {
+    'loop': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'wellston': ('gable_brick', 'shotgun', 'flat_front', 'gable_brick'),
+    'west': ('mansard', 'painted_lady', 'gable_brick'),
+    'cwe': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
+    'forestpark': ('mansard', 'painted_lady', 'gable_brick'),
+    'grand': ('mansard', 'gable_brick', 'painted_lady'),
+    'grove': ('gable_brick', 'gable_brick', 'shotgun', 'mansard'),
+    'shaw': ('gable_brick', 'mansard', 'painted_lady', 'gable_brick'),
+    'downtown': ('mansard', 'mansard', 'gable_brick', 'painted_lady'),
+    'riverfront': ('flat_front', 'gable_brick', 'mansard'),
+    'soulard': ('flat_front', 'gable_brick', 'gable_brick', 'mansard', 'shotgun'),
+    'bentonpark': ('flat_front', 'gable_brick', 'shotgun', 'mansard'),
+    'lafayette': ('painted_lady', 'painted_lady', 'mansard', 'gable_brick'),
+    'comptonhts': ('mansard', 'painted_lady', 'gable_brick'),
+    'hill': ('flat_front', 'flat_front', 'shotgun', 'shotgun', 'gable_brick',
+             'gable_brick', 'mansard'),
+    'dogtown': ('flat_front', 'shotgun', 'gable_brick', 'gable_brick'),
+    'towergrove': ('gable_brick', 'painted_lady', 'mansard', 'flat_front'),
+    'cherokee': ('flat_front', 'gable_brick', 'painted_lady', 'shotgun', 'mansard'),
+    'ville': ('gable_brick', 'mansard', 'gable_brick', 'shotgun'),
+    'oldnorth': ('gable_brick', 'mansard', 'gable_brick', 'shotgun', 'flat_front'),
+    'southampton': ('flat_front', 'flat_front', 'gable_brick', 'shotgun'),
+    'bevo': ('flat_front', 'shotgun', 'gable_brick', 'flat_front'),
+    'sthills': ('gable_brick', 'gable_brick', 'flat_front', 'mansard'),
+    'carondelet': ('flat_front', 'shotgun', 'gable_brick', 'gable_brick'),
+}
+
+# Masonry is regional too. The generated facade sprite and the exposed roof
+# beneath it now agree on the district instead of every block drawing from one
+# citywide bag of brick.
+HOOD_BRICKS = {
+    'loop': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4]),
+    'wellston': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[6]),
+    'west': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4], CITY_BRICKS[4]),
+    'cwe': (CITY_BRICKS[4], CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[0]),
+    'forestpark': (CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[4]),
+    'grand': (CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[0]),
+    'grove': (CITY_BRICKS[0], CITY_BRICKS[5], CITY_BRICKS[6]),
+    'shaw': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4]),
+    'downtown': (CITY_BRICKS[1], CITY_BRICKS[2], CITY_BRICKS[4], CITY_BRICKS[6]),
+    'riverfront': (CITY_BRICKS[3], CITY_BRICKS[1], CITY_BRICKS[6]),
+    'soulard': (CITY_BRICKS[0], CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[5]),
+    'bentonpark': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[5]),
+    'lafayette': (CITY_BRICKS[0], CITY_BRICKS[4], CITY_BRICKS[6]),
+    'comptonhts': (CITY_BRICKS[4], CITY_BRICKS[2], CITY_BRICKS[0]),
+    'hill': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[5]),
+    'dogtown': (CITY_BRICKS[0], CITY_BRICKS[5], CITY_BRICKS[3]),
+    'towergrove': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4]),
+    'cherokee': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[5], CITY_BRICKS[6]),
+    'ville': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[3], CITY_BRICKS[6]),
+    'oldnorth': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[3], CITY_BRICKS[6]),
+    'southampton': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[3]),
+    'bevo': (CITY_BRICKS[0], CITY_BRICKS[3], CITY_BRICKS[5]),
+    'sthills': (CITY_BRICKS[2], CITY_BRICKS[0], CITY_BRICKS[4]),
+    'carondelet': (CITY_BRICKS[0], CITY_BRICKS[3], CITY_BRICKS[5]),
+}
+
+# The native 64px atlas only ships twelve district families. A neighbourhood
+# the atlas has no art for borrows the closest one it does, so a new hood
+# still gets live sprites at one address in three instead of dropping back to
+# nothing but procedural storefronts.
+HOOD_ATLAS_ALIAS = {
+    'wellston': 'north', 'forestpark': 'cwe', 'shaw': 'south',
+    'riverfront': 'downtown', 'bentonpark': 'soulard', 'lafayette': 'soulard',
+    'comptonhts': 'cwe', 'dogtown': 'hill', 'towergrove': 'south',
+    'ville': 'north', 'oldnorth': 'north', 'southampton': 'south',
+    'bevo': 'south', 'sthills': 'south', 'carondelet': 'south',
+}
+
+# Native 64px hard-pixel atlas. It is authored at runtime size by
+# tools/build_pixel_facades.py: no high-resolution source art, resampling, or
+# antialiased alpha enters the game. Downtown receives two extra roof types.
+BUILDING_ATLAS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), 'sprites',
+    'stlouis-neighborhood-buildings-pixel.png')
+BUILDING_ATLAS_PATHS = (BUILDING_ATLAS_PATH,)  # compatibility / test reference
+BUILDING_ATLAS_COLUMNS = 6
+BUILDING_ATLAS_ROWS = 4
+BUILDING_ATLAS_CELL_SIZE = 64
+BUILDING_ATLAS_HOODS = (
+    'soulard', 'soulard', 'hill', 'hill', 'cwe', 'cwe',
+    'loop', 'loop', 'grand', 'grand', 'grove', 'grove',
+    'cherokee', 'cherokee', 'north', 'north', 'south', 'south',
+    'downtown', 'downtown', 'west', 'west', 'downtown', 'downtown',
+)
+NEIGHBORHOOD_BUILDING_SPRITES = collections.defaultdict(list)
+
+
+def bake_neighborhood_building_sprites():
+    """Slice the native-resolution atlas into district-specific 64px sprites."""
+    if NEIGHBORHOOD_BUILDING_SPRITES:
+        return
+    for atlas_path in BUILDING_ATLAS_PATHS:
+        try:
+            atlas = pygame.image.load(atlas_path).convert_alpha()
+        except (pygame.error, OSError):
+            continue
+        expected = (BUILDING_ATLAS_COLUMNS * BUILDING_ATLAS_CELL_SIZE,
+                    BUILDING_ATLAS_ROWS * BUILDING_ATLAS_CELL_SIZE)
+        if atlas.get_size() != expected:
+            continue
+        for index, hood in enumerate(BUILDING_ATLAS_HOODS):
+            col = index % BUILDING_ATLAS_COLUMNS
+            row = index // BUILDING_ATLAS_COLUMNS
+            cell = atlas.subsurface(pygame.Rect(
+                col * BUILDING_ATLAS_CELL_SIZE,
+                row * BUILDING_ATLAS_CELL_SIZE,
+                BUILDING_ATLAS_CELL_SIZE,
+                BUILDING_ATLAS_CELL_SIZE)).copy()
+            if cell.get_bounding_rect(min_alpha=1).width <= 0:
+                continue
+            NEIGHBORHOOD_BUILDING_SPRITES[hood].append(cell)
+    # Neighbourhoods the atlas has no family for borrow their nearest cousin.
+    for hood, source in HOOD_ATLAS_ALIAS.items():
+        if not NEIGHBORHOOD_BUILDING_SPRITES.get(hood):
+            NEIGHBORHOOD_BUILDING_SPRITES[hood] = list(
+                NEIGHBORHOOD_BUILDING_SPRITES.get(source, ()))
 
 
 def hood_pick_sign(col, row, n):
@@ -1528,6 +3219,99 @@ def _lm_solid_district(lx, ly, lw, lh):
     return False                          # inner courtyard
 
 
+def _lm_solid_blocks(lx, ly, lw, lh):
+    """Fine-grained blocks with streets between them.
+
+    The four district bakers (the CWE, The Hill, the Loop, Grand Center) draw
+    their OWN street grid on a roughly two-tile pitch - rows of houses with a
+    street between and a rear alley behind. Under the old "district" layout
+    what you saw and what you could walk through disagreed completely: the art
+    showed continuous rows, the collision was a ring with a hollow courtyard.
+    This matches the collision to the picture.
+    """
+    if lx == 0 or ly == 0 or lx == lw - 1 or ly == lh - 1:
+        return False                      # approach apron all the way round
+    if ly % 2 == 0:
+        return False                      # the street between the rows
+    if lx % 3 == 0:
+        return False                      # cross streets
+    return True
+
+
+#: the brewery yard grid, shared by the collision mask and the art so that
+#: what you can walk on and what you can see agree. Every third column and row
+#: is a yard lane; the outer ring is the approach apron off the street.
+BREWERY_LANE = 3
+
+
+def brewery_is_block(lx, ly, lw, lh):
+    """True where the brewery has a building on it."""
+    if lx <= 0 or ly <= 0 or lx >= lw - 1 or ly >= lh - 1:
+        return False
+    return lx % BREWERY_LANE != 0 and ly % BREWERY_LANE != 0
+
+
+def brewery_blocks(lw, lh):
+    """The campus as whole block rects, in tiles: (col, row, w, h)."""
+    out = []
+    row = 1
+    while row < lh - 1:
+        if row % BREWERY_LANE == 0:
+            row += 1
+            continue
+        span_h = 0
+        while (row + span_h < lh - 1
+               and (row + span_h) % BREWERY_LANE != 0):
+            span_h += 1
+        col = 1
+        while col < lw - 1:
+            if col % BREWERY_LANE == 0:
+                col += 1
+                continue
+            span_w = 0
+            while (col + span_w < lw - 1
+                   and (col + span_w) % BREWERY_LANE != 0):
+                span_w += 1
+            out.append((col, row, span_w, span_h))
+            col += span_w
+        row += span_h
+    return tuple(out)
+
+
+def _lm_solid_brewery(lx, ly, lw, lh):
+    """Anheuser-Busch: brick blocks with yard streets you drive between.
+
+    It used to fall through to the default district layout - a ring of walls
+    round a hollow courtyard - while the art drew 140 red-brick roofs edge to
+    edge across the whole footprint. So the middle of the brewery was open
+    ground that looked exactly like roofs, and you crossed it not knowing
+    whether you were on a street or on top of the Brew House. Same mask now
+    feeds both.
+    """
+    return brewery_is_block(lx, ly, lw, lh)
+
+
+def _lm_solid_garden(lx, ly, lw, lh):
+    """A botanical garden: open ground, and glasshouses you cannot walk through.
+
+    Everything else - the beds, the allees, the lawns - is walkable, and the
+    Japanese garden's lake is cut in separately as real water by the feature
+    pass, so you have to go round it rather than jog across it.
+    """
+    # The Climatron: a two-tile dome, and the thing you can see from off the map.
+    cx, cy = lw * 0.42, lh * 0.34
+    if abs(lx + 0.5 - cx) <= 1.0 and abs(ly + 0.5 - cy) <= 1.0:
+        return True
+    house_row = int(lh * 0.72)
+    # The Linnean House: a long, low glass barrel along the south walk.
+    if ly == house_row and 1 <= lx <= max(1, int(lw * 0.38)):
+        return True
+    # Tower Grove House, Shaw's own place, off at the east end.
+    if lx == lw - 2 and ly == house_row:
+        return True
+    return False
+
+
 def _lm_solid_tower(lx, ly, lw, lh):
     """A single tower in an open lawn: one solid tile, dead centre.
 
@@ -1589,6 +3373,9 @@ _LM_SOLID = {
     "tower": _lm_solid_tower,
     "strip": _lm_solid_strip,
     "trainshed": _lm_solid_trainshed,
+    "garden": _lm_solid_garden,
+    "blocks": _lm_solid_blocks,
+    "brewery": _lm_solid_brewery,
 }
 
 
@@ -2537,6 +4324,8 @@ cars_BIG_SPECS = {
     'bus':           (54, 20),
     'metrobus_70':   (54, 20),
     'box_truck':     (44, 20),
+    'mudfoot':       (46, 30),
+    'grocery_cart':  (52, 26),
 }
 
 
@@ -2630,6 +4419,42 @@ def cars_big_grid(kind):
                 for gx, bit in enumerate(row):
                     if bit == '#':
                         cars__put(grid, ox + gx, 8 + gy, cars_METROBUS_ROUTE)
+    elif kind == 'mudfoot':
+        body = (62, 78, 126)                    # period blue, no sponsor marks
+        body_hi = (92, 110, 164)
+        chassis = (40, 36, 38)
+        hub = (150, 152, 148)
+        # Four enormous tyres, with a small lifted pickup floating above them.
+        for ax in (7, 32):
+            cars__put_r(grid, ax, 1, ax + 8, 8, cars_TIRE)
+            cars__put_r(grid, ax, H - 9, ax + 8, H - 2, cars_TIRE)
+            cars__put_r(grid, ax + 3, 3, ax + 5, 6, hub)
+            cars__put_r(grid, ax + 3, H - 7, ax + 5, H - 4, hub)
+        cars__put_r(grid, 6, 12, 40, 17, chassis)
+        cars__put_r(grid, 10, 8, 38, 21, body)
+        cars__put_r(grid, 11, 9, 24, 20, cars__darker(body, 0.35))  # pickup bed
+        cars__put_r(grid, 26, 9, 38, 20, body_hi)                   # cab
+        cars__put_r(grid, 35, 11, 38, 18, cars_GLASS_FRONT)
+        cars__put_r(grid, 27, 11, 30, 18, cars_GLASS_REAR)
+        cars__put_r(grid, 38, 10, 43, 19, body)                     # hood
+    elif kind == 'grocery_cart':
+        red = (176, 48, 48)
+        metal = (178, 180, 176)
+        dark = (70, 66, 68)
+        # Long push handle, wire basket, child seat and undercarriage. It is
+        # unmistakably the parade cart without copying a store wordmark.
+        cars__put_r(grid, 1, 4, 3, H - 5, red)
+        cars__put_r(grid, 2, 4, 10, 5, red)
+        cars__put_r(grid, 2, H - 6, 10, H - 5, red)
+        cars__put_r(grid, 9, 3, 44, H - 4, metal)
+        cars__put_r(grid, 11, 5, 42, H - 6, None)
+        for x in range(12, 43, 6):
+            cars__put_r(grid, x, 4, x, H - 5, red)
+        for y in range(7, H - 6, 5):
+            cars__put_r(grid, 10, y, 43, y, red)
+        cars__put_r(grid, 13, 8, 21, H - 9, (206, 198, 172))       # child seat
+        cars__put_r(grid, 10, H // 2 - 1, 47, H // 2 + 1, dark)
+        cars__put_r(grid, 44, 6, 49, H - 7, red)                    # basket nose
     else:  # box_truck
         box = (210, 206, 198)
         cab = (108, 114, 124)
@@ -2639,10 +4464,15 @@ def cars_big_grid(kind):
         cars__put_r(grid, 33, top + 1, 43, bot - 1, cab)
         cars__put_r(grid, 41, top + 2, 42, bot - 2, cars_GLASS_FRONT)
 
-    for ax in (5, L - 10):                     # wheel nubs on both flanks
-        for x in range(ax, ax + 5):
-            grid[0][x] = cars_TIRE
-            grid[H - 1][x] = cars_TIRE
+    if kind not in ('mudfoot', 'grocery_cart'):
+        for ax in (5, L - 10):                 # wheel nubs on both flanks
+            for x in range(ax, ax + 5):
+                grid[0][x] = cars_TIRE
+                grid[H - 1][x] = cars_TIRE
+    elif kind == 'grocery_cart':
+        for ax in (15, 39):
+            cars__put_r(grid, ax, 0, ax + 3, 2, cars_TIRE)
+            cars__put_r(grid, ax, H - 3, ax + 3, H - 1, cars_TIRE)
     cars__put_r(grid, L - 3, top + 1, L - 2, top + 2, cars_HEADLIGHT)
     cars__put_r(grid, L - 3, bot - 2, L - 2, bot - 1, cars_HEADLIGHT)
     cars__put_r(grid, 2, top + 1, 3, top + 2, cars_TAILLIGHT)
@@ -4064,10 +5894,12 @@ props_TILE_BUILDING = TILE_BUILDING
 props_TILE_PARK = TILE_PARK
 props_TILE_PLAZA = TILE_PLAZA
 
-# Road grid: ROAD_LINES = set(range(4, MAP_TILES_W, 8)), so index i carries a
-# road when (i - ROAD_ORIGIN) % ROAD_STEP == 0.
+# Road grid: an explicit, irregular list of named streets. props_ROAD_STEP is
+# only a spacing heuristic now (how often to hang a streetlight); road-ness is
+# membership of props_ROAD_LINES.
 props_ROAD_ORIGIN = ROAD_ORIGIN
 props_ROAD_STEP = ROAD_STEP
+props_ROAD_LINES = frozenset(ROAD_LINES)
 
 # --- Muted 90s console palette ---
 props_C_OUT = (18, 16, 18)            # near-black outline, matches COLOR_OUTLINE
@@ -4508,7 +6340,9 @@ def props_anchor_offset(name):
 # Placement
 # ============================================================
 def props__is_road_line(i):
-    return i >= 0 and (i - props_ROAD_ORIGIN) % props_ROAD_STEP == 0
+    # Was `(i - origin) % step == 0`. The grid is irregular now, so the only
+    # honest answer is membership of the actual line list.
+    return i in props_ROAD_LINES
 
 
 def props__place(name, bx, by):
@@ -4530,10 +6364,33 @@ props__MISC_TABLE = []
 for _n, _w in props__MISC:
     props__MISC_TABLE.extend([_n] * _w)
 
+# The Hill does not leave this detail to a random clutter roll. These curb
+# anchors ring the neighborhood on walkable sidewalk tiles and use the local
+# green-white-red paint job.
+HILL_HYDRANT_TILES = {
+    (22, 52): (6, 32),
+    (22, 55): (6, 32),
+    (23, 51): (32, 14),
+    (26, 51): (32, 14),
+    (36, 58): (58, 32),
+    (33, 67): (32, 58),
+}
+
 # Streetlights land on the tiles whose index along the street is 2 or 6
 # mod 8: one every 4 tiles (256px), and never on a junction corner or the
 # crossing itself, so every street keeps an unbroken rhythm.
-props_LIGHT_PHASES = (2, 6)
+props_LIGHT_PHASES = (2, 5)   # two lamps per block against ROAD_STEP 6
+
+# Which neighbourhoods put a chainlink fence, an above-ground pool, a Mary in
+# a bathtub, a kettle grill or a clothesline in the back yard. This used to
+# read `district in ('hill', 'south')`, and 'south' was a single region
+# covering a third of the map; when that split into real neighbourhoods the
+# jokes quietly vanished from the entire south side. Named, so a test can hold
+# it to the actual hood list.
+props_YARD_HOODS = frozenset((
+    'hill', 'dogtown', 'bevo', 'sthills', 'southampton', 'carondelet',
+    'towergrove', 'cherokee', 'shaw', 'wellston', 'ville', 'oldnorth',
+))
 props_MISC_CHANCE = 6        # percent of eligible sidewalk tiles with clutter
 props_DUMPSTER_CHANCE = 4    # percent of alley-ish sidewalk tiles
 props_MANHOLE_CHANCE = 3     # percent of road tiles
@@ -4548,6 +6405,9 @@ def props_props_for_tile(c, r, tile_type, is_sidewalk, district=None):
     640x360 screen)."""
     if not props__BAKED:
         props_bake()
+
+    if (c, r) in HILL_HYDRANT_TILES and is_sidewalk:
+        return [props__place('hydrant_hill', *HILL_HYDRANT_TILES[(c, r)])]
 
     # --- Road surface: manholes and cones only, and rarely ---
     if tile_type == props_TILE_ROAD:
@@ -4570,7 +6430,7 @@ def props_props_for_tile(c, r, tile_type, is_sidewalk, district=None):
     # --- South City postage-stamp yards ---------------------------------
     # The block generator uses non-kerbside plaza tiles for alleys and tiny
     # courtyards. They are walkable, so these stay visual-only and sparse.
-    if tile_type == props_TILE_PLAZA and not is_sidewalk and district in ('hill', 'south'):
+    if tile_type == props_TILE_PLAZA and not is_sidewalk and district in props_YARD_HOODS:
         n = props__noise(c, r, 149)
         phase = n % 31
         if phase < 3:
@@ -5151,7 +7011,9 @@ parking_MAP_HEIGHT = MAP_HEIGHT
 
 parking_ROAD_ORIGIN = ROAD_ORIGIN
 parking_ROAD_STEP = ROAD_STEP
-parking_ROAD_LINES = tuple(range(parking_ROAD_ORIGIN, parking_MAP_TILES_W, parking_ROAD_STEP))
+# Was re-derived from origin/step, which silently disagreed with the real grid
+# the moment the grid stopped being uniform. Take the actual lines.
+parking_ROAD_LINES = tuple(sorted(ROAD_LINES))
 parking__ROAD_SET = frozenset(parking_ROAD_LINES)
 
 parking_WATER_COL_START = parking_MAP_TILES_W - 3       # cols 97-99 are river, unless road
@@ -5348,6 +7210,36 @@ def parking__heading(axis, side):
     return parking_ANG_E if side < 0 else parking_ANG_W          # north kerb east, south kerb west
 
 
+def parking__on_asphalt(x, y, angle):
+    """Every tile the parked car covers is actually paved.
+
+    `parking_is_road_tile` is geometric - "col or row is a road line" - and
+    `parking_is_legal_spot` only asks whether the rect is *blocked*. Grass is
+    not blocked. So every road-line tile that the landmark pass turned into
+    lawn or plaza still handed out kerb bays, which is why cars were parked on
+    the Arch grounds, on the Grand Basin's apron, and in the middle of parks.
+    Ask the finished map what the tile actually is.
+    """
+    grid = globals().get('GAME_MAP')
+    if not grid:
+        return parking_is_road_tile(int(x) // parking_TILE_SIZE,
+                                    int(y) // parking_TILE_SIZE)
+    rect = parking_car_rect(x, y, angle)
+    c0 = rect.left // parking_TILE_SIZE
+    c1 = (rect.right - 1) // parking_TILE_SIZE
+    r0 = rect.top // parking_TILE_SIZE
+    r1 = (rect.bottom - 1) // parking_TILE_SIZE
+    for row in range(r0, r1 + 1):
+        if not (0 <= row < parking_MAP_TILES_H):
+            return False
+        for col in range(c0, c1 + 1):
+            if not (0 <= col < parking_MAP_TILES_W):
+                return False
+            if grid[row][col]['type'] != TILE_ROAD:
+                return False
+    return True
+
+
 def parking__build():
     """Generate every legal kerb spot on the map.  Deterministic."""
     spots = []
@@ -5379,6 +7271,8 @@ def parking__build():
                         x, y = (lat, along) if axis == parking_AXIS_NS else (along, lat)
                         if (x // parking_TILE_SIZE, y // parking_TILE_SIZE) in parking__ANY_LANDMARK_TILES:
                             continue        # no kerb parking inside a landmark
+                        if not parking__on_asphalt(x, y, angle):
+                            continue        # nor on lawn/water that replaced a road
                         if parking_is_legal_spot(x, y, angle):
                             spots.append((x, y, angle, side))
     spots.sort(key=lambda s: (s[1], s[0]))
@@ -5573,11 +7467,14 @@ traffic__MW = 0
 traffic__MH = 0
 traffic__ROAD_LINES = frozenset()
 traffic__LINES = ()
+traffic__rail_gate_hold = None
 
 
-def traffic_set_hooks(is_blocked_fn, game_map, tile_size, map_tiles_w, map_tiles_h, road_lines):
+def traffic_set_hooks(is_blocked_fn, game_map, tile_size, map_tiles_w, map_tiles_h,
+                      road_lines, rail_gate_hold=None):
     """Inject main.py's world globals so this module stays standalone."""
-    global traffic__is_blocked, traffic__MAP, traffic__TS, traffic__MW, traffic__MH, traffic__ROAD_LINES, traffic__LINES
+    global traffic__is_blocked, traffic__MAP, traffic__TS, traffic__MW, traffic__MH
+    global traffic__ROAD_LINES, traffic__LINES, traffic__rail_gate_hold
     traffic__is_blocked = is_blocked_fn
     traffic__MAP = game_map
     traffic__TS = int(tile_size)
@@ -5585,6 +7482,7 @@ def traffic_set_hooks(is_blocked_fn, game_map, tile_size, map_tiles_w, map_tiles
     traffic__MH = int(map_tiles_h)
     traffic__ROAD_LINES = frozenset(int(v) for v in road_lines)
     traffic__LINES = tuple(sorted(traffic__ROAD_LINES))
+    traffic__rail_gate_hold = rail_gate_hold
 
 
 # --------------------------------------------------------------------------
@@ -6129,6 +8027,11 @@ def traffic_drive(car, neighbours=()):
     if follow is not None and follow < target:
         target = follow
 
+    gate_hold = bool(traffic__rail_gate_hold and traffic__rail_gate_hold(car))
+    if gate_hold:
+        target = 0.0
+        st['creep'] = 0
+
     # Easing out around something stopped: keep rolling. Braking to a halt
     # beside a parked car is how a lane used to die permanently.
     if pass_side and room_to_pass and target < traffic_PASS_SPEED:
@@ -6148,7 +8051,7 @@ def traffic_drive(car, neighbours=()):
         st['halt'] += 1
     else:
         st['halt'] = 0
-    if st['halt'] > traffic_HALT_PATIENCE:
+    if st['halt'] > traffic_HALT_PATIENCE and not gate_hold:
         st['halt'] = 0
         st['creep'] = traffic_CREEP_FRAMES
     creep_reverse = False
@@ -6297,6 +8200,17 @@ lm_LANDMARK_ART = {
     "Old Courthouse": "courthouse",
     "Union Station": "union_station",
     "City Museum": "city_museum",
+    "Missouri Botanical Garden": "botanical",
+    # These four bakers - several hundred lines of authored art each, with
+    # ground colours and label anchors already registered - existed and were
+    # reachable from NOTHING: no landmark name mapped to them, so the Central
+    # West End, The Hill, the Delmar Loop and Grand Center all fell through to
+    # the generic district building ring and drew as the same grey block. That
+    # is a large part of why the neighbourhoods felt interchangeable.
+    "Central West End": "central_west_end",
+    "The Hill": "the_hill",
+    "Delmar Loop": "delmar_loop",
+    "Grand Center Arts District": "grand_center",
 }
 
 #: natural footprint of each landmark in tiles, derived from main.LANDMARKS.
@@ -6322,6 +8236,7 @@ lm__GROUND = {
     "courthouse": (100, 96, 92),
     "union_station": (100, 96, 92),
     "city_museum": (100, 96, 92),
+    "botanical": (66, 86, 54),
 }
 
 #: label position as a fraction of the footprint, chosen to sit on calm art
@@ -6341,9 +8256,11 @@ lm__LABEL_AT = {
     "courthouse": (0.50, 0.95),
     "union_station": (0.50, 0.97),
     "city_museum": (0.50, 0.95),
+    "botanical": (0.50, 0.96),
 }
 
 lm__CACHE = {}
+lm__FG_CACHE = {}
 lm__CACHE_LIMIT = 32
 
 
@@ -6776,6 +8693,38 @@ def lm__bake_arch(w, h):
     return s
 
 
+def lm__bake_arch_foreground(w, h):
+    """Only the elevated steel and its footings, for the actor occlusion pass.
+
+    The full Arch composition is ground art and is drawn before actors.  A
+    second transparent pass puts the elevated span back over them, making a
+    walk across the lawn read as going *under* the Arch rather than over a
+    silver stripe painted on the ground.
+    """
+    s = pygame.Surface((w, h), pygame.SRCALPHA)
+    lx0, lx1 = w * 0.145, w * 0.775
+    ybase, yapex = h * 0.575, h * 0.115
+    pts = lm__catenary(lx0, lx1, ybase, yapex, 56, 2.05)
+    w_end = max(9.0, w * 0.045)
+    w_mid = max(4.0, w_end * 0.33)
+    lm__ribbon(s, pts, w_end + 2, w_mid + 2, lm_OUTLINE)
+    lm__ribbon(s, pts, w_end, w_mid, lm_STEEL)
+    lm__ribbon(s, pts, w_end * 0.34, w_mid * 0.40, lm_STEEL_LO, 1.6, 1.6)
+    lm__ribbon(s, pts, w_end * 0.34, w_mid * 0.40, lm_STEEL_HI, -1.4, -1.4)
+    for fx in (lx0, lx1):
+        pad = [(fx - w_end * 0.95, ybase - 3),
+               (fx + w_end * 0.95, ybase - 3),
+               (fx + w_end * 1.25, ybase + w_end * 0.9),
+               (fx - w_end * 1.25, ybase + w_end * 0.9)]
+        lm__poly(s, lm_CONCRETE, pad)
+        lm__poly(s, lm_OUTLINE, pad, 1)
+        lm__poly(s, lm_STEEL_LO,
+                 [(fx - w_end * 0.5, ybase - 2),
+                  (fx + w_end * 0.5, ybase - 2),
+                  (fx, ybase + w_end * 0.55)])
+    return s
+
+
 # --------------------------------------------------------------------------
 # 2. DOWNTOWN & BUSCH STADIUM
 # --------------------------------------------------------------------------
@@ -6954,67 +8903,91 @@ def lm__bake_brewery(w, h):
     lm__r(s, lm_STEEL_LO, 0, ry - 1, w, 2)
     lm__r(s, lm_STEEL_LO, 0, ry + 6, w, 2)
 
-    # brick blocks on a tight grid
+    # Blocks on the SAME tile grid the collision mask uses. The old loop laid
+    # roofs on a 94x68px pitch of its own invention while the collision was a
+    # hollow ring, so the middle of the brewery was walkable ground painted to
+    # look like roofs - which is why crossing it felt like walking on rooftops.
+    lw = max(3, int(round(w / float(lm_TILE))))
+    lh = max(3, int(round(h / float(lm_TILE))))
+    tw = w / float(lw)
+    th = h / float(lh)
+
+    # --- yard streets: cobble, kerbs, a painted centre line ------------------
+    lane_fill = (96, 92, 88)
+    def lane_h(j):
+        lm__r(s, lane_fill, 0, j * th, w, th)
+        for x in range(0, int(w), 11):        # setts
+            lm__r(s, (84, 80, 78), x, j * th + 2, 6, th - 4)
+        lm__r(s, (176, 158, 96), 0, j * th + th * 0.5 - 1, w, 2)
+
+    def lane_v(i):
+        lm__r(s, lane_fill, i * tw, 0, tw, h)
+        for y in range(0, int(h), 11):
+            lm__r(s, (84, 80, 78), i * tw + 2, y, tw - 4, 6)
+        lm__r(s, (176, 158, 96), i * tw + tw * 0.5 - 1, 0, 2, h)
+
+    for j in range(lh):
+        if j == 0 or j == lh - 1 or j % BREWERY_LANE == 0:
+            lane_h(j)
+    for i in range(lw):
+        if i == 0 or i == lw - 1 or i % BREWERY_LANE == 0:
+            lane_v(i)
+
+    # rail spur down the south apron, where the yard meets the levee tracks
+    ry = (lh - 1) * th + th * 0.5
+    lm__r(s, lm_GRAVEL_DK, 0, ry - 8, w, 18)
+    for x in range(0, int(w), 7):
+        lm__r(s, (62, 52, 44), x, ry - 7, 4, 16)
+    lm__r(s, lm_STEEL_LO, 0, ry - 2, w, 2)
+    lm__r(s, lm_STEEL_LO, 0, ry + 6, w, 2)
+
+    # --- the buildings ------------------------------------------------------
     roofs = (lm_BRICK, lm_BRICK_DK, lm_BRICK_BROWN, lm_TAR, lm_BRICK_LT, lm_TAR_LT)
-    gx, gy = 6, 6
-    cw, chh = 82, 74
-    row = 0
-    y = gy
-    while y < h * 0.86 - 30:
-        col = 0
-        x = gx
-        while x < w - 40:
-            n = lm__noise(col, row, 93)
-            bw = cw - 10 + (n % 3) * 8
-            bh = chh - 12 + ((n >> 3) % 3) * 8
-            if x + bw > w - 6:
-                bw = int(w - 6 - x)
-            if y + bh > h * 0.86:
-                bh = int(h * 0.86 - y)
-            if bw > 16 and bh > 14:
-                roof = lm__pick(roofs, col, row, 94)
-                rf = lm__block(s, x, y, bw, bh, roof, 4, 6)
-                # sawtooth skylights on the long industrial roofs
-                if (n >> 6) % 3 == 0 and rf.w > 26:
-                    for sx in range(rf.x + 4, rf.right - 6, 9):
-                        lm__r(s, (150, 152, 148), sx, rf.y + 4, 4, rf.h - 8)
-                        lm__r(s, lm__shade(roof, 0.6), sx + 4, rf.y + 4, 2, rf.h - 8)
-                elif (n >> 6) % 3 == 1:
-                    for j in range(3):
-                        m = lm__noise(col, row, 95 + j)
-                        lm__r(s, lm_SHADOW, rf.x + 5 + m % max(1, rf.w - 14) + 2,
-                           rf.y + 5 + (m >> 5) % max(1, rf.h - 12) + 2, 7, 5)
-                        lm__r(s, lm__shade(roof, 0.62), rf.x + 5 + m % max(1, rf.w - 14),
-                           rf.y + 5 + (m >> 5) % max(1, rf.h - 12), 7, 5)
-                else:
-                    lm__r(s, lm__shade(roof, 1.12), rf.x + 3, rf.y + 3, rf.w - 6, 3)
-                    lm__r(s, lm__shade(roof, 0.78), rf.x + 3, rf.centery, rf.w - 6, 2)
-            x += bw + 12
-            col += 1
-        y += chh - 6
-        row += 1
+    blocks = brewery_blocks(lw, lh)
+    brew_house = blocks[len(blocks) // 6] if blocks else None
+    for (bc, br, bcw, bch) in blocks:
+        x, y = bc * tw + 3, br * th + 3
+        bw, bh = bcw * tw - 6, bch * th - 6
+        n = lm__noise(bc, br, 93)
+        if (bc, br) == (brew_house or (-1, -1))[:2]:
+            continue                       # drawn last, taller than the rest
+        roof = lm__pick(roofs, bc, br, 94)
+        rf = lm__block(s, x, y, bw, bh, roof, 5, 7)
+        kind = (n >> 6) % 3
+        if kind == 0 and rf.w > 26:        # sawtooth glasshouse roof
+            for sx in range(rf.x + 5, rf.right - 7, 9):
+                lm__r(s, (150, 152, 148), sx, rf.y + 5, 4, rf.h - 10)
+                lm__r(s, lm__shade(roof, 0.6), sx + 4, rf.y + 5, 2, rf.h - 10)
+        elif kind == 1:
+            lm__roof_clutter(s, rf, 95 + bc, dense=4, base=roof)
+            for i in range(3):             # rooftop fermenting tanks
+                tcx = rf.x + 14 + i * 20
+                tcy = rf.bottom - 16
+                if tcx + 12 > rf.right:
+                    break
+                pygame.draw.circle(s, lm_SHADOW, (tcx + 4, tcy + 4), 10)
+                pygame.draw.circle(s, (132, 134, 132), (tcx, tcy), 10)
+                pygame.draw.circle(s, (168, 170, 166), (tcx - 3, tcy - 3), 5)
+                pygame.draw.circle(s, lm_OUTLINE, (tcx, tcy), 10, 1)
+        else:
+            lm__r(s, lm__shade(roof, 1.12), rf.x + 4, rf.y + 4, rf.w - 8, 3)
+            lm__r(s, lm__shade(roof, 0.78), rf.x + 4, rf.centery, rf.w - 8, 2)
+        # loading dock on the yard side, so the block reads as enterable
+        lm__r(s, (52, 44, 40), rf.x + rf.w // 3, rf.bottom - 4, rf.w // 3, 5)
 
-    # the Brew House: crenellated tower block
-    tx, ty, tw, th = int(w * 0.53), int(h * 0.13), 92, 84
-    rf = lm__block(s, tx, ty, tw, th, lm_BRICK_DK, 5, 9)
-    lm__r(s, lm_BRICK_LT, rf.x + 6, rf.y + 6, rf.w - 12, rf.h - 12)
-    pygame.draw.rect(s, lm_OUTLINE, (rf.x + 6, rf.y + 6, rf.w - 12, rf.h - 12), 1)
-    for cxx in range(rf.x + 2, rf.right - 4, 8):      # crenellations
-        lm__r(s, lm_BRICK_DK, cxx, rf.y + 1, 4, 4)
-        lm__r(s, lm_BRICK_DK, cxx, rf.bottom - 5, 4, 4)
-    for cyy in range(rf.y + 2, rf.bottom - 4, 8):
-        lm__r(s, lm_BRICK_DK, rf.x + 1, cyy, 4, 4)
-        lm__r(s, lm_BRICK_DK, rf.right - 5, cyy, 4, 4)
-
-    # storage / fermenting tanks
-    for i in range(5):
-        tcx = int(w * 0.10) + i * 30
-        tcy = int(h * 0.79)
-        pygame.draw.circle(s, lm_SHADOW, (tcx + 5, tcy + 5), 13)
-        pygame.draw.circle(s, (132, 134, 132), (tcx, tcy), 13)
-        pygame.draw.circle(s, (168, 170, 166), (tcx - 4, tcy - 4), 6)
-        pygame.draw.circle(s, lm_STEEL_LO, (tcx, tcy), 13, 1)
-        pygame.draw.circle(s, lm_OUTLINE, (tcx, tcy), 13, 1)
+    # the Brew House: crenellated tower block, on its own block
+    if brew_house is not None:
+        bc, br, bcw, bch = brew_house
+        rf = lm__block(s, bc * tw + 1, br * th + 1, bcw * tw - 2, bch * th - 2,
+                       lm_BRICK_DK, 6, 11)
+        lm__r(s, lm_BRICK_LT, rf.x + 7, rf.y + 7, rf.w - 14, rf.h - 14)
+        pygame.draw.rect(s, lm_OUTLINE, (rf.x + 7, rf.y + 7, rf.w - 14, rf.h - 14), 1)
+        for cxx in range(rf.x + 2, rf.right - 4, 8):
+            lm__r(s, lm_BRICK_DK, cxx, rf.y + 1, 4, 4)
+            lm__r(s, lm_BRICK_DK, cxx, rf.bottom - 5, 4, 4)
+        for cyy in range(rf.y + 2, rf.bottom - 4, 8):
+            lm__r(s, lm_BRICK_DK, rf.x + 1, cyy, 4, 4)
+            lm__r(s, lm_BRICK_DK, rf.right - 5, cyy, 4, 4)
 
     # ---- smokestacks, the landmark read -------------------------------------
     def stack(cxs, cys, rad, length):
@@ -8421,6 +10394,181 @@ def lm__bake_ted_drewes(w, h):
     return s
 
 
+# --------------------------------------------------------------------------
+# 14. MISSOURI BOTANICAL GARDEN
+# --------------------------------------------------------------------------
+def lm__bake_botanical(w, h):
+    """Shaw's Garden, and the Climatron.
+
+    Research: Henry Shaw opened it to the public in 1859 and it has never
+    closed, which makes it the oldest botanical garden in continuous operation
+    in the country. The Climatron is a Buckminster Fuller geodesic dome, built
+    1960 - the first geodesic structure ever used as a conservatory - 70 feet
+    high, 175 across, with no interior support of any kind. Seiwa-en, opened
+    1977, is the largest Japanese garden in North America: a 14-acre lake with
+    islands, a drum bridge and a teahouse. The Linnean House of 1882 is the
+    oldest continuously operating greenhouse west of the Mississippi. Tower
+    Grove House was Shaw's country home, and his mausoleum stands near it.
+
+    Composition puts the dome dead centre and lets it own the silhouette, the
+    way the catenary owns the Arch.
+    """
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_GRASS, (lm_GRASS_DK, lm_GRASS_LT), 613, 8, 5)
+
+    GLASS = (150, 186, 178)
+    GLASS_DK = (104, 140, 138)
+    GLASS_HI = (206, 230, 222)
+    BED = ((150, 74, 86), (176, 132, 60), (128, 92, 148), (188, 168, 92))
+
+    # ---- perimeter: a low stone wall and a hedge inside it ----------------
+    per = pygame.Rect(int(w * 0.03), int(h * 0.04), int(w * 0.94), int(h * 0.92))
+    pygame.draw.rect(s, lm_LIMESTONE_DK, per, 5)
+    pygame.draw.rect(s, lm_OUTLINE, per, 1)
+    pygame.draw.rect(s, lm_TREE_DK, per.inflate(-14, -14), 4)
+
+    # ---- the main allee: gravel, north gate down to the house -------------
+    cx, cy = w * 0.42, h * 0.34
+    gate_x = int(w * 0.42)
+    lm__thick_path(s, [(gate_x, per.top), (gate_x, int(h * 0.86))],
+                   int(h * 0.045), lm_GRAVEL, lm_GRAVEL_DK)
+    lm__thick_path(s, [(per.left + 8, int(h * 0.70)), (per.right - 8, int(h * 0.70))],
+                   int(h * 0.035), lm_GRAVEL, lm_GRAVEL_DK)
+    # a curving walk out to the Japanese garden
+    walk = [(gate_x, int(h * 0.50)), (int(w * 0.55), int(h * 0.46)),
+            (int(w * 0.64), int(h * 0.44)), (int(w * 0.70), int(h * 0.52))]
+    lm__thick_path(s, walk, max(3, int(h * 0.022)), lm_GRAVEL, lm_GRAVEL_DK)
+
+    # ---- formal parterre beds, north-east quarter -------------------------
+    bx0, by0 = int(w * 0.58), int(h * 0.10)
+    for row in range(3):
+        for col in range(3):
+            bx = bx0 + col * int(w * 0.11)
+            by = by0 + row * int(h * 0.09)
+            bw2, bh2 = int(w * 0.085), int(h * 0.062)
+            lm__r(s, lm_DIRT_DK, bx, by, bw2, bh2)
+            lm__r(s, BED[(row * 3 + col) % len(BED)], bx + 1, by + 1, bw2 - 2, bh2 - 2)
+            pygame.draw.rect(s, lm_OUTLINE, (bx, by, bw2, bh2), 1)
+    # boxwood edging along the allee
+    for yy in range(int(h * 0.10), int(h * 0.64), 12):
+        lm__r(s, lm_TREE_DK, gate_x - int(w * 0.055), yy, 5, 8)
+        lm__r(s, lm_TREE_DK, gate_x + int(w * 0.045), yy, 5, 8)
+
+    # ---- SEIWA-EN: the lake, the island, the drum bridge ------------------
+    lake = lm__blob(w * 0.750, h * 0.430, w * 0.125, h * 0.135, 907, n=24, amp=0.16)
+    lm__water_poly(s, lake, 907, rim=lm_GRASS_DK)
+    isl = lm__blob(w * 0.775, h * 0.415, w * 0.032, h * 0.030, 911, n=14, amp=0.25)
+    lm__poly(s, lm_GRASS, isl)
+    lm__poly(s, lm_OUTLINE, isl, 1)
+    lm__tree(s, w * 0.775, h * 0.410, max(3, int(h * 0.022)), 913)
+    # drum bridge: a red arch over the neck of the lake
+    bx1, bx2 = int(w * 0.665), int(w * 0.735)
+    by = int(h * 0.482)
+    arc = lm__bowed(bx1, bx2, by, -int(h * 0.045))
+    lm__thick_path(s, arc, 4, (150, 62, 54))
+    lm__thick_path(s, arc, 1, (196, 108, 88))
+    # teahouse on the far bank
+    th = lm__block(s, int(w * 0.855), int(h * 0.335), int(w * 0.075), int(h * 0.062),
+                   (96, 72, 54), depth=3, drop=3, wall=lm_LIMESTONE_DK)
+    lm__r(s, (58, 46, 38), th.x, th.y, th.w, 2)
+    # stone lanterns round the shore
+    for (lx0, ly0) in ((0.648, 0.386), (0.742, 0.545), (0.868, 0.452)):
+        px, py = int(w * lx0), int(h * ly0)
+        lm__r(s, lm_SHADOW, px + 2, py + 2, 5, 8)
+        lm__r(s, lm_LIMESTONE, px, py, 5, 8)
+        lm__r(s, lm_LIMESTONE_DK, px - 1, py - 2, 7, 3)
+
+    # ---- THE LINNEAN HOUSE: 1882, a long glass barrel ---------------------
+    lh_x, lh_y = int(w * 0.10), int(h * 0.755)
+    lh_w, lh_h = int(w * 0.38), int(h * 0.105)
+    lm__r(s, lm_SHADOW, lh_x + 4, lh_y + 4, lh_w, lh_h)
+    lm__r(s, lm_LIMESTONE_DK, lh_x, lh_y, lh_w, lh_h)
+    lm__r(s, GLASS, lh_x + 3, lh_y + 3, lh_w - 6, lh_h - 6)
+    for gx in range(lh_x + 6, lh_x + lh_w - 4, 7):
+        lm__line(s, GLASS_DK, (gx, lh_y + 3), (gx, lh_y + lh_h - 4))
+    lm__r(s, GLASS_HI, lh_x + 4, lh_y + 4, lh_w - 8, 2)
+    # the limestone end wall with its three niches
+    lm__r(s, lm_LIMESTONE, lh_x, lh_y - 3, int(w * 0.055), lh_h + 6)
+    pygame.draw.rect(s, lm_OUTLINE, (lh_x, lh_y - 3, int(w * 0.055), lh_h + 6), 1)
+    pygame.draw.rect(s, lm_OUTLINE, (lh_x, lh_y, lh_w, lh_h), 1)
+
+    # ---- TOWER GROVE HOUSE and Shaw's mausoleum ---------------------------
+    hx, hy = int(w * 0.745), int(h * 0.745)
+    hr = lm__block(s, hx, hy, int(w * 0.115), int(h * 0.105), lm_TERRACOTTA,
+                   depth=4, drop=5, wall=lm_BRICK_DK)
+    lm__r(s, lm_BRICK, hr.x + 2, hr.y + 2, hr.w - 4, hr.h - 4)
+    # the belvedere tower on its corner
+    lm__r(s, lm_SHADOW, hr.right - 8, hr.y - 12, 12, 16)
+    lm__r(s, lm_BRICK_DK, hr.right - 11, hr.y - 15, 12, 18)
+    lm__r(s, lm_VERDIGRIS, hr.right - 12, hr.y - 18, 14, 4)
+    pygame.draw.rect(s, lm_OUTLINE, (hr.right - 11, hr.y - 15, 12, 18), 1)
+    # mausoleum: a small domed limestone box in its own lawn
+    mx, my = int(w * 0.905), int(h * 0.795)
+    lm__r(s, lm_SHADOW, mx + 3, my + 3, 16, 14)
+    lm__r(s, lm_LIMESTONE, mx, my, 16, 14)
+    pygame.draw.circle(s, lm_LIMESTONE_DK, (mx + 8, my), 8)
+    pygame.draw.circle(s, lm_OUTLINE, (mx + 8, my), 8, 1)
+    pygame.draw.rect(s, lm_OUTLINE, (mx, my, 16, 14), 1)
+
+    # ---- THE CLIMATRON ----------------------------------------------------
+    # Fuller's dome, 1960. In plan it is a circle of glass on a triangulated
+    # net with nothing holding it up from inside, so that is what gets drawn:
+    # rings, spokes, and the chords between them that make the triangles.
+    rad = int(min(w, h) * 0.175)
+    icx, icy = int(cx), int(cy)
+    pygame.draw.circle(s, lm_SHADOW, (icx + 5, icy + 6), rad + 2)
+    # the concrete apron it stands on
+    pygame.draw.circle(s, lm_CONCRETE_DK, (icx, icy), rad + 7)
+    pygame.draw.circle(s, lm_CONCRETE, (icx, icy), rad + 5)
+    pygame.draw.circle(s, lm_OUTLINE, (icx, icy), rad + 7, 1)
+    # glass, shaded from the top-left so it reads as a dome and not a disc
+    for i in range(rad, 0, -2):
+        t = i / float(rad)
+        col = (int(GLASS_DK[0] + (GLASS_HI[0] - GLASS_DK[0]) * (1.0 - t) ** 1.4),
+               int(GLASS_DK[1] + (GLASS_HI[1] - GLASS_DK[1]) * (1.0 - t) ** 1.4),
+               int(GLASS_DK[2] + (GLASS_HI[2] - GLASS_DK[2]) * (1.0 - t) ** 1.4))
+        pygame.draw.circle(s, col, (icx - int(rad * 0.10 * t), icy - int(rad * 0.12 * t)), i)
+    # the geodesic net: latitude rings plus spokes, then chords for triangles
+    rings = [rad, int(rad * 0.78), int(rad * 0.55), int(rad * 0.31)]
+    for rr in rings:
+        pygame.draw.circle(s, GLASS_DK, (icx, icy), rr, 1)
+    spokes = 16
+    for i in range(spokes):
+        a = 2.0 * math.pi * i / spokes
+        lm__line(s, GLASS_DK, (icx, icy),
+                 (icx + math.cos(a) * rad, icy + math.sin(a) * rad))
+    for ri in range(len(rings) - 1):
+        r_out, r_in = rings[ri], rings[ri + 1]
+        for i in range(spokes):
+            a0 = 2.0 * math.pi * i / spokes
+            a1 = 2.0 * math.pi * (i + 1) / spokes
+            lm__line(s, GLASS_DK,
+                     (icx + math.cos(a0) * r_out, icy + math.sin(a0) * r_out),
+                     (icx + math.cos(a1) * r_in, icy + math.sin(a1) * r_in))
+    # specular highlight, north-west, and the hard rim
+    for k in range(3):
+        pygame.draw.arc(s, GLASS_HI,
+                        (icx - rad + 4 + k, icy - rad + 4 + k,
+                         rad * 2 - 8 - 2 * k, rad * 2 - 8 - 2 * k),
+                        math.radians(150), math.radians(215), 1)
+    pygame.draw.circle(s, lm_OUTLINE, (icx, icy), rad, 2)
+    # the entry vestibule on the south side
+    lm__r(s, lm_SHADOW, icx - 7, icy + rad - 1, 16, 12)
+    lm__r(s, lm_LIMESTONE, icx - 9, icy + rad - 3, 16, 12)
+    pygame.draw.rect(s, lm_OUTLINE, (icx - 9, icy + rad - 3, 16, 12), 1)
+
+    # ---- planting: specimen trees, but never over the dome ----------------
+    for (tx, ty, rr) in ((0.10, 0.16, 0.030), (0.16, 0.30, 0.026),
+                         (0.09, 0.46, 0.028), (0.20, 0.58, 0.024),
+                         (0.62, 0.30, 0.026), (0.90, 0.30, 0.028),
+                         (0.90, 0.50, 0.026), (0.32, 0.88, 0.024),
+                         (0.55, 0.88, 0.026), (0.06, 0.86, 0.024)):
+        lm__tree(s, w * tx, h * ty, max(3, int(min(w, h) * rr)), 617)
+
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
 lm__BAKERS = {
     "arch": lm__bake_arch,
     "stadium": lm__bake_stadium,
@@ -8437,6 +10585,7 @@ lm__BAKERS = {
     "courthouse": lm__bake_courthouse,
     "union_station": lm__bake_union_station,
     "city_museum": lm__bake_city_museum,
+    "botanical": lm__bake_botanical,
 }
 
 
@@ -8517,10 +10666,38 @@ def lm_draw_landmark(surface, name, rect, camera_clip):
     finally:
         surface.set_clip(old)
 
+
+def lm_draw_arch_foreground(surface, rect, camera_clip=None):
+    """Draw the Arch's elevated steel after actors, clipped to its footprint."""
+    rect = pygame.Rect(rect)
+    if rect.width <= 0 or rect.height <= 0:
+        return
+    area = rect.clip(surface.get_rect())
+    if camera_clip is not None:
+        area = area.clip(pygame.Rect(camera_clip))
+    if area.width <= 0 or area.height <= 0:
+        return
+    key = (rect.width, rect.height)
+    art = lm__FG_CACHE.get(key)
+    if art is None:
+        art = lm__bake_arch_foreground(rect.width, rect.height)
+        try:
+            if pygame.display.get_surface() is not None:
+                art = art.convert_alpha()
+        except pygame.error:
+            pass
+        lm__FG_CACHE[key] = art
+    old = surface.get_clip()
+    try:
+        surface.set_clip(area)
+        surface.blit(art, rect.topleft)
+    finally:
+        surface.set_clip(old)
+
 # ==========================================================
 # Baked audio: snd
 # ==========================================================
-"""Procedurally synthesised sound. No samples, no numpy, no assets.
+"""Procedurally synthesised effects plus the packaged MIDI soundtrack.
 
 The rest of this project bakes every pixel it draws; the audio does the same
 thing with waveforms. Everything here is written into `array('h')` buffers and
@@ -8544,6 +10721,11 @@ you is far more noticeable than a missing bin-lid clatter:
 import array as _array
 
 snd_SR = 22050
+GAME_MUSIC_SOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                      'music', 'AUD_HO1036.mid')
+GAME_MUSIC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               'music', 'gloria-8bit.wav')
+GAME_MUSIC_VOLUME = 0.32
 snd_CH_ENGINE_A = 0
 snd_CH_ENGINE_B = 1
 snd_CH_TYRES = 2
@@ -9012,14 +11194,84 @@ class Job:
     punished - the pressure only switches on once you have accepted it.
     """
 
+    # What you are carrying now depends on WHERE you collected it. The old
+    # nine-item list was picked at random with no relation to the pickup, so
+    # you would load a BREWERY KEG at Ted Drewes and a CRATE OF PROVEL at the
+    # Botanical Garden.
+    CARGO_BY_PICKUP = {
+        "Anheuser-Busch Brewery": ("BREWERY KEG", "A PALLET OF LONGNECKS",
+                                   "BEECHWOOD CHIPS", "CLYDESDALE TACK"),
+        "Ted Drewes": ("A CONCRETE, UPSIDE DOWN", "FROZEN CUSTARD",
+                       "A CHRISTMAS TREE"),
+        "Ted Drewes on Grand": ("A CONCRETE, UPSIDE DOWN", "FROZEN CUSTARD"),
+        "The Hill": ("TOASTED RAVIOLI", "HOT SALAMI FROM GIOIA'S",
+                     "A WHEEL OF VOLPI", "SUNDAY GRAVY, STILL HOT",
+                     "A CASE OF BOCCE BALLS"),
+        "Missouri Botanical Garden": ("A CRATE OF ORCHIDS", "CLIMATRON SEEDLINGS",
+                                      "A KOI, IN A BAG"),
+        "Tower Grove Park": ("FARMERS MARKET TOMATOES", "A PAVILION AWNING"),
+        "Soulard Farmers Market": ("A BUSHEL OF PEACHES", "GUS'S PRETZELS",
+                                   "TWENTY POUNDS OF ONIONS"),
+        "Busch Stadium": ("BALLPARK NACHOS", "A CASE OF FOAM FINGERS",
+                          "THE GROUNDSKEEPER'S TARP"),
+        "Union Station": ("A TRUNK OFF THE 4:15", "HOTEL LINEN"),
+        "City Museum": ("SOMETHING FROM THE ROOF", "A CRATE OF LOOSE PARTS",
+                        "ONE BOWLING LANE"),
+        "Old Courthouse": ("A BOX OF COURT RECORDS", "A ROLL OF BLUEPRINTS"),
+        "Gateway Arch": ("A TRAM POD PART", "STAINLESS STEEL PANELS"),
+        "Grand Center Arts District": ("A THEATRE ORGAN BENCH",
+                                       "THE FOX'S MARQUEE BULBS",
+                                       "A DOUBLE BASS"),
+        "Central West End": ("STRAUB'S GROCERIES", "A BOX FROM LEFT BANK",
+                             "A CRATE OF MOSAIC TILE"),
+        "Delmar Loop": ("A CRATE OF RECORDS", "FITZ'S ROOT BEER",
+                        "A WALK OF FAME STAR"),
+        "Forest Park": ("MUNY COSTUMES", "A JEWEL BOX PALM",
+                        "SOMETHING FROM THE ZOO"),
+        "Compton Hill Water Tower": ("A PRESSURE GAUGE", "206 STEPS OF SCAFFOLD"),
+        "Bevo Mill": ("BUREK, STILL WARM", "A SACK OF FLOUR"),
+        "Cherokee Street": ("A PALLET OF ANTIQUES", "PAN DULCE AT DAWN",
+                            "A LETTERPRESS DRAWER"),
+        "Downtown": ("A LOFT'S WORTH OF BOXES", "SLINGER SPECIAL",
+                     "A PALLET OF SHOE LASTS"),
+    }
+    #: fallback for anywhere without its own list
     CARGO = ("TOASTED RAVIOLI", "GOOEY BUTTER CAKE", "CRATE OF PROVEL",
-             "BALLPARK NACHOS", "BREWERY KEG", "FROZEN CUSTARD",
-             "SLINGER SPECIAL", "PORK STEAKS", "BOX OF FIREWORKS")
+             "BALLPARK NACHOS", "FROZEN CUSTARD", "SLINGER SPECIAL",
+             "PORK STEAKS", "BOX OF FIREWORKS", "A CASE OF VESS",
+             "GOOEY BUTTER, DAY OLD", "A COOLER OF PORK STEAKS",
+             "SOMEBODY'S SCHNUCKS ORDER", "A BAG OF T-RAVS",
+             "MAULL'S, BY THE CASE", "IMO'S, GETTING COLD",
+             "A CROWN CANDY MALT, MELTING", "AN ST. PAUL SANDWICH",
+             "FIVE POUNDS OF PROVEL", "A CASE OF KSHE BUMPER STICKERS")
 
-    def __init__(self, pickup, dropoff):
+    @classmethod
+    def cargo_for(cls, pickup_name):
+        """Something that plausibly comes from where you are standing."""
+        pool = cls.CARGO_BY_PICKUP.get(pickup_name)
+        return random.choice(pool if pool else cls.CARGO)
+
+    # label, clock multiplier, base-payout multiplier, appropriate cargo pool.
+    # Each card changes the way a route plays instead of merely renaming the
+    # same box: rushes squeeze the clock, hot loads begin a chase, and heavy
+    # hauls make the active vehicle carry real weight.
+    KINDS = {
+        'courier': ("COURIER", 1.00, 1.00, CARGO),
+        'rush': ("RUSH", 0.72, 1.45,
+                 ("FROZEN CUSTARD", "BALLPARK NACHOS", "SLINGER SPECIAL")),
+        'hot': ("HOT LOAD", 1.00, 1.55,
+                ("BOX OF FIREWORKS", "BREWERY KEG", "CRATE OF PROVEL")),
+        'heavy': ("HEAVY HAUL", 1.18, 1.50,
+                  ("BREWERY KEG", "CRATE OF PROVEL", "PORK STEAKS")),
+    }
+
+    def __init__(self, pickup, dropoff, kind='courier'):
         self.pickup = pickup
         self.dropoff = dropoff
-        self.cargo = random.choice(self.CARGO)
+        self.kind = kind if kind in self.KINDS else 'courier'
+        self.label, time_scale, pay_scale, cargo_pool = self.KINDS[self.kind]
+        self.cargo = (self.cargo_for(pickup[5]) if self.kind == 'courier'
+                      else random.choice(cargo_pool))
         # The offer clock. Only runs before pickup; once the cargo is aboard
         # the delivery clock takes over.
         self.offer_left = int(JOB_OFFER_SECONDS * FPS)
@@ -9031,9 +11283,9 @@ class Job:
         span = math.hypot(self.drop_pos[0] - self.pickup_pos[0],
                           self.drop_pos[1] - self.pickup_pos[1]) / TILE_SIZE
         self.span_tiles = span
-        self.time_limit = max(JOB_MIN_SECONDS, span * JOB_SECONDS_PER_TILE)
+        self.time_limit = max(JOB_MIN_SECONDS, span * JOB_SECONDS_PER_TILE) * time_scale
         self.steps_left = int(self.time_limit * FPS)
-        self.base_reward = int(JOB_BASE_PAY + span * JOB_PAY_PER_TILE)
+        self.base_reward = int((JOB_BASE_PAY + span * JOB_PAY_PER_TILE) * pay_scale)
 
     # -- state ------------------------------------------------------------
     @property
@@ -9068,7 +11320,7 @@ class Job:
         return int(self.base_reward * mult * (1.0 + 0.35 * spare))
 
     @staticmethod
-    def generate(exclude=None):
+    def generate(exclude=None, kind='courier'):
         """Pair two landmarks that are far enough apart to be worth driving.
 
         Falls back to any distinct pair if the span filter finds nothing, so
@@ -9087,7 +11339,7 @@ class Job:
         a, b = pair
         if random.random() < 0.5:
             a, b = b, a
-        return Job(a, b)
+        return Job(a, b, kind=kind)
 
 
 class Frenzy:
@@ -9098,6 +11350,7 @@ class Frenzy:
     KINDS = {
         'ped': ("MOW DOWN {n} LOCALS", 14, 3500),
         'car': ("WRECK {n} MOTORS", 8, 6000),
+        'cop': ("DROP {n} COPS", 6, 9000),
     }
 
     def __init__(self, kind):
@@ -9111,18 +11364,7 @@ class Frenzy:
 
 
 class FootCop:
-    """A beat cop on foot. The unit that makes one star a chase.
-
-    A cruiser cannot arrest a pedestrian: BUST_CONTACT_STEPS wants 42 steps of
-    contact and a car doing 10px a step runs you over in a fraction of that,
-    so on the old build a player on foot was never once arrested in 30 trials
-    - they were killed, every time. A foot cop closes at 4.6 against your 4.2,
-    can follow you through a gangway a car cannot enter, and can actually hold
-    you long enough to book you.
-
-    The art has been baked since the pedestrian pass (peds_COP_KEY) and until
-    now had no behaviour attached to it at all.
-    """
+    """A mortal beat cop who can search alleys, pursue, arrest, and be knocked down."""
 
     def __init__(self, x, y):
         self.rect = pygame.Rect(0, 0, 14, 14)
@@ -9143,11 +11385,18 @@ class FootCop:
         self.path = []           # walkable waypoints from walk_path()
         self.repath_in = 0       # steps until the route is recomputed
         self.path_goal = None    # what the current route was built for
+        self.hp = COP_FOOT_HP
+        self.hit_stun = 0
+        self.down_timer = 0
+        self.bump_cooldown = 0
+        self.knock = pygame.Vector2()
+        self.move_speed = COP_FOOT_SEARCH_SPEED
+        self.chase_steps = 0
 
     def _walk(self, ang):
         """Try one full step along `ang`. True if he actually went anywhere."""
-        nx = self.fx + math.cos(ang) * COP_FOOT_SPEED
-        ny = self.fy + math.sin(ang) * COP_FOOT_SPEED
+        nx = self.fx + math.cos(ang) * self.move_speed
+        ny = self.fy + math.sin(ang) * self.move_speed
         probe = self.rect.copy()
         probe.center = (int(round(nx)), int(round(ny)))
         if (probe.left < 0 or probe.top < 0
@@ -9158,6 +11407,31 @@ class FootCop:
         self.fx, self.fy = nx, ny
         self.rect.center = probe.center
         return True
+
+    def tick_hit_state(self):
+        """Apply knockback and return True while the officer cannot pursue."""
+        if self.bump_cooldown > 0:
+            self.bump_cooldown -= 1
+        if self.knock.length_squared() > 0.05:
+            nx, ny = self.fx + self.knock.x, self.fy + self.knock.y
+            probe = self.rect.copy()
+            probe.center = (int(round(nx)), int(round(ny)))
+            if (0 <= probe.left and 0 <= probe.top
+                    and probe.right <= MAP_WIDTH and probe.bottom <= MAP_HEIGHT
+                    and not is_blocked(probe)):
+                self.fx, self.fy = nx, ny
+                self.rect.center = probe.center
+            self.knock *= 0.76
+        else:
+            self.knock.update(0, 0)
+        if self.down_timer > 0:
+            self.down_timer -= 1
+            self.anim = 0.0
+            return True
+        if self.hit_stun > 0:
+            self.hit_stun -= 1
+            return True
+        return False
 
     def step_toward(self, target):
         """Walk a real route to the target.
@@ -9329,6 +11603,7 @@ class Car:
         self.pinned = 0          # consecutive steps making no headway
         self.reverse_timer = 0   # steps left of a back-out manoeuvre
         self.reverse_side = 1
+        self.escape_timer = 0    # finish the turn before re-aiming at the target
         # --- police senses (see update_police) --------------------------
         self.alert = 'chase'     # 'chase' (I see you) | 'search' (I did)
         self.last_seen = None    # world point where the player was last seen
@@ -9339,10 +11614,16 @@ class Car:
         # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
         # counting down) then explodes. Trucks soak more, the scooter is paper.
         self.max_hp = {'bus': 200.0, 'garbage_truck': 185.0, 'box_truck': 145.0,
+                       'mudfoot': 190.0, 'grocery_cart': 125.0,
                        'vespa': 32.0}.get(self.variant, 100.0)
         self.hp = self.max_hp
         self.burn = 0            # >0 = on fire, steps until it goes up
         self.crash_cd = 0        # steps until this car can take contact damage again
+        # Roadblock spikes do not explode a car. They temporarily halve its
+        # pace and steering authority, with a separate cooldown so resting on
+        # the strip cannot repeatedly apply the impact beat.
+        self.puncture_steps = 0
+        self.spike_cd = 0
 
     def damage(self, amount):
         """Take `amount` of impact damage; light the fuse at zero HP."""
@@ -9372,6 +11653,18 @@ class Car:
     def tick_crash_cooldown(self):
         if self.crash_cd > 0:
             self.crash_cd -= 1
+        if self.puncture_steps > 0:
+            self.puncture_steps -= 1
+        if self.spike_cd > 0:
+            self.spike_cd -= 1
+
+    def drive_gear(self):
+        """Arcade transmission state used by the HUD, lamps, and engine load."""
+        if self.velocity < -0.08 or (self.input_throttle < 0 and self.velocity < 0.3):
+            return 'R'
+        if self.velocity > 0.08:
+            return 'D'
+        return 'N'
 
     def take_subpixel(self, dx, dy):
         """Bank this step's float travel and hand back whole pixels.
@@ -9429,9 +11722,13 @@ class Car:
                 response = 1.0
             self.velocity += self.acceleration * self.input_throttle * response
         elif self.input_throttle < 0:
-            brake = PLAYER_BRAKE if human else self.brake_force
+            if human:
+                brake = PLAYER_BRAKE if self.velocity > 0 else PLAYER_REVERSE_ACCEL
+            else:
+                brake = self.brake_force
             self.velocity += brake * self.input_throttle
-        self.velocity = max(-self.max_speed / 2, min(self.max_speed, self.velocity))
+        reverse_limit = self.max_speed * PLAYER_REVERSE_RATIO
+        self.velocity = max(-reverse_limit, min(self.max_speed, self.velocity))
 
         if self.input_throttle == 0:
             self.velocity *= PLAYER_COAST_DRAG if human else self.drag
@@ -9446,6 +11743,8 @@ class Car:
             # single term is what turns a twitchy hovercraft into a car.
             speed_frac = min(1.0, abs(self.velocity) / max(1.0, self.max_speed))
             lock = self.max_steer * (1.0 - PLAYER_LOCK_FADE * speed_frac)
+            if self.puncture_steps > 0:
+                lock *= SPIKE_STEER_SCALE
             if hb:
                 lock *= HANDBRAKE_STEER
             want = self.input_steer * lock
@@ -9612,6 +11911,18 @@ class Car:
             self.input_throttle = -1.0
             self.input_steer = float(self.reverse_side)
             self.physics_step()
+            if self.reverse_timer == 0:
+                self.escape_timer = 42
+            return
+
+        # Reversing creates room but does not clear the obstacle by itself.
+        # Hold the complementary forward arc long enough to round the corner;
+        # immediately aiming at the target drove the cruiser into the same wall.
+        if self.escape_timer > 0:
+            self.escape_timer -= 1
+            self.input_throttle = 1.0
+            self.input_steer = float(-self.reverse_side)
+            self.physics_step()
             return
 
         if abs(self.velocity) < 0.4 and dist > 60:
@@ -9668,58 +11979,268 @@ class Car:
         rect = sprite.get_rect(center=(int(screen_pos[0]), int(screen_pos[1])))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
+        if self.drive_gear() == 'R':
+            # Two hard-pixel white lamps make reverse legible at a glance. The
+            # rear is opposite the heading; side offsets follow the car's local
+            # width so the lights stay attached through all 24 baked headings.
+            fx, fy = math.cos(self.angle), math.sin(self.angle)
+            sx, sy = -fy, fx
+            rear = self.width * SPRITE_SCALE_CAR * 0.43
+            spread = self.height * SPRITE_SCALE_CAR * 0.24
+            cx = screen_pos[0] - fx * rear
+            cy = screen_pos[1] - fy * rear
+            for side in (-1, 1):
+                lx = int(round(cx + sx * spread * side))
+                ly = int(round(cy + sy * spread * side))
+                pygame.draw.rect(screen, COLOR_OUTLINE, (lx - 1, ly - 1, 4, 4))
+                pygame.draw.rect(screen, (232, 238, 210), (lx, ly, 2, 2))
+        if self.puncture_steps > 0:
+            # Hard red wheel ticks survive every body colour and heading. The
+            # HUD carries the text; this keeps the damage readable in-world.
+            fx, fy = math.cos(self.angle), math.sin(self.angle)
+            sx, sy = -fy, fx
+            for end in (-1, 1):
+                for side in (-1, 1):
+                    wx = int(round(screen_pos[0] + fx * self.width * 0.34 * end
+                                   + sx * self.height * 0.42 * side))
+                    wy = int(round(screen_pos[1] + fy * self.width * 0.34 * end
+                                   + sy * self.height * 0.42 * side))
+                    pygame.draw.rect(screen, (212, 54, 42), (wx - 1, wy - 1, 3, 3))
+
+
+def metrolink_polyline(offset=0.0):
+    """The route in world pixels, as tile-centre points, west to east.
+
+    `offset` shifts the line sideways by that many pixels (positive = south on
+    an east-west leg, east on a north-south leg) so the two tracks sit either
+    side of the centre line.
+    """
+    pts = []
+    for i, (col, row) in enumerate(METROLINK_ROUTE):
+        x = col * TILE_SIZE + TILE_SIZE * 0.5
+        y = row * TILE_SIZE + TILE_SIZE * 0.5
+        if offset:
+            prev = METROLINK_ROUTE[i - 1] if i > 0 else None
+            nxt = METROLINK_ROUTE[i + 1] if i + 1 < len(METROLINK_ROUTE) else None
+            # Offset perpendicular to every leg that touches this point. On a
+            # corner both apply, and (x+off, y+off) is exactly where the two
+            # offset lines meet - so the parallel tracks stay parallel round
+            # the bend instead of collapsing onto each other.
+            if any(p is not None and p[1] == row for p in (prev, nxt)):
+                y += offset
+            if any(p is not None and p[0] == col for p in (prev, nxt)):
+                x += offset
+        pts.append((x, y))
+    return tuple(pts)
 
 
 class RailVehicle:
-    """Ambient MetroLink light rail / Loop trolley: runs one fixed row, wraps
-    around, never collides. Pure set dressing so the city reads as alive."""
+    """A vehicle that runs along a polyline track, nose first.
 
-    def __init__(self, sprite, y, speed, x=0.0):
+    It used to be a fixed `y` and a scalar `x`, which is why the MetroLink was
+    a single straight row across the whole map. Position is now a distance
+    along a path, so the line is free to turn corners - and the Red Line turns
+    four of them between Wellston and the Eads Bridge.
+    """
+
+    def __init__(self, sprite, path, speed, s=0.0, *, kind='metrolink'):
         self.sprite = sprite
         self.flip = pygame.transform.flip(sprite, True, False)
+        self.vert = pygame.transform.rotate(sprite, 90)
+        self.vert_flip = pygame.transform.rotate(sprite, -90)
         self.shadow = cars_make_shadow(sprite)
         self.shadow_flip = pygame.transform.flip(self.shadow, True, False)
+        self.shadow_vert = pygame.transform.rotate(self.shadow, 90)
+        self.shadow_vert_flip = pygame.transform.rotate(self.shadow, -90)
         self.h = sprite.get_height()
         self.w = sprite.get_width()
-        self.y = y
+        self.kind = kind
+        self.path = tuple(path)
+        self.legs = []
+        total = 0.0
+        for (x0, y0), (x1, y1) in zip(self.path, self.path[1:]):
+            length = math.hypot(x1 - x0, y1 - y0)
+            if length <= 0.0:
+                continue
+            self.legs.append((total, length, x0, y0, (x1 - x0) / length,
+                              (y1 - y0) / length))
+            total += length
+        self.length = total
         self.speed = speed
-        self.x = x
+        self.s = max(0.0, min(total, float(s)))
+        self.x, self.y, self.dx, self.dy = 0.0, 0.0, 1.0, 0.0
+        self._place()
+
+    def _place(self):
+        pos = max(0.0, min(self.length, self.s))
+        for index, (start, length, x0, y0, ux, uy) in enumerate(self.legs):
+            if pos <= start + length or index == len(self.legs) - 1:
+                along = pos - start
+                self.x = x0 + ux * along
+                self.y = y0 + uy * along
+                self.dx, self.dy = ux, uy
+                return
+
+    @property
+    def horizontal(self):
+        return abs(self.dx) >= abs(self.dy)
+
+    @property
+    def rect(self):
+        w, h = (self.w, self.h) if self.horizontal else (self.h, self.w)
+        return pygame.Rect(int(round(self.x - w / 2)),
+                           int(round(self.y - h / 2)), w, h)
+
+    @property
+    def centerx(self):
+        return self.x
+
+    @property
+    def centery(self):
+        return self.y
 
     def update(self):
-        self.x += self.speed
-        if self.speed > 0 and self.x > MAP_WIDTH + 48:
-            self.x = -self.w - 48
-        elif self.speed < 0 and self.x < -self.w - 48:
-            self.x = MAP_WIDTH + 48
+        self.s += self.speed
+        if self.s <= 0.0:
+            self.s = 0.0
+            self.speed = abs(self.speed)
+        elif self.s >= self.length:
+            self.s = self.length
+            self.speed = -abs(self.speed)
+        self._place()
+
+    def _frames(self):
+        forward = self.speed >= 0
+        if self.horizontal:
+            east = (self.dx >= 0) == forward
+            return (self.sprite if east else self.flip,
+                    self.shadow if east else self.shadow_flip)
+        south = (self.dy >= 0) == forward
+        return (self.vert_flip if south else self.vert,
+                self.shadow_vert_flip if south else self.shadow_vert)
 
     def draw(self, screen, camera):
-        sx = self.x - camera.x
-        sy = self.y - camera.y - self.h // 2
-        if sx > SCREEN_WIDTH or sx + self.w < 0 or sy > SCREEN_HEIGHT or sy + self.h < 0:
+        image, shadow = self._frames()
+        w, h = image.get_size()
+        sx = self.x - camera.x - w / 2
+        sy = self.y - camera.y - h / 2
+        if sx > SCREEN_WIDTH or sx + w < 0 or sy > SCREEN_HEIGHT or sy + h < 0:
             return
-        east = self.speed >= 0
-        img = self.sprite if east else self.flip
-        screen.blit(self.shadow if east else self.shadow_flip,
-                    (int(sx + SHADOW_DX), int(sy + SHADOW_DY)))
-        screen.blit(img, (int(sx), int(sy)))
+        screen.blit(shadow, (int(sx + SHADOW_DX), int(sy + SHADOW_DY)))
+        screen.blit(image, (int(sx), int(sy)))
+
+
+class RailCrossing:
+    """One MetroLink grade crossing with an animated paired gate."""
+
+    def __init__(self, col, row=None, axis='h'):
+        self.col = int(col)
+        self.row = int(METROLINK_ROW if row is None else row)
+        self.axis = axis                    # direction the RAIL runs here
+        self.x = self.col * TILE_SIZE + TILE_SIZE // 2
+        self.y = self.row * TILE_SIZE + TILE_SIZE // 2
+        self.arm = 0.0              # 0 upright, 1 blocking the road
+        self.state = 'open'
+        self.warning = False
+
+    def distance_to_train(self, trains):
+        distances = []
+        for train in trains:
+            if train.kind != 'metrolink':
+                continue
+            half = train.w * 0.5
+            cy = getattr(train, 'centery', self.y)
+            gap = math.hypot(train.centerx - self.x, cy - self.y)
+            distances.append(max(0.0, gap - half))
+        return min(distances) if distances else float('inf')
+
+    def update(self, trains):
+        distance = self.distance_to_train(trains)
+        was_warning = self.warning
+        self.warning = distance <= RAIL_GATE_WARNING_DISTANCE
+        target = 1.0 if self.warning else 0.0
+        if self.arm < target:
+            self.arm = min(target, self.arm + RAIL_GATE_ARM_RATE)
+        elif self.arm > target:
+            self.arm = max(target, self.arm - RAIL_GATE_ARM_RATE)
+        if self.arm >= 0.98:
+            self.state = 'closed'
+        elif self.arm <= 0.02:
+            self.state = 'open'
+        elif target > self.arm:
+            self.state = 'closing'
+        else:
+            self.state = 'opening'
+        return self.warning and not was_warning
+
+    def holds(self, car):
+        """True for a road vehicle approaching, never one clearing the rail.
+
+        The rail runs along `self.axis`, so the road that crosses it runs
+        along the other one. Both orientations exist now that the alignment
+        turns corners.
+        """
+        if self.arm < 0.18:
+            return False
+        if self.axis == 'h':                 # rail east-west, road north-south
+            along, across = car.rect.centerx - self.x, self.y - car.rect.centery
+        else:                                # rail north-south, road east-west
+            along, across = car.rect.centery - self.y, self.x - car.rect.centerx
+        if abs(along) > RAIL_GATE_LANE_HALF_WIDTH:
+            return False
+        travel = pygame.Vector2(math.cos(car.angle), math.sin(car.angle))
+        if car.velocity < -0.1:
+            travel *= -1
+        toward = travel.y if self.axis == 'h' else travel.x
+        if abs(toward) < 0.55:
+            return False
+        approach = across * (1 if toward > 0 else -1)
+        return 12.0 <= approach <= RAIL_GATE_STOP_DISTANCE
+
+
+def build_rail_crossings():
+    """Every place a street crosses the MetroLink at grade, in route order."""
+    out = []
+    for (col, row, axis) in METROLINK_TILES:
+        if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
+            continue
+        tile = GAME_MAP[row][col]
+        if tile.get('rail') == 'metrolink' and tile.get('rail_crossing'):
+            out.append(RailCrossing(col, row, axis))
+    return out
 
 
 def build_rail_vehicles():
-    """MetroLink on a downtown-latitude line, a Loop trolley up on the Delmar
-    row, and the Clydesdales walking a Soulard street at the pace of eight
-    horses, which is the pace of eight horses."""
+    """Two MetroLink trains on the real Red Line alignment, a Loop trolley
+    that goes about two miles because that is how far it goes, and the
+    Clydesdales walking a Soulard street at the pace of eight horses, which
+    is the pace of eight horses."""
     ml = cars_rail_sprite('metrolink')
     tr = cars_rail_sprite('trolley')
     cl = cars_clydesdale_sprite()
-    row_dt = 44 * TILE_SIZE + TILE_SIZE // 2       # E-W road line through downtown
-    row_loop = 12 * TILE_SIZE + TILE_SIZE // 2     # E-W road line at the Delmar Loop
-    row_soulard = 60 * TILE_SIZE + TILE_SIZE // 2  # E-W road line through Soulard
-    return [
-        RailVehicle(ml, row_dt, 3.1, x=-500),
-        RailVehicle(ml, row_dt, -3.1, x=MAP_WIDTH + 1400),
-        RailVehicle(tr, row_loop, 1.9, x=0.0),
-        RailVehicle(cl, row_soulard, 0.55, x=MAP_WIDTH * 0.4),
+    west = metrolink_polyline(METROLINK_TRACK_OFFSETS[0])
+    east = metrolink_polyline(METROLINK_TRACK_OFFSETS[1])
+    row_loop = TROLLEY_ROW * TILE_SIZE + TILE_SIZE // 2
+    trolley_path = ((TROLLEY_COL_MIN * TILE_SIZE + TILE_SIZE * 0.5, row_loop),
+                    (TROLLEY_COL_MAX * TILE_SIZE + TILE_SIZE * 0.5, row_loop))
+    # The hitch walks a short Soulard beat and turns round, because that is
+    # what it does. It used to be handed the full map width on row 57, which
+    # ran the eight-horse hitch straight through the Farmers Market sheds and
+    # then out across the Mississippi - 11 solid or water tiles in all.
+    def _t(i):
+        return i * TILE_SIZE + TILE_SIZE // 2
+    horses = ((_t(CLYDESDALE_WEST), _t(CLYDESDALE_ROW)),
+              (_t(CLYDESDALE_COL), _t(CLYDESDALE_ROW)),
+              (_t(CLYDESDALE_COL), _t(CLYDESDALE_SOUTH)))
+    trains = [
+        RailVehicle(ml, west, 3.1, s=600.0, kind='metrolink'),
+        RailVehicle(ml, east, -3.1, kind='metrolink'),
+        RailVehicle(tr, trolley_path, 1.9, kind='trolley'),
+        RailVehicle(cl, horses, 0.55, s=TILE_SIZE * 6.0, kind='clydesdale'),
     ]
+    trains[1].s = trains[1].length - 1300.0
+    trains[1]._place()
+    return trains
 
 
 class Follower:
@@ -9961,6 +12482,7 @@ class Game:
         bake_ped_sprites()
         props_bake()
         roofs_bake()
+        bake_neighborhood_building_sprites()
         hud_bake()
         # Audio is baked the same way as the art: waveforms into buffers, once,
         # at boot. Silent and harmless when there is no mixer (CI, dummy driver).
@@ -9982,6 +12504,10 @@ class Game:
         self.player_fy = float(self.player_rect.centery)
         self.player_dir = [0, 0]
         self.player_motion = pygame.Vector2()
+        self.player_stamina = PLAYER_STAMINA_MAX
+        self.sprinting = False
+        self.sprint_active = False
+        self.sprint_ready = True
         self.player_facing = 2
         self.player_aim = 0.0        # radians; where a punch / shot goes
         self.player_anim = 0.0
@@ -9991,30 +12517,63 @@ class Game:
         # car you can walk up to and steal. The rest drive as ambient traffic.
         parking_set_blocked_fn(is_blocked)
         self.cars = []
-        for (sx, sy, sangle, _side) in parking_parking_spots(
-                max_count=PARKED_CAR_COUNT, near=(px, py), radius=1400):
+        ordinary_parked = PARKED_CAR_COUNT - len(SHOWCASE_VEHICLES)
+        bays = parking_parking_spots(max_count=ordinary_parked,
+                                     near=(px, py), radius=1400)
+        for (sx, sy, sangle, _side) in bays[:ordinary_parked]:
             # kerb spots are sized for ordinary cars, so keep the big rigs out
             car = Car(sx, sy, variant=random.choice(PARKED_VARIANTS_WEIGHTED))
             car.angle = sangle
             car.parked = True
             car.velocity = 0.0
             self.cars.append(car)
+        # Two destination vehicles replace ordinary parked cars in the total
+        # population budget. They stay at their venues until the player takes
+        # them instead of being streamed into a random kerb bay.
+        by_name = {entry[5]: entry for entry in LANDMARKS}
+        for variant, venue in SHOWCASE_VEHICLES:
+            tune = VEHICLE_TUNING[variant]
+            target = landmark_dropoff_point(by_name[venue])
+            spot = free_point_near(target[0], target[1], tune['w'], tune['h'],
+                                   max_rings=8)
+            if spot is None:
+                continue
+            car = Car(spot[0], spot[1], variant=variant)
+            car.angle = 0.0
+            car.parked = True
+            car.velocity = 0.0
+            self.cars.append(car)
         for _ in range(MOVING_CAR_COUNT):
             # seeded around the player, not smeared over the whole map, so the
-            # first street you see already has traffic on it
-            spot = ring_spawn_near(px, py, road_only=True, rmin=140,
-                                   rmax=POP_KEEP_RADIUS)
+            # first street you see already has traffic on it - and never on top
+            # of a car that is already there.
+            spot = None
+            for _try in range(8):
+                cand = ring_spawn_near(px, py, road_only=True, rmin=140,
+                                       rmax=POP_KEEP_RADIUS)
+                if cand is None:
+                    break
+                if self.spot_is_free(cand[0], cand[1], pad=self.SPAWN_CLEARANCE):
+                    spot = cand
+                    break
             cx, cy = spot if spot else random_open_spawn(road_only=True)
             self.cars.append(Car(cx, cy))
 
         self.rail = build_rail_vehicles()
+        self.rail_crossings = build_rail_crossings()
 
         traffic_set_hooks(is_blocked, GAME_MAP, TILE_SIZE,
-                          MAP_TILES_W, MAP_TILES_H, ROAD_LINES)
+                          MAP_TILES_W, MAP_TILES_H, ROAD_LINES,
+                          self.rail_gate_holds)
         for car in self.cars:
             traffic_init_car(car)
             if not car.parked:
                 traffic_snap_to_lane(car)
+        # Snapping to the lane happens after every car exists, so it can shove
+        # a moving car onto a kerbside one that was placed before it. Settle
+        # the whole population before the first frame is ever drawn.
+        for _ in range(12):
+            self.unstack_traffic()
 
         self.pedestrians = []
         for _ in range(PEDESTRIAN_COUNT):
@@ -10033,6 +12592,9 @@ class Game:
             station_x, station_y, VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H,
             max_rings=10) or (station_x, station_y)
         self.police = []
+        self.roadblocks = []       # deterministic high-heat containment points
+        self.roadblock_serial = 0
+        self.roadblock_deploy_after = 0
 
         # --- progression -------------------------------------------------
         # score and cash used to be incremented in lockstep everywhere, which
@@ -10046,6 +12608,7 @@ class Game:
         self.dropped = []        # rolls of cash left where somebody died
         self.discovered = set()
         self.toasts = []
+        self.speech_bubbles = []  # timed world-space dialogue anchored to speakers
         self.busted_flash = 0
         self.wasted_flash = 0
         self.running = True
@@ -10066,9 +12629,20 @@ class Game:
         self.cop_dispatch = 0        # steps until the next cruiser is sent
         self.hurt_cd = 0             # i-frames after a car hits you on foot
         self.foot_police = []        # beat cops; the unit that can arrest you
+        self.foot_cop_respawn = 0    # a dropped officer stays gone for a beat
         self.crime_pos = None        # where the offence that raised this star was
         self.crime_frame = -10 ** 9
         self.hs_cooldown = 0         # steps before anybody asks you again
+        self.chatter_cooldown = FPS * 2
+        # Where you are, in words. Nothing in the game ever told you which
+        # neighbourhood you were standing in or which street you were on, and
+        # a player who cannot name a district cannot notice it changed.
+        self.hood_now = None
+        self.hood_banner = 0         # steps left on the big crossing title
+        self.street_now = None
+        # Shuffled-bag dealer for every spoken pool, so the city stops
+        # saying the same fifteen things.
+        self.chatter = ChatterBag()
         self.body_shops = []
         for (bcol, brow) in BODY_SHOP_TILES:
             spot = free_point_near(bcol * TILE_SIZE + TILE_SIZE // 2,
@@ -10108,15 +12682,21 @@ class Game:
         # --- combat -------------------------------------------------------
         self.weapon = 'fists'
         self.ammo = 0
+        self.weapon_ammo = {kind: 0 for kind in WEAPON_ORDER}
+        self.owned_weapons = {'fists'}
         self.attack_cd = 0           # steps until the next punch / shot
+        self.attack_held = False     # automatic fire for the SMG
         self.punch_timer = 0         # >0 while the swing is on screen
         self.bullets = []
-        # Pistol crates scattered on reachable ground; they come back on a
-        # timer so the map always has one to hunt for.
+        self.throwable_system = throwable_logic.ThrowableSystem()
+        # A deterministic mix keeps the first pickup a pistol for a gentle
+        # introduction, then seeds every other weapon around the city.
         self.weapon_pickups = []
-        for _ in range(WEAPON_PICKUP_COUNT):
+        for i in range(WEAPON_PICKUP_COUNT):
             wx, wy = random_open_spawn()
-            self.weapon_pickups.append({'x': wx, 'y': wy, 'taken': 0})
+            kind = WEAPON_PICKUP_KINDS[i % len(WEAPON_PICKUP_KINDS)]
+            self.weapon_pickups.append({'x': wx, 'y': wy, 'taken': 0,
+                                        'kind': kind})
 
         # --- grub: the St. Louis power-up layer ---------------------------
         # key -> sim step the effect expires on. Absent means not running.
@@ -10150,13 +12730,23 @@ class Game:
                                       'kind': random.choice(list(GRUB_KINDS))})
 
         # --- jobs ---------------------------------------------------------
-        self.job = Job.generate()
+        self.recent_job_kinds = []
+        self.job_types_done = set()
+        self.job = self.deal_job()
         self.jobs_done = 0
         self.jobs_failed = 0
         self.streak = 0
         self.best_streak = 0
         self.job_cooldown = 0
         self.chain_until = 0         # frame the hot-streak bonus expires on
+        self.side_mission = None
+        self.side_mission_serial = 0
+        self.side_mission_cooldown = 0
+        self.side_target_car = None
+        self.side_target_pos = None
+        self.smash_targets = []
+        self.side_missions_done = 0
+        self.side_missions_failed = 0
         # The promise at $50,000 is a real finale, not a toast. Unlock and
         # completion persist; an attempt itself restarts clean after death/load.
         self.arch_job_unlocked = False
@@ -10195,6 +12785,12 @@ class Game:
         self.fps_now = 0.0
         self.sim_steps = 1
         self.hud_left_y = 8
+        self.music_available = False
+        self.music_started = False
+        self.music_paused = False
+        self.music_muted = False
+        if not self._headless:
+            self.load_soundtrack()
 
         # --- gamepad -------------------------------------------------------
         self.pad = None
@@ -10208,8 +12804,9 @@ class Game:
     # ---------------- persistence ----------------
     def save_game(self, announce=True):
         here = self.active_rect().center
+        self._store_current_ammo()
         state = {
-            'version': 4,
+            'version': 6,
             'player': {'x': here[0], 'y': here[1]},
             'score': self.score,
             'cash': self.cash,
@@ -10218,7 +12815,11 @@ class Game:
             'discovered': list(self.discovered),
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
+            'side_missions_done': self.side_missions_done,
+            'side_missions_failed': self.side_missions_failed,
+            'side_mission_serial': self.side_mission_serial,
             'best_streak': self.best_streak,
+            'job_types_done': sorted(self.job_types_done),
             'character': {
                 'look': self.character_look,
                 'high_school': self.character_school,
@@ -10226,6 +12827,11 @@ class Game:
             'arch_job': {
                 'unlocked': self.arch_job_unlocked,
                 'completed': self.arch_job_completed,
+            },
+            'weapons': {
+                'selected': self.weapon,
+                'owned': sorted(self.owned_weapons),
+                'ammo': self.weapon_ammo,
             },
         }
         try:
@@ -10258,7 +12864,15 @@ class Game:
             self.discovered = set(state.get('discovered', []))
             self.jobs_done = state.get('jobs_done', 0)
             self.jobs_failed = state.get('jobs_failed', 0)
+            self.side_missions_done = state.get('side_missions_done', 0)
+            self.side_missions_failed = state.get('side_missions_failed', 0)
+            self.side_mission_serial = state.get('side_mission_serial', 0)
             self.best_streak = state.get('best_streak', 0)
+            self.job_types_done = {
+                kind for kind in state.get('job_types_done', [])
+                if kind in JOB_KIND_ORDER
+            }
+            self.recent_job_kinds = []
             profile = state.get('character', {})
             try:
                 look = int(profile.get('look', 0))
@@ -10283,6 +12897,15 @@ class Game:
             self.streak = 0
             self.police = []
             self.foot_police = []
+            self.roadblocks = []
+            self.speech_bubbles = []
+            self.side_mission = None
+            self.side_mission_cooldown = FPS * 2
+            self.side_target_car = None
+            self.side_target_pos = None
+            self.smash_targets = []
+            self.roadblock_deploy_after = self.frame
+            self.foot_cop_respawn = 0
             self.bust_meter = 0
             self.peak_star = self.wanted_level
             self.crime_pos = None
@@ -10293,20 +12916,71 @@ class Game:
             self.hide_timer = 0
             self.heat_timer = 0
             self.wanted_decay_timer = 0
+            arsenal = state.get('weapons', {})
+            owned = {kind for kind in arsenal.get('owned', ['fists'])
+                     if kind in WEAPON_DEFS}
+            self.owned_weapons = owned | {'fists'}
+            raw_ammo = arsenal.get('ammo', {})
+            self.weapon_ammo = {
+                kind: max(0, int(raw_ammo.get(kind, 0)))
+                for kind in WEAPON_ORDER
+            }
+            self.throwable_system = throwable_logic.ThrowableSystem({
+                kind: self.weapon_ammo.get(kind, 0)
+                for kind in throwable_logic.THROWABLE_ORDER
+            })
+            for kind in throwable_logic.THROWABLE_ORDER:
+                self.weapon_ammo[kind] = self.throwable_system.inventory(kind)
+            selected = arsenal.get('selected', 'fists')
+            if (selected not in self.owned_weapons
+                    or (not WEAPON_DEFS[selected].get('melee')
+                        and self.weapon_ammo.get(selected, 0) <= 0)):
+                selected = 'fists'
+            self.weapon = selected
+            self.ammo = self.weapon_ammo.get(selected, 0)
+            self.player_stamina = PLAYER_STAMINA_MAX
+            self.sprint_ready = True
+            self.sprint_active = False
             # Runs and finale attempts are not resumable. A latched finale gets
             # the objective exclusively; locked/completed games redeal normally.
             self.job = (None if self.arch_job_unlocked and not self.arch_job_completed
-                        else Job.generate())
+                        else self.deal_job())
             self.camera.snap_to(self.player_rect)
             self.add_toast("Game loaded")
             return True
-        except (OSError, json.JSONDecodeError, KeyError) as e:
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
             self.add_toast(f"Load failed: {e}")
             return False
 
     # ---------------- helpers ----------------
     def add_toast(self, text):
         self.toasts.append(Toast(text))
+
+    @staticmethod
+    def speech_label(speaker):
+        if speaker == 'player':
+            return 'YOU'
+        archetype = getattr(speaker, 'kind', 'local').split('#', 1)[0]
+        return {
+            'commuter': 'COMMUTER', 'suit': 'OFFICE WORKER',
+            'streetwear': 'LOCAL', 'shopper': 'SHOPPER',
+            'dog_walker': 'DOG WALKER', 'elder': 'NEIGHBOR',
+            'hi_vis': 'ROAD CREW', 'jogger': 'JOGGER',
+            'tourist': 'VISITOR', 'busker_sax': 'BUSKER',
+            'cardinals': 'BALLPLAYER', 'cards_fan': 'CARDS FAN',
+            'hoosier': 'SOUTH SIDER', 'cop': 'OFFICER',
+        }.get(archetype, 'LOCAL')
+
+    def add_speech_bubble(self, speaker, text, delay=0, duration=None):
+        """Queue one frame-timed line over the person actually saying it."""
+        start = self.frame + int(delay)
+        duration = duration or int(FPS * 1.10)
+        self.speech_bubbles.append({
+            'speaker': speaker, 'text': str(text).upper(),
+            'start': start, 'end': start + duration,
+        })
+        if len(self.speech_bubbles) > 12:
+            del self.speech_bubbles[:-12]
 
     def active_rect(self):
         return self.driving.rect if self.driving else self.player_rect
@@ -10390,7 +13064,7 @@ class Game:
             return False
         self.arch_victory_timer -= 1
         if self.arch_victory_timer <= 0 and self.job is None:
-            self.job = Job.generate()
+            self.job = self.deal_job()
             self.add_toast("St. Louis keeps moving.")
         return True
 
@@ -10621,6 +13295,46 @@ class Game:
             self.callouts.pop(0)
 
     # ---------------- feedback: impact juice ----------------
+    def load_soundtrack(self):
+        """Load the packaged MIDI without making audio support a boot requirement."""
+        if pygame.mixer.get_init() is None or not os.path.isfile(GAME_MUSIC_PATH):
+            return False
+        try:
+            pygame.mixer.music.load(GAME_MUSIC_PATH)
+            pygame.mixer.music.set_volume(GAME_MUSIC_VOLUME)
+        except (pygame.error, OSError):
+            return False
+        self.music_available = True
+        return True
+
+    def sync_soundtrack(self):
+        """Start, pause, or resume music to match the front-end/game state."""
+        if not self.music_available:
+            return
+        should_play = (self.state in (STATE_PLAYING, STATE_DEAD)
+                       and not self.music_muted)
+        try:
+            if should_play and not self.music_started:
+                pygame.mixer.music.play(-1)
+                self.music_started = True
+                self.music_paused = False
+            elif should_play and self.music_paused:
+                pygame.mixer.music.unpause()
+                self.music_paused = False
+            elif not should_play and self.music_started and not self.music_paused:
+                pygame.mixer.music.pause()
+                self.music_paused = True
+        except pygame.error:
+            self.music_available = False
+
+    def toggle_soundtrack(self):
+        if not self.music_available:
+            self.add_toast("Music unavailable")
+            return
+        self.music_muted = not self.music_muted
+        self.sync_soundtrack()
+        self.add_toast("Music off" if self.music_muted else "Music on")
+
     def play_sound(self, key, world_pos=None, vol=1.0, gap=0, reach=620.0):
         """Every sound the game makes goes through here, so the camera is the
         listener and one call site can never forget to pan."""
@@ -10750,8 +13464,37 @@ class Game:
             return self.driving.angle
         return self.player_aim
 
+    def _store_current_ammo(self):
+        if self.weapon in self.weapon_ammo and not WEAPON_DEFS[self.weapon].get('melee'):
+            self.weapon_ammo[self.weapon] = max(0, int(self.ammo))
+
+    def equip_weapon(self, kind, announce=True):
+        if kind not in WEAPON_DEFS or kind not in self.owned_weapons:
+            return False
+        self._store_current_ammo()
+        self.weapon = kind
+        self.ammo = self.weapon_ammo.get(kind, 0)
+        if announce:
+            self.add_toast(WEAPON_DEFS[kind]['label'])
+        return True
+
+    def cycle_weapon(self, step=1):
+        """Cycle only through weapons currently owned and usable."""
+        self._store_current_ammo()
+        available = [kind for kind in WEAPON_ORDER
+                     if kind in self.owned_weapons
+                     and (WEAPON_DEFS[kind].get('melee')
+                          or self.weapon_ammo.get(kind, 0) > 0)]
+        if not available:
+            available = ['fists']
+        try:
+            index = available.index(self.weapon)
+        except ValueError:
+            index = -1 if step >= 0 else 0
+        return self.equip_weapon(available[(index + step) % len(available)])
+
     def player_attack(self):
-        """SPACE: swing fists, or fire the pistol if you are carrying one."""
+        """SPACE: swing the selected melee weapon or fire the selected gun."""
         if self.state != STATE_PLAYING or self.show_map:
             return
         if self.driving is not None:
@@ -10759,42 +13502,91 @@ class Game:
             return
         if self.attack_cd > 0:
             return
-        if self.weapon == 'pistol' and self.ammo > 0:
-            self.fire_pistol()
+        info = WEAPON_DEFS.get(self.weapon, WEAPON_DEFS['fists'])
+        if info.get('melee'):
+            self.swing_melee(self.weapon)
+        elif info.get('throwable') and self.ammo > 0:
+            self.throw_weapon()
+        elif self.ammo > 0:
+            self.fire_weapon()
         else:
-            self.throw_punch()
+            self.owned_weapons.discard(self.weapon)
+            self.equip_weapon('bat' if 'bat' in self.owned_weapons else 'fists', False)
+            self.add_toast("Out of ammo")
 
     def throw_punch(self):
-        self.attack_cd = PUNCH_COOLDOWN
+        """Compatibility wrapper used by tests and the original control path."""
+        return self.swing_melee('fists')
+
+    def throw_weapon(self):
+        """Launch the selected explosive using the common 60 Hz sidecar."""
+        kind = self.weapon
+        if kind not in throwable_logic.THROWABLE_ORDER:
+            return False
+        ang = self.aim_angle()
+        result = self.throwable_system.throw(
+            kind, self.player_rect.center,
+            (math.cos(ang), math.sin(ang)), owner_id='player')
+        if not result.success:
+            if result.reason == 'empty':
+                self.owned_weapons.discard(kind)
+                self.equip_weapon('bat' if 'bat' in self.owned_weapons else 'fists', False)
+                self.add_toast("Out of ammo")
+            return False
+        self.attack_cd = WEAPON_DEFS[kind]['cooldown']
+        self.ammo = self.throwable_system.inventory(kind)
+        self.weapon_ammo[kind] = self.ammo
+        self.play_sound('whiff', self.player_rect.center, vol=0.55)
+        self.spawn_burst(self.player_rect.center, 3, ('debris',), 1.6)
+        self.wanted_bump(1, 'gunfire')
+        if self.ammo <= 0:
+            self.owned_weapons.discard(kind)
+            self.equip_weapon('bat' if 'bat' in self.owned_weapons else 'fists', False)
+        return True
+
+    def swing_melee(self, kind=None):
+        kind = kind if kind in ('fists', 'bat') else 'fists'
+        info = WEAPON_DEFS[kind]
+        reach = info['range']
+        arc = info['arc']
+        self.attack_cd = info['cooldown']
         self.punch_timer = 8
         self.play_sound('whiff', self.player_rect.center, vol=0.5)
         ang = self.aim_angle()
         px, py = self.player_rect.center
-        tip = (px + math.cos(ang) * PUNCH_RANGE * 0.8,
-               py + math.sin(ang) * PUNCH_RANGE * 0.8)
+        tip = (px + math.cos(ang) * reach * 0.8,
+               py + math.sin(ang) * reach * 0.8)
         self.spawn_burst(tip, 2, ('debris',), 1.0)
         hit_any = False
-        for ped in list(self.pedestrians):
-            if not self._in_arc(ped.rect.center, ang, PUNCH_RANGE):
+        actors = ([('cop', cop) for cop in self.foot_police]
+                  + [('ped', ped) for ped in self.pedestrians])
+        actors.sort(key=lambda item: math.hypot(item[1].rect.centerx - px,
+                                                item[1].rect.centery - py))
+        for actor_kind, actor in actors:
+            if not self._in_arc(actor.rect.center, ang, reach, arc):
                 continue
             hit_any = True
-            kb = pygame.Vector2(math.cos(ang), math.sin(ang)) * 6.5
-            if ped.down_timer > 0:
-                self.splatter_ped(ped, kb)          # finishing a downed ped
+            kb = pygame.Vector2(math.cos(ang), math.sin(ang)) * (9.0 if kind == 'bat' else 6.5)
+            if actor_kind == 'cop':
+                self.damage_foot_cop(actor, info['damage'], kb, cause=kind)
             else:
-                ped.knock = kb
-                ped.mood = 'down'
-                ped.down_timer = random.randint(50, 90)
-                self.add_score(6, ped.rect.center)
-                self.wanted_bump(1, 'pedestrian')
-                self.spawn_burst(ped.rect.center, 3, ('debris',), 1.6)
+                ped = actor
+                if kind == 'bat' or ped.down_timer > 0:
+                    self.splatter_ped(ped, kb)
+                else:
+                    ped.knock = kb
+                    ped.mood = 'down'
+                    ped.down_timer = random.randint(50, 90)
+                    self.add_score(6, ped.rect.center)
+                    self.wanted_bump(1, 'pedestrian')
+                    self.spawn_burst(ped.rect.center, 3, ('debris',), 1.6)
             self.kick(1.4)
             break
         if not hit_any:
-            for car in list(self.cars) + list(self.police):
-                if not self._in_arc(car.rect.center, ang, PUNCH_RANGE + 6):
+            for car in self.combat_vehicle_pool():
+                if not self._in_arc(car.rect.center, ang, reach + 6, arc):
                     continue
-                car.damage(PUNCH_DAMAGE)
+                car.damage(info['car_damage'])
                 self.play_sound('punch', car.rect.center, vol=0.6)
                 self.spawn_burst(car.rect.center, 4, ('spark', 'glass'), 2.0)
                 self.kick(1.6)
@@ -10803,31 +13595,103 @@ class Game:
                 break
 
     def fire_pistol(self):
+        """Compatibility wrapper for the original pistol-only API."""
+        self.owned_weapons.add('pistol')
+        if self.weapon != 'pistol':
+            self.weapon = 'pistol'
+        self.ammo = self.weapon_ammo.get('pistol', self.ammo)
+        return self.fire_weapon()
+
+    def fire_weapon(self):
+        kind = self.weapon
+        info = WEAPON_DEFS.get(kind)
+        if info is None or info.get('melee') or self.ammo <= 0:
+            return
         self.play_sound('gun', self.player_rect.center, vol=0.7)
-        self.attack_cd = SHOOT_COOLDOWN
+        self.attack_cd = info['cooldown']
         self.ammo -= 1
+        self.weapon_ammo[kind] = self.ammo
         ang = self.aim_angle()
         px, py = self.player_rect.center
         mx = px + math.cos(ang) * 12
         my = py + math.sin(ang) * 12
-        self.bullets.append({'x': float(mx), 'y': float(my),
-                             'vx': math.cos(ang) * BULLET_SPEED,
-                             'vy': math.sin(ang) * BULLET_SPEED,
-                             'life': BULLET_LIFE})
-        self.spawn_burst((mx, my), 3, ('spark',), 2.2)
-        self.kick(0.8)
+        pellets = info.get('pellets', 1)
+        spread = info.get('spread', 0.0)
+        for index in range(pellets):
+            if pellets <= 1:
+                shot_ang = ang + random.uniform(-spread, spread)
+            else:
+                shot_ang = ang + spread * (index / (pellets - 1) - 0.5) * 2.0
+                shot_ang += random.uniform(-0.018, 0.018)
+            self.bullets.append({
+                'x': float(mx), 'y': float(my),
+                'vx': math.cos(shot_ang) * info['speed'],
+                'vy': math.sin(shot_ang) * info['speed'],
+                'life': info['life'], 'damage': info['damage'], 'kind': kind})
+        burst = 7 if kind == 'shotgun' else 3
+        self.spawn_burst((mx, my), burst, ('spark',), 2.8 if kind == 'shotgun' else 2.2)
+        self.kick(2.0 if kind == 'shotgun' else 0.6 if kind == 'smg' else 0.8)
         self.wanted_bump(1, 'gunfire')
         if self.ammo <= 0:
-            self.weapon = 'fists'
+            self.owned_weapons.discard(kind)
+            self.equip_weapon('bat' if 'bat' in self.owned_weapons else 'fists', False)
             self.add_toast("Out of ammo")
 
-    def _in_arc(self, target, ang, reach):
+    def _in_arc(self, target, ang, reach, arc=PUNCH_ARC):
         px, py = self.player_rect.center
         dx, dy = target[0] - px, target[1] - py
         if dx * dx + dy * dy > reach * reach:
             return False
         diff = (math.atan2(dy, dx) - ang + math.pi) % math.tau - math.pi
-        return abs(diff) <= PUNCH_ARC
+        return abs(diff) <= arc
+
+    def damage_foot_cop(self, cop, damage, impulse=None, cause='attack', lethal=False):
+        """One damage route for fists, bats, bullets, blasts and car impacts."""
+        if cop not in self.foot_police:
+            return False
+        impulse = pygame.Vector2(impulse or (0, 0))
+        cop.hp -= float(damage)
+        cop.hit_stun = max(cop.hit_stun, COP_FOOT_HIT_STUN)
+        cop.knock = impulse
+        cop.alert = 'chase'
+        cop.last_seen = self.player_rect.center
+        cop.search_timer = COP_FOOT_GIVEUP
+        cop.chase_steps = 0
+        self.bust_meter = max(0, self.bust_meter - BUST_CONTACT_STEPS // 3)
+        self.spawn_burst(cop.rect.center, 4, ('blood', 'debris'), 1.9)
+        self.play_sound('punch', cop.rect.center, vol=0.65, gap=3)
+        self.wanted_bump(1, 'cop')
+        if lethal or cop.hp <= 0:
+            self.kill_foot_cop(cop, cause, impulse)
+        elif damage >= PUNCH_DAMAGE:
+            cop.down_timer = max(cop.down_timer, COP_FOOT_KNOCKDOWN)
+            self.add_score(30, cop.rect.center)
+        return True
+
+    def kill_foot_cop(self, cop, cause='attack', impulse=None):
+        if cop not in self.foot_police:
+            return False
+        pos = cop.rect.center
+        self.foot_police.remove(cop)
+        self.foot_cop_respawn = max(self.foot_cop_respawn, COP_FOOT_RESPAWN)
+        self.add_decal(pos, 'blood', 1.15)
+        self.spawn_burst(pos, 11, ('blood', 'blood', 'debris'), 3.0)
+        self.kick(3.0, freeze=1)
+        self.add_score(250, pos)
+        self.add_callout("OFFICER DOWN", hud_HUD_RED, ttl=FPS, scale=1)
+        self.frenzy_hit('cop')
+        # Killing an officer is never a one-star misunderstanding.
+        self.wanted_level = min(WANTED_MAX, max(3, self.wanted_level + 1))
+        self.peak_star = max(self.peak_star, self.wanted_level)
+        self.heat_timer = 0
+        self.wanted_decay_timer = 0
+        self.crime_pos = pos
+        self.crime_frame = self.frame
+        for ped in self.pedestrians:
+            dx, dy = ped.rect.centerx - pos[0], ped.rect.centery - pos[1]
+            if dx * dx + dy * dy < 160 * 160:
+                ped._flee((dx, dy), random.randint(100, 170))
+        return True
 
     def update_bullets(self):
         if not self.bullets:
@@ -10846,7 +13710,19 @@ class Game:
             if is_blocked(hit):
                 self.spawn_burst(hit.center, 3, ('spark',), 1.8)
                 continue
+            if self.damage_smash_target(hit, b.get('damage', BULLET_DAMAGE)):
+                continue
             struck = False
+            for cop in list(self.foot_police):
+                if cop.rect.inflate(5, 5).colliderect(hit):
+                    self.damage_foot_cop(
+                        cop, b.get('damage', BULLET_DAMAGE),
+                        pygame.Vector2(b['vx'], b['vy']) * 0.42,
+                        cause=b.get('kind', 'pistol'))
+                    struck = True
+                    break
+            if struck:
+                continue
             for ped in list(self.pedestrians):
                 if ped.rect.inflate(4, 4).colliderect(hit):
                     self.splatter_ped(ped, pygame.Vector2(b['vx'], b['vy']) * 0.35)
@@ -10854,10 +13730,10 @@ class Game:
                     break
             if struck:
                 continue
-            for car in list(self.cars) + list(self.police):
+            for car in self.combat_vehicle_pool():
                 if car is self.driving or not car.rect.colliderect(hit):
                     continue
-                car.damage(BULLET_DAMAGE)
+                car.damage(b.get('damage', BULLET_DAMAGE))
                 self.play_impact(car.rect.center, 5.0, gap=3)
                 self.spawn_burst(hit.center, 4, ('spark', 'glass'), 2.2)
                 if car in self.police:
@@ -10869,6 +13745,97 @@ class Game:
             live.append(b)
         self.bullets = live
 
+    def throwable_targets(self):
+        """Snapshot live actors for the renderer-agnostic throwable system."""
+        targets = []
+        lookup = {}
+
+        def add(kind, actor, position, radius, blast=1.0, fire=1.0):
+            key = (kind, id(actor))
+            lookup[key] = actor
+            targets.append(throwable_logic.TargetSnapshot(
+                key, position, radius, blast, fire))
+
+        for cop in self.foot_police:
+            add('cop', cop, cop.rect.center, 7.0)
+        for ped in self.pedestrians:
+            add('ped', ped, ped.rect.center, 7.0)
+        for target in self.smash_targets:
+            if target['hp'] > 0:
+                add('smash', target, target['pos'], 9.0)
+        for car in self.combat_vehicle_pool():
+            if car is self.driving:
+                continue
+            add('car', car, car.rect.center, max(car.width, car.height) * 0.5,
+                blast=0.72, fire=0.55)
+        if self.driving is not None:
+            add('car', self.driving, self.driving.rect.center,
+                max(self.driving.width, self.driving.height) * 0.5,
+                blast=0.72, fire=0.55)
+        else:
+            add('player', self, self.player_rect.center, PLAYER_SIZE * 0.35,
+                blast=0.65, fire=0.5)
+        return tuple(targets), lookup
+
+    @staticmethod
+    def throwable_collision(_old, new):
+        hit = pygame.Rect(0, 0, 4, 4)
+        hit.center = (int(new[0]), int(new[1]))
+        return is_blocked(hit)
+
+    def update_throwables(self):
+        targets, lookup = self.throwable_targets()
+        events = self.throwable_system.update(
+            1, targets=targets, collision_query=self.throwable_collision)
+        for impact in events.impacts:
+            kinds = ('glass', 'spark') if impact.kind == throwable_logic.FIRE_BOTTLE else ('debris',)
+            self.spawn_burst(impact.position, 5, kinds, 1.8)
+            self.play_impact(impact.position, 4.0, gap=4)
+        for blast in events.blasts:
+            self.spawn_burst(blast.center, 32,
+                             ('spark', 'spark', 'smoke', 'debris'), 5.2)
+            self.add_decal(blast.center, 'scorch', 1.7)
+            self.play_sound('boom', blast.center, vol=1.0, gap=4, reach=950.0)
+            snd_duck(30)
+            self.kick(8.0, freeze=2, flash=5)
+            self.add_score(75, blast.center, mult=True)
+            self.wanted_bump(1, 'explosion')
+        for fire in events.fires_started:
+            self.add_decal(fire.center, 'scorch', 1.25)
+            self.spawn_burst(fire.center, 16, ('spark', 'smoke'), 3.0)
+            self.play_sound('boom', fire.center, vol=0.65, gap=4, reach=650.0)
+            self.kick(3.5, flash=2)
+            self.wanted_bump(1, 'explosion')
+
+        killed_peds = set()
+        for event in events.damage:
+            actor = lookup.get(event.target_id)
+            if actor is None:
+                continue
+            kind = event.target_id[0]
+            impulse = pygame.Vector2(event.impulse)
+            if kind == 'cop' and actor in self.foot_police:
+                self.damage_foot_cop(actor, event.damage, impulse,
+                                     cause=event.cause,
+                                     lethal=event.damage >= actor.hp)
+            elif kind == 'ped' and actor in self.pedestrians and actor not in killed_peds:
+                killed_peds.add(actor)
+                self.splatter_ped(actor, impulse, speed=PLAYER_CAR_MAX_SPEED)
+            elif kind == 'car':
+                actor.damage(event.damage)
+                if actor in self.police or actor in self.roadblock_units():
+                    self.wanted_bump(1, 'cop')
+            elif kind == 'smash' and actor.get('hp', 0) > 0:
+                rect = pygame.Rect(0, 0, 16, 20)
+                rect.center = actor['pos']
+                self.damage_smash_target(rect, event.damage)
+            elif kind == 'player' and self.state == STATE_PLAYING:
+                self.player_hp -= event.damage
+                self.hurt_cd = max(self.hurt_cd, event.status_steps)
+                if self.player_hp <= 0:
+                    self.player_hp = 0
+                    self.wasted("CAUGHT IN THE BLAST")
+
     def update_weapon_pickups(self):
         pr = self.active_rect()
         for w in self.weapon_pickups:
@@ -10878,11 +13845,22 @@ class Game:
                 continue
             if math.hypot(pr.centerx - w['x'], pr.centery - w['y']) < 26:
                 w['taken'] = self.frame
-                self.weapon = 'pistol'
-                self.ammo = min(99, self.ammo + PISTOL_AMMO)
+                kind = w.get('kind', 'pistol')
+                info = WEAPON_DEFS[kind]
+                self._store_current_ammo()
+                self.owned_weapons.add(kind)
+                if info.get('throwable'):
+                    self.throwable_system.add_inventory(kind, info['ammo'])
+                    self.weapon_ammo[kind] = self.throwable_system.inventory(kind)
+                elif not info.get('melee'):
+                    self.weapon_ammo[kind] = min(999, self.weapon_ammo.get(kind, 0)
+                                                  + info['ammo'])
+                self.weapon = kind
+                self.ammo = self.weapon_ammo.get(kind, 0)
                 self.play_sound('weapon', vol=0.7)
-                self.add_callout("PISTOL", hud_HUD_GOLD, ttl=FPS, scale=1)
-                self.add_pop((w['x'], w['y']), f"+{PISTOL_AMMO}", hud_HUD_GOLD)
+                self.add_callout(info['label'], hud_HUD_GOLD, ttl=FPS, scale=1)
+                pop = "+BAT" if info.get('melee') else f"+{info['ammo']}"
+                self.add_pop((w['x'], w['y']), pop, hud_HUD_GOLD)
 
     # ---------------- grub: St. Louis power-ups ----------------
     def grub_active(self, key):
@@ -10930,7 +13908,11 @@ class Game:
         car = self.driving
         if car is None:
             return
-        car.max_speed = car.base_max_speed * self.grub_speed_scale()
+        puncture = SPIKE_SPEED_SCALE if car.puncture_steps > 0 else 1.0
+        heavy = (0.86 if self.job is not None
+                 and self.job.collected and self.job.kind == 'heavy' else 1.0)
+        car.max_speed = (car.base_max_speed * self.grub_speed_scale()
+                         * puncture * heavy)
         if self.grub_active('tallboy') and abs(car.velocity) > 1.0:
             # a slow wander, not a twitch: sine on the frame counter
             car.input_steer = max(-1.0, min(1.0, car.input_steer
@@ -10963,19 +13945,62 @@ class Game:
             return None
         return math.atan2(dy, dx)
 
-    def _kerb_spot(self):
+    #: how much clear space a respawning vehicle wants around it, in px. A car
+    #: is 34x18; 40 keeps a bumper's worth between two of them.
+    SPAWN_CLEARANCE = 40
+
+    def spot_is_free(self, x, y, skip=None, pad=None):
+        """True if no other vehicle is already sitting there.
+
+        Nothing used to ask. Kerb bays came off a shuffled queue that was
+        rebuilt from scratch every time it emptied, so the same bay was handed
+        to a second car a few seconds later; moving cars respawned on a tile
+        centre with no occupancy test at all. Either way you got two cars in
+        one place, which reads as a spawn bug because it is one.
+        """
+        pad = self.SPAWN_CLEARANCE if pad is None else pad
+        box = pygame.Rect(0, 0, pad, pad)
+        box.center = (int(x), int(y))
+        for other in self.cars:
+            if other is not skip and other.rect.colliderect(box):
+                return False
+        for unit in getattr(self, 'police', ()):
+            if unit is not skip and unit.rect.colliderect(box):
+                return False
+        if self.driving is None and self.player_rect.colliderect(box):
+            return False
+        return True
+
+    def free_spawn_spot(self, tries=6, skip=None, **kwargs):
+        """Retry a ring spawn until it does not overlap an existing vehicle."""
+        for _ in range(tries):
+            spot = ring_spawn_near(**kwargs)
+            if spot is None:
+                return None
+            if self.spot_is_free(*spot, skip=skip):
+                return spot
+        return None
+
+    def _kerb_spot(self, skip=None):
         """A kerbside parking bay in the ring just outside the view."""
-        if not self._kerb_queue:
-            ax, ay = self.active_rect().center
-            try:
-                spots = parking_parking_spots(max_count=16, near=(ax, ay),
-                                              radius=POP_RESPAWN_MAX)
-            except (TypeError, ValueError):
-                spots = ()
-            self._kerb_queue = [s for s in spots
-                                if math.hypot(s[0] - ax, s[1] - ay) >= POP_RESPAWN_MIN]
-            random.shuffle(self._kerb_queue)
-        return self._kerb_queue.pop() if self._kerb_queue else None
+        for _ in range(2):
+            if not self._kerb_queue:
+                ax, ay = self.active_rect().center
+                try:
+                    spots = parking_parking_spots(max_count=16, near=(ax, ay),
+                                                  radius=POP_RESPAWN_MAX)
+                except (TypeError, ValueError):
+                    spots = ()
+                self._kerb_queue = [
+                    spot for spot in spots
+                    if math.hypot(spot[0] - ax, spot[1] - ay) >= POP_RESPAWN_MIN
+                ]
+                random.shuffle(self._kerb_queue)
+            while self._kerb_queue:
+                spot = self._kerb_queue.pop()
+                if self.spot_is_free(spot[0], spot[1], skip=skip):
+                    return spot
+        return None
 
     def update_population(self):
         """Recycle anything that has wandered far away back to just off-screen.
@@ -11016,7 +14041,10 @@ class Game:
         for car in self.cars:
             if moved >= POP_RECYCLE_PER_STEP * 2:
                 break
-            if car is self.driving or car.driver is not None or car.burn > 0:
+            if (car is self.driving or car is self.side_target_car
+                    or car.driver is not None or car.burn > 0):
+                continue
+            if car.parked and car.variant in SHOWCASE_VARIANTS:
                 continue
             dx, dy = car.rect.centerx - ax, car.rect.centery - ay
             d2 = dx * dx + dy * dy
@@ -11029,14 +14057,15 @@ class Game:
                 continue
             car.stall = 0
             if car.parked:
-                bay = self._kerb_spot()
+                bay = self._kerb_spot(skip=car)
                 if bay is None:
                     continue
                 car.rect.center = (int(bay[0]), int(bay[1]))
                 car.angle = bay[2]
                 car.velocity = 0.0
             else:
-                spot = ring_spawn_near(ax, ay, road_only=True, heading=heading)
+                spot = self.free_spawn_spot(skip=car, ax=ax, ay=ay,
+                                            road_only=True, heading=heading)
                 if spot is None:
                     continue
                 car.rect.center = spot
@@ -11047,10 +14076,18 @@ class Game:
             moved += 1
 
     # ---------------- wrecks + explosions ----------------
+    def roadblock_units(self):
+        """Return the deployed cruisers that are not in the chase-car pool."""
+        return [unit for block in self.roadblocks for unit in block['cars']]
+
+    def combat_vehicle_pool(self):
+        """All non-player vehicles that can be struck or destroyed."""
+        return list(self.cars) + list(self.police) + self.roadblock_units()
+
     def update_wrecks(self):
         """Tick every burning car's fuse; detonate the ones that reach zero."""
-        pool = list(self.cars) + list(self.police)
-        if self.driving is not None:
+        pool = self.combat_vehicle_pool()
+        if self.driving is not None and self.driving not in pool:
             pool.append(self.driving)
         going = []
         for car in pool:
@@ -11065,6 +14102,8 @@ class Game:
 
     def explode(self, car):
         pos = car.rect.center
+        if car is self.side_target_car:
+            self.side_mission_event('vehicle_destroyed', vehicle_id=id(car))
         self.spawn_burst(pos, 28, ('spark', 'spark', 'smoke', 'debris'), 4.6)
         self.add_decal(pos, 'scorch', 1.5)
         # Duck the ambient bed under it; that is most of why an explosion
@@ -11080,17 +14119,35 @@ class Game:
                 ped.down_timer = random.randint(50, 90)
                 n = math.hypot(dx, dy) or 1.0
                 ped.knock = pygame.Vector2(dx / n, dy / n) * 5.0
-        for other in list(self.cars) + list(self.police):
+        for cop in list(self.foot_police):
+            dx, dy = cop.rect.centerx - pos[0], cop.rect.centery - pos[1]
+            if dx * dx + dy * dy < 72 * 72:
+                n = math.hypot(dx, dy) or 1.0
+                impulse = pygame.Vector2(dx / n, dy / n) * 8.0
+                self.damage_foot_cop(cop, 90.0, impulse,
+                                     cause='explosion', lethal=True)
+        for other in self.combat_vehicle_pool():
             if other is car:
                 continue
             dx, dy = other.rect.centerx - pos[0], other.rect.centery - pos[1]
             if dx * dx + dy * dy < 72 * 72:
                 other.damage(46)                 # may light its own fuse -> chain
                 other.velocity += 2.0
+        roadblock = next((block for block in self.roadblocks
+                          if car in block['cars']), None)
         is_player = car is self.driving
-        self.frenzy_hit('car')
-        if car in self.police:
-            self.police.remove(car)              # update_police re-tops this step
+        is_police = car in self.police or roadblock is not None
+        self.frenzy_hit('cop' if is_police else 'car')
+        if is_police:
+            if car in self.police:
+                self.police.remove(car)          # update_police re-tops this step
+            else:
+                # Taking out either parked cruiser opens the whole closure;
+                # the replacement comes later instead of materialising in the blast.
+                self.roadblocks.remove(roadblock)
+                self.roadblock_deploy_after = max(
+                    self.roadblock_deploy_after,
+                    self.frame + ROADBLOCK_REDEPLOY_BY_STAR[self.wanted_level])
         elif car in self.cars:
             self.cars.remove(car)
             cx, cy = random_open_spawn(road_only=True)
@@ -11128,6 +14185,8 @@ class Game:
         half-torn-down: the sim keeps running during the hold, it just runs
         with the player parked and the wanted level already at zero.
         """
+        self.side_mission_event(
+            'player_busted' if kind == 'busted' else 'player_wasted')
         self.play_sound('bad', vol=0.9)
         snd_duck(FPS)
         self.state = STATE_DEAD
@@ -11157,7 +14216,12 @@ class Game:
         self.reset_multiplier()
         self.wanted_level = 0
         self.police = []
+        self.roadblocks = []       # deterministic high-heat containment points
+        self.speech_bubbles = []
+        self.roadblock_serial = 0
+        self.roadblock_deploy_after = 0
         self.foot_police = []
+        self.foot_cop_respawn = 0
         self.bust_meter = 0
         self.heat_timer = 0
         self.wanted_decay_timer = 0
@@ -11169,8 +14233,15 @@ class Game:
         self.hidden = False
         self.hide_timer = 0
         self.player_dir = [0, 0]
+        self.sprinting = False
+        self.sprint_active = False
+        self.attack_held = False
         self.combo = 0
         self.combo_timer = 0
+        self.throwable_system = throwable_logic.ThrowableSystem({
+            kind: self.weapon_ammo.get(kind, 0)
+            for kind in throwable_logic.THROWABLE_ORDER
+        })
 
     def finish_death(self):
         """The card is done: put the player back on the map and hand over.
@@ -11185,6 +14256,8 @@ class Game:
         self.player_fx = float(self.player_rect.centerx)
         self.player_fy = float(self.player_rect.centery)
         self.player_hp = PLAYER_MAX_HP
+        self.player_stamina = PLAYER_STAMINA_MAX
+        self.sprint_ready = True
         # You come to on the lawn next to live Memorial Drive traffic, so the
         # i-frames here are longer than an ordinary hit's.
         self.hurt_cd = RESPAWN_IMMUNE_STEPS
@@ -11204,7 +14277,7 @@ class Game:
             self.arch_job_offer_after = self.frame + FPS * 2
         if (self.job is None and self.job_cooldown <= 0 and
                 (not self.arch_job_unlocked or self.arch_job_completed)):
-            self.job = Job.generate()
+            self.job = self.deal_job()
 
     def lay_skid_marks(self):
         """Two dark stripes under the back wheels whenever the car is sliding.
@@ -11256,12 +14329,16 @@ class Game:
             self.wanted_level = 0
             self.police = []
             self.foot_police = []
+            self.roadblocks = []
+            self.roadblock_deploy_after = self.frame
             self.bust_meter = 0
             self.heat_timer = 0
             self.wanted_decay_timer = 0
             self.crime_pos = None
             self.driving.color = cars_random_body_color()
             self.driving.hp = self.driving.max_hp
+            self.driving.puncture_steps = 0
+            self.driving.spike_cd = 0
             self.add_callout("RESPRAYED", hud_HUD_GREEN, scale=2)
             self.add_pop(here, f"-${BODY_SHOP_COST}", hud_HUD_RED)
             self.play_sound('cash', vol=0.7)
@@ -11279,6 +14356,12 @@ class Game:
                           car.rect.centery - hole['y']) > POTHOLE_RADIUS:
                 continue
             hole['hit'] = self.frame
+            if car.variant == 'mudfoot':
+                car.velocity *= 0.98
+                self.kick(1.0)
+                self.add_callout("BIG TIRES", hud_HUD_GOLD,
+                                 ttl=FPS, scale=1, tag='pothole')
+                return
             car.damage(POTHOLE_DAMAGE)
             car.velocity *= 0.88
             self.kick(3.2)
@@ -11360,7 +14443,8 @@ class Game:
                                    row * TILE_SIZE + TILE_SIZE // 2,
                                    PLAYER_SIZE, PLAYER_SIZE, max_rings=1)
             if spot is not None:
-                kind = 'ped' if (self.frame // 7) % 2 == 0 else 'car'
+                kinds = ('ped', 'car', 'cop')
+                kind = kinds[(self.frame // 7) % len(kinds)]
                 self.frenzy_icon = (spot[0], spot[1], kind)
                 return
 
@@ -11402,10 +14486,30 @@ class Game:
         else:
             self.add_callout(f"{f.remaining} LEFT", hud_HUD_GOLD, ttl=FPS, scale=2)
 
+    #: which body a neighbourhood is likely to put on the street, and how
+    #: often. Used to be one 5% hoosier roll in a single giant 'south' region;
+    #: every district now has somebody who reads as being from there.
+    HOOD_PED_BIAS = {
+        'sthills': (('hoosier', 0.16),),
+        'southampton': (('hoosier', 0.14),),
+        'bevo': (('hoosier', 0.12),),
+        'carondelet': (('hoosier', 0.12),),
+        'towergrove': (('hoosier', 0.06),),
+        'cherokee': (('hoosier', 0.05),),
+        'dogtown': (('hoosier', 0.10),),
+        'hill': (('hoosier', 0.05),),
+        'loop': (('busker_sax', 0.18),),
+        'grand': (('busker_sax', 0.18),),
+        'grove': (('busker_sax', 0.08),),
+        'downtown': (('cards_fan', 0.10),),
+        'riverfront': (('cards_fan', 0.08),),
+        'soulard': (('cards_fan', 0.06),),
+    }
+
     @staticmethod
     def _ped_kind_for(x, y):
-        """Bias a few pedestrians to their turf: ballplayers by the stadium,
-        street musicians in the arts districts. Everyone else is random."""
+        """Bias pedestrians to their turf: ballplayers by the stadium, street
+        musicians in the arts districts, south siders on the south side."""
         col, row = x // TILE_SIZE, y // TILE_SIZE
         for (lx, ly, lw, lh, _kind, name, _c) in LANDMARKS:
             if lx - 3 <= col <= lx + lw + 3 and ly - 3 <= row <= ly + lh + 3:
@@ -11413,8 +14517,9 @@ class Game:
                     return f"cards_fan#{random.randrange(peds__VARIANTS)}"
                 if name in ("Grand Center Arts District", "Delmar Loop") and random.random() < 0.4:
                     return f"busker_sax#{random.randrange(peds__VARIANTS)}"
-        if hood_at(col, row) == 'south' and random.random() < 0.18:
-            return f"hoosier#{random.randrange(peds__VARIANTS)}"
+        for kind, chance in Game.HOOD_PED_BIAS.get(hood_at(col, row), ()):
+            if random.random() < chance:
+                return f"{kind}#{random.randrange(peds__VARIANTS)}"
         return None
 
     # ---------------- gamepad ----------------
@@ -11719,6 +14824,9 @@ class Game:
                 self.handle_keydown(event.key, getattr(event, 'unicode', ''))
             elif event.type == pygame.JOYBUTTONDOWN:
                 self.handle_pad_button(event.button)
+            elif event.type == pygame.MOUSEWHEEL:
+                if self.state == STATE_PLAYING and not self.show_map:
+                    self.cycle_weapon(-1 if event.y > 0 else 1)
             elif event.type == pygame.JOYHATMOTION:
                 self.handle_pad_hat(event.value)
             elif event.type == pygame.JOYDEVICEADDED:
@@ -11734,11 +14842,15 @@ class Game:
                 self.driving.input_throttle = 0.0
                 self.driving.input_steer = 0.0
             self.player_dir = [0, 0]
+            self.sprinting = False
+            self.attack_held = False
             return
 
         keys = pygame.key.get_pressed()
 
         if self.driving:
+            self.sprinting = False
+            self.attack_held = False
             throttle = 0.0
             if keys[pygame.K_w] or keys[pygame.K_UP]:
                 throttle += 1.0
@@ -11777,6 +14889,14 @@ class Game:
             if self.pad is not None:
                 dx, dy = self.apply_pad_walking(dx, dy)
             self.player_dir = [dx, dy]
+            sprint = keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT]
+            if self.pad is not None:
+                sprint = sprint or self.pad_handbrake()
+            self.sprinting = bool(sprint)
+            self.attack_held = bool(keys[pygame.K_SPACE] or keys[pygame.K_f])
+            if self.pad is not None:
+                self.attack_held = (self.attack_held or self.pad_button(PAD_X)
+                                    or self.pad_button(PAD_B))
 
     def handle_keydown(self, key, text=""):
         """One-shot keys. ESC pauses; nothing quits outright from play.
@@ -11787,6 +14907,9 @@ class Game:
         """
         if key == pygame.K_F11:
             self.toggle_fullscreen()
+            return
+        if key == pygame.K_F4:
+            self.toggle_soundtrack()
             return
 
         if self.arch_victory_timer > 0:
@@ -11833,6 +14956,8 @@ class Game:
 
         if key in (pygame.K_SPACE, pygame.K_f):
             self.player_attack()
+        elif key == pygame.K_q:
+            self.cycle_weapon()
         elif key == pygame.K_e:
             self.toggle_enter_exit()
         elif key == pygame.K_r:
@@ -11889,6 +15014,7 @@ class Game:
                 car.input_steer = 0.0
                 traffic_hand_back(car)
                 self.driving = None
+                self.side_mission_event('vehicle_exited', vehicle_id=id(car))
                 return True
         self.add_toast("No room to get out!")
         return False
@@ -11896,6 +15022,8 @@ class Game:
     def toggle_enter_exit(self):
         if self.driving:
             self.exit_vehicle()
+            return
+        if self.try_start_side_mission():
             return
         # Nearest jackable car wins, so standing between two does not pick
         # whichever happens to be earlier in the list.
@@ -11916,9 +15044,16 @@ class Game:
         speed_factor = VEHICLE_TUNING.get(best.variant, {}).get('speed_factor', 1.0)
         best.max_speed = PLAYER_CAR_MAX_SPEED * speed_factor
         self.driving = best
+        self.side_mission_event('vehicle_entered', vehicle_id=id(best))
         self.add_callout("JACKED!", hud_HUD_GOLD, ttl=FPS, scale=1)
         if best.variant == 'trans_am':
             self.add_toast("THE RADIO IS STUCK ON KSHE")
+        elif best.variant == 'mudfoot':
+            self.add_callout("THE ORIGINAL", hud_HUD_GOLD, scale=2)
+            self.add_toast("BUILT BIG IN ST. LOUIS")
+        elif best.variant == 'grocery_cart':
+            self.add_callout("CART PARADE!", hud_HUD_GOLD, scale=2)
+            self.add_toast("CLEANUP ON EVERY AISLE")
         self.add_score(20, best.rect.center)
 
     # ---------------- on-foot movement ----------------
@@ -11940,7 +15075,20 @@ class Game:
         float position: brush a building and you slide along it.
         """
         self.sync_player_float()
-        speed = PLAYER_SPEED * self.grub_speed_scale()
+        moving = bool(self.player_dir[0] or self.player_dir[1])
+        self.sprint_active = bool(self.sprinting and moving and self.sprint_ready
+                                  and self.player_stamina > 0)
+        if self.sprint_active:
+            self.player_stamina = max(0.0, self.player_stamina - PLAYER_STAMINA_DRAIN)
+            if self.player_stamina <= 0:
+                self.sprint_ready = False
+        else:
+            regen = PLAYER_STAMINA_HIDDEN_REGEN if self.hidden else PLAYER_STAMINA_REGEN
+            self.player_stamina = min(PLAYER_STAMINA_MAX, self.player_stamina + regen)
+            if self.player_stamina >= PLAYER_STAMINA_MAX * 0.35:
+                self.sprint_ready = True
+        base_speed = PLAYER_SPRINT_SPEED if self.sprint_active else PLAYER_SPEED
+        speed = base_speed * self.grub_speed_scale()
         target = pygame.Vector2(self.player_dir[0] * speed,
                                 self.player_dir[1] * speed)
         response = FOOT_ACCEL_RESPONSE if target.length_squared() else FOOT_BRAKE_RESPONSE
@@ -11971,41 +15119,55 @@ class Game:
             self.player_rect.center = probe.center
 
     # ---------------- update ----------------
+    #: most a car is shoved out of another in one step, px. Big enough to
+    #: clear a real overlap in a few frames, small enough that it never reads
+    #: as a bounce.
+    UNSTACK_STEP = 4
+
     def unstack_traffic(self):
-        """Push overlapping AI cars apart by a pixel a step.
+        """Push overlapping AI cars apart, by the depth they actually overlap.
 
         main.py deliberately runs no car-to-car collision between AI cars -
         adding one deadlocks the grid, because a stopped car cannot steer.
         The cost of that was cars sitting *inside* each other: measured at a
         mean of 3.7 overlapping pairs on screen, 11 at worst, which is the
-        "piling up on top of each other" you can see from the street. A
-        one-pixel mutual shove is not a collision response - it never changes
-        a velocity or a heading, so the lane logic is untouched - but two
-        cars can no longer occupy the same paint.
+        "piling up on top of each other" you can see from the street.
         """
-        movers = [c for c in self.cars
-                  if c.driver is None and not c.parked and c is not self.driving]
-        for i, a in enumerate(movers):
-            ar = a.rect
-            for b in movers[i + 1:]:
-                if not ar.colliderect(b.rect):
+        traffic = [c for c in self.cars
+                   if c.driver is None and c is not self.driving]
+        for i, a in enumerate(traffic):
+            for b in traffic[i + 1:]:
+                ar, br = a.rect, b.rect
+                if not ar.colliderect(br):
                     continue
-                dx = ar.centerx - b.rect.centerx
-                dy = ar.centery - b.rect.centery
+                if a.parked and b.parked:
+                    continue                 # neither of them is going anywhere
+                over = ar.clip(br)
+                dx = ar.centerx - br.centerx
+                dy = ar.centery - br.centery
                 if dx == 0 and dy == 0:
                     dx = 1
-                # Shove along the dominant axis only: a diagonal nudge on a
-                # 64px street just puts both cars in the kerb.
-                if abs(dx) >= abs(dy):
-                    axes = ((1 if dx > 0 else -1, 0), (0, 1 if dy >= 0 else -1))
+                # Push out of the shallow axis: that is the way out.
+                if over.w <= over.h:
+                    axes = ((1 if dx >= 0 else -1, 0), (0, 1 if dy >= 0 else -1))
+                    push = over.w
                 else:
-                    axes = ((0, 1 if dy > 0 else -1), (1 if dx >= 0 else -1, 0))
-                for car, sign in ((a, 1), (b, -1)):
+                    axes = ((0, 1 if dy >= 0 else -1), (1 if dx >= 0 else -1, 0))
+                    push = over.h
+                push = max(1, min(self.UNSTACK_STEP, push))
+                # A parked car takes the whole shove; two movers split it.
+                movable = [(a, 1), (b, -1)]
+                if a.parked:
+                    movable = [(b, -1)]
+                elif b.parked:
+                    movable = [(a, 1)]
+                for car, sign in movable:
+                    step = push if len(movable) == 1 else max(1, push // 2)
                     # Preferred axis first, the other one as a fallback: on a
                     # bridge deck or a walled street the sideways shove has
                     # nowhere to go and the cars would stay welded together.
                     for px_, py_ in axes:
-                        moved = car.rect.move(px_ * sign, py_ * sign)
+                        moved = car.rect.move(px_ * sign * step, py_ * sign * step)
                         if (0 <= moved.left and moved.right <= MAP_WIDTH
                                 and 0 <= moved.top and moved.bottom <= MAP_HEIGHT
                                 and not is_blocked(moved)):
@@ -12052,6 +15214,7 @@ class Game:
         if self.state == STATE_DEAD:
             self.update_death()
             return
+        self.update_rail_crossings()
         if self.driving:
             self.apply_grub_to_car()
             # Scraping a wall used to raise your wanted level. Bouncing off a
@@ -12094,15 +15257,18 @@ class Game:
 
         for ped in self.pedestrians:
             ped.update(self)
+        self.update_chatter()
 
         for rv in self.rail:
             rv.update()
+        self.update_train_collisions()
 
         self.handle_collisions()
         self.check_potholes()
         if not self.driving:
             self.check_roadkill_risk()
         self.update_bullets()
+        self.update_throwables()
         self.update_weapon_pickups()
         self.update_grub()
         self.update_bank()
@@ -12113,17 +15279,21 @@ class Game:
             self.hs_cooldown -= 1
         if self.attack_cd > 0:
             self.attack_cd -= 1
+        if self.attack_held and self.weapon == 'smg' and self.attack_cd <= 0:
+            self.player_attack()
         if self.punch_timer > 0:
             self.punch_timer -= 1
         self.update_population()
         self.update_wrecks()
         self.update_police()
+        self.update_side_mission()
         self.update_wanted_decay()
         self.update_arch_job()
         self.update_job()
         self.update_frenzy()
         self.update_multiplier()
         self.check_landmark_discovery()
+        self.update_place_names()
         self.update_fx()
 
         if self.combo_timer > 0:
@@ -12138,6 +15308,10 @@ class Game:
         if not self.driving and self.player_hp < PLAYER_MAX_HP:
             self.player_hp = min(PLAYER_MAX_HP, self.player_hp + PLAYER_HP_REGEN)
 
+        self.speech_bubbles = [bubble for bubble in self.speech_bubbles
+                               if self.frame <= bubble['end']
+                               and (bubble['speaker'] == 'player'
+                                    or bubble['speaker'] in self.pedestrians)]
         self.toasts = [t for t in self.toasts if pygame.time.get_ticks() < t.expires]
         if self.busted_flash > 0:
             self.busted_flash -= 1
@@ -12164,7 +15338,7 @@ class Game:
             bucket = snd_engine_bucket(frac)
             vol = (0.13 + 0.34 * frac) * snd__master
             snd_loop(snd_CH_ENGINE_A, f'engine{bucket}', vol)
-            if car.input_throttle > 0:
+            if car.input_throttle > 0 or (car.input_throttle < 0 and car.velocity <= 0):
                 # A second loop a bucket up, quieter. The beating between the
                 # two is what makes an engine sound like it is working rather
                 # than droning.
@@ -12253,9 +15427,189 @@ class Game:
         return (self.state == STATE_DEAD
                 and self.death_timer <= DEATH_HOLD_STEPS - DEATH_SKIP_AFTER_STEPS)
 
+    # ---------------- side jobs ----------------
+    def side_mission_contact(self):
+        name = SIDE_MISSION_CONTACT_NAMES[
+            self.side_mission_serial % len(SIDE_MISSION_CONTACT_NAMES)]
+        return self.landmark_job_point(name), name
+
+    def try_start_side_mission(self):
+        """Accept the current contact's job when E is pressed nearby."""
+        if (self.driving is not None or self.side_mission is not None
+                or self.side_mission_cooldown > 0
+                or self.arch_job_phase in ARCH_ACTIVE_PHASES):
+            return False
+        contact, _name = self.side_mission_contact()
+        if math.hypot(self.player_rect.centerx - contact[0],
+                      self.player_rect.centery - contact[1]) > SIDE_MISSION_CONTACT_RADIUS:
+            return False
+
+        family = mission_logic.MISSION_FAMILIES[
+            self.side_mission_serial % len(mission_logic.MISSION_FAMILIES)]
+        self.side_target_car = None
+        self.side_target_pos = None
+        self.smash_targets = []
+        if family == mission_logic.VEHICLE_THEFT:
+            candidates = [car for car in self.cars
+                          if car is not self.driving and car.burn <= 0]
+            if not candidates:
+                self.add_toast("No suitable ride on the street")
+                return True
+            origin = pygame.Vector2(contact)
+            target = max(candidates, key=lambda car: (
+                1 if car.variant == 'trans_am' else 0,
+                -pygame.Vector2(car.rect.center).distance_to(origin)))
+            self.side_target_car = target
+            shops = self.body_shops or [self.landmark_job_point("The Hill")]
+            self.side_target_pos = max(
+                shops, key=lambda pos: pygame.Vector2(pos).distance_to(target.rect.center))
+            vehicle_name = target.variant.replace('_', ' ').upper()
+            self.side_mission = mission_logic.VehicleTheftMission(
+                id(target), vehicle_name, chop_shop_id='chop_shop',
+                reward=1100, time_limit_steps=FPS * 80)
+        elif family == mission_logic.SMASH_TARGETS:
+            base = pygame.Vector2(self.landmark_job_point("Grand Center Arts District"))
+            offsets = ((-180, -70), (-95, 110), (15, -135),
+                       (95, 95), (180, -35), (235, 125))
+            for index, (ox, oy) in enumerate(offsets):
+                pos = free_point_near(base.x + ox, base.y + oy, 14, 14,
+                                      max_rings=8)
+                if pos is None:
+                    continue
+                self.smash_targets.append({
+                    'id': f'grand-glass-{index}', 'pos': pos,
+                    'hp': 55.0, 'last_hit': -10 ** 9,
+                })
+            if not self.smash_targets:
+                self.add_toast("The Grand job fell through")
+                return True
+            self.side_mission = mission_logic.SmashTargetsMission(
+                [target['id'] for target in self.smash_targets],
+                reward=1500, time_limit_steps=FPS * 65)
+        else:
+            self.side_target_pos = self.landmark_job_point("The Hill")
+            self.side_mission = mission_logic.EvadeHeatMission(
+                safehouse_id='hill', cool_steps=FPS * 6,
+                reward=1900, time_limit_steps=FPS * 90)
+
+        update = self.side_mission.start()
+        if family == mission_logic.EVADE_HEAT and self.wanted_level < 3:
+            self.wanted_bump(3 - self.wanted_level, 'side_job')
+        self.add_callout(update.name.upper(), SIDE_MISSION_MARKER_COLORS[0],
+                         ttl=FPS * 2, scale=1, tag='side-job')
+        self.add_toast(update.objective)
+        return True
+
+    def handle_side_mission_update(self, update):
+        if update is None or not (update.complete or update.failed):
+            return False
+        if update.complete:
+            self.cash += update.reward_delta
+            self.side_missions_done += 1
+            self.add_score(250, mult=False)
+            self.add_callout("SIDE JOB COMPLETE", hud_HUD_GREEN, scale=2)
+            self.add_pop(self.active_rect().center, f"+${update.reward_delta}",
+                         hud_HUD_GREEN)
+            self.play_sound('cash', vol=0.8)
+        else:
+            self.side_missions_failed += 1
+            self.add_callout("SIDE JOB FAILED", hud_HUD_RED, scale=1)
+            self.play_sound('bad', vol=0.65)
+        self.add_toast(update.message or update.objective)
+        self.side_mission = None
+        self.side_target_car = None
+        self.side_target_pos = None
+        self.smash_targets = []
+        self.side_mission_serial += 1
+        self.side_mission_cooldown = SIDE_MISSION_COOLDOWN
+        return True
+
+    def side_mission_event(self, event, **data):
+        if self.side_mission is None:
+            return False
+        return self.handle_side_mission_update(
+            self.side_mission.on_event(event, **data))
+
+    def damage_smash_target(self, hit_rect, damage):
+        if (self.side_mission is None
+                or self.side_mission.family != mission_logic.SMASH_TARGETS):
+            return False
+        for target in self.smash_targets:
+            if target['hp'] <= 0:
+                continue
+            rect = pygame.Rect(0, 0, 16, 20)
+            rect.center = target['pos']
+            if not rect.inflate(5, 5).colliderect(hit_rect):
+                continue
+            target['hp'] -= float(damage)
+            target['last_hit'] = self.frame
+            self.spawn_burst(target['pos'], 7, ('glass', 'debris'), 2.4)
+            self.play_impact(target['pos'], 5.0, gap=2)
+            if target['hp'] <= 0:
+                target['hp'] = 0
+                self.add_score(25, target['pos'])
+                self.side_mission_event('target_smashed', target_id=target['id'])
+            return True
+        return False
+
+    def update_side_mission(self):
+        if self.side_mission_cooldown > 0:
+            self.side_mission_cooldown -= 1
+        mission = self.side_mission
+        if mission is None:
+            return
+        if mission.family == mission_logic.VEHICLE_THEFT:
+            target = self.side_target_car
+            if target is None:
+                self.side_mission_event('vehicle_destroyed', vehicle_id=-1)
+                return
+            if (mission.stage in ('deliver', 'recover') and self.driving is target
+                    and self.side_target_pos is not None
+                    and pygame.Vector2(target.rect.center).distance_to(
+                        self.side_target_pos) <= BODY_SHOP_RADIUS):
+                if self.side_mission_event(
+                        'location_reached', location_id='chop_shop',
+                        vehicle_id=id(target), condition=target.hp / target.max_hp):
+                    return
+        elif mission.family == mission_logic.SMASH_TARGETS and self.driving is not None:
+            speed = abs(self.driving.velocity)
+            if speed >= 1.4:
+                for target in self.smash_targets:
+                    if (target['hp'] > 0 and self.frame - target['last_hit'] > 12):
+                        rect = pygame.Rect(0, 0, 16, 20)
+                        rect.center = target['pos']
+                        if self.driving.rect.colliderect(rect):
+                            self.damage_smash_target(rect, speed * 14.0)
+                            self.driving.velocity *= 0.82
+                            break
+        elif mission.family == mission_logic.EVADE_HEAT:
+            update = mission.tick(1, wanted_level=self.wanted_level,
+                                  spotted=self.spotted)
+            if self.handle_side_mission_update(update):
+                return
+            if (mission.stage == 'reach_safehouse' and self.side_target_pos is not None
+                    and pygame.Vector2(self.active_rect().center).distance_to(
+                        self.side_target_pos) <= JOB_MARKER_RADIUS):
+                self.side_mission_event('location_reached', location_id='hill')
+            return
+        self.handle_side_mission_update(mission.tick())
+
     # ---------------- jobs ----------------
+    def deal_job(self, exclude=None):
+        """Deal a different run card from the recent two whenever possible."""
+        choices = [kind for kind in JOB_KIND_ORDER
+                   if kind not in self.recent_job_kinds[-2:]]
+        if not choices:
+            choices = list(JOB_KIND_ORDER)
+        kind = random.choice(choices)
+        self.recent_job_kinds.append(kind)
+        self.recent_job_kinds = self.recent_job_kinds[-2:]
+        return Job.generate(exclude=exclude, kind=kind)
+
     def update_job(self):
         """Advance the courier run: pickup, clock, drop-off, payout."""
+        if self.side_mission is not None:
+            return
         finale_pending = self.arch_job_unlocked and not self.arch_job_completed
         if finale_pending and not (self.arch_job_phase == ARCH_READY and
                                     self.job is not None and self.job.collected):
@@ -12265,11 +15619,11 @@ class Game:
         if self.job_cooldown > 0:
             self.job_cooldown -= 1
             if self.job_cooldown == 0 and self.job is None:
-                self.job = Job.generate()
+                self.job = self.deal_job()
                 self.add_toast(f"New run: {self.job.pickup[5]}")
             return
         if self.job is None:
-            self.job = Job.generate()
+            self.job = self.deal_job()
             return
 
         active = self.active_rect()
@@ -12296,6 +15650,11 @@ class Game:
             if self.chain_until > self.frame:
                 self.job.hot = True
                 self.add_callout("HOT STREAK", hud_HUD_GOLD, scale=1, tag='chain')
+            if self.job.kind == 'hot':
+                self.wanted_bump(2, 'hot_job')
+                self.add_callout("HOT LOAD", hud_HUD_RED, scale=2, tag='hot_job')
+            elif self.job.kind == 'heavy':
+                self.add_toast("Heavy load: top speed reduced")
             self.add_toast(f"Picked up: {self.job.cargo}")
             self.play_sound('pickup', vol=0.5)
             return
@@ -12304,9 +15663,13 @@ class Game:
             self.fail_job("Too slow - run lost")
             return
         if near:
+            mastered = self.job.kind not in self.job_types_done
             paid = self.job.payout(self.streak)
             if self.job.hot:
                 paid = int(paid * (1.0 + JOB_CHAIN_BONUS))
+            if mastered:
+                paid += JOB_MASTERY_BONUS
+                self.job_types_done.add(self.job.kind)
             self.cash += paid
             self.add_score(50, mult=False)         # the careful loop stays flat
             self.jobs_done += 1
@@ -12314,7 +15677,12 @@ class Game:
             self.best_streak = max(self.best_streak, self.streak)
             tail = f" (x{self.streak} streak)" if self.streak > 1 else ""
             self.add_toast(f"Delivered! ${paid}{tail}")
-            self.add_callout("DELIVERED!", hud_HUD_GREEN, scale=2)
+            if mastered:
+                self.add_callout("NEW RUN MASTERED", hud_HUD_GOLD, scale=2)
+                self.add_toast(
+                    f"Run types {len(self.job_types_done)}/{len(JOB_KIND_ORDER)} mastered")
+            else:
+                self.add_callout("DELIVERED!", hud_HUD_GREEN, scale=2)
             self.add_pop(active.center, f"+${paid}", hud_HUD_GREEN)
             self.play_sound('cash', vol=0.8)
             # The next run is already on the table. Take it inside the window
@@ -12326,7 +15694,7 @@ class Game:
                 self.chain_until = 0
                 self.add_toast("Somebody is waiting under the Arch")
             else:
-                self.job = Job.generate()
+                self.job = self.deal_job()
                 self.job_cooldown = 0
                 self.chain_until = self.frame + JOB_CHAIN_WINDOW
                 self.add_toast(f"Next: {self.job.pickup[5]} (+{int(JOB_CHAIN_BONUS * 100)}% if you hurry)")
@@ -12336,7 +15704,7 @@ class Game:
         once it is in the boot it is yours."""
         if (self.arch_job_unlocked and not self.arch_job_completed) or self.job is None or self.job.collected:
             return
-        self.job = Job.generate()
+        self.job = self.deal_job()
         self.chain_until = 0
         self.add_toast(f"New run: {self.job.pickup[5]}")
 
@@ -12374,6 +15742,8 @@ class Game:
         self.crime_pos = self.active_rect().center
         self.crime_frame = self.frame
         if self.wanted_level > was and self.wanted_level == 1:
+            self.foot_cop_respawn = max(self.foot_cop_respawn,
+                                        COP_RESPONSE_BY_STAR[1])
             self.add_toast("Wanted! Lose them or get busted")
 
     def barge_pedestrians(self):
@@ -12391,6 +15761,11 @@ class Game:
             if ped.mood == 'calm':
                 if self.maybe_ask_high_school(ped):
                     continue
+                if self.maybe_start_stl_conversation(ped):
+                    continue
+                if self.wanted_level > 0 and self.chatter_cooldown <= 0:
+                    self.chatter_cooldown = FPS * 4
+                    self.add_toast(self.panic_line(ped))
                 ped._flee((push.x, push.y), random.randint(40, 70))
 
     def maybe_ask_high_school(self, ped):
@@ -12400,6 +15775,7 @@ class Game:
         if random.randrange(HS_CHANCE):
             return False
         self.hs_cooldown = HS_COOLDOWN
+        self.chatter_cooldown = CHATTER_COOLDOWN
         self.hs_asked += 1
         answer = self.character_school
         # Use the abbreviation locals actually say when one is canonical.
@@ -12413,13 +15789,151 @@ class Game:
             # Say it three times and somebody finally knows your cousin.
             reply = (HS_REPLIES[3] if self.hs_asked % 3 == 0
                      else HS_REPLIES[self.hs_asked % len(HS_REPLIES)])
-        self.add_toast(HS_QUESTION)
-        self.add_toast(f"\"{answer}\"  ...  {reply}")
+        self.add_speech_bubble(ped, HS_QUESTION)
+        self.add_speech_bubble('player', answer, delay=int(FPS * 1.05))
+        self.add_speech_bubble(ped, reply, delay=int(FPS * 2.10))
         self.play_sound(f'yell{self.hs_asked % 4}', ped.rect.center,
                         vol=0.35, gap=30)
         ped.mood = 'gawk'
         ped.mood_timer = FPS
         return True
+
+    def panic_line(self, ped):
+        """A scared local says something local. All five panic lines used to
+        be citywide, so the Ville and Soulard screamed the same thing."""
+        hood = hood_at(ped.rect.centerx // TILE_SIZE, ped.rect.centery // TILE_SIZE)
+        local = STL_PANIC_BY_HOOD.get(hood, ())
+        if local and random.random() < CHATTER_LOCAL_BIAS:
+            return random.choice(local)
+        return random.choice(STL_PANIC_LINES)
+
+    def maybe_solo_bark(self, ped):
+        """One passer-by says one thing. No partner required, so this fires in
+        the thin crowds where a two-hander never gets a chance."""
+        if self.chatter_cooldown > 0 or self.wanted_level > 0:
+            return False
+        hood = hood_at(ped.rect.centerx // TILE_SIZE, ped.rect.centery // TILE_SIZE)
+        scene = self.chatter.pick(hood, SOLO_CITYWIDE, SOLO_BY_HOOD)
+        if scene is None:
+            return False
+        self.chatter_cooldown = CHATTER_COOLDOWN // 2
+        self.add_speech_bubble(ped, scene[1])
+        return True
+
+    def reaction_bark(self, ped):
+        """Somebody watched you do that."""
+        if self.chatter_cooldown > 0:
+            return False
+        self.chatter_cooldown = FPS * 3
+        self.add_speech_bubble(ped, self.chatter.deal(
+            ('react',), STL_REACTION_BARKS))
+        return True
+
+    def maybe_start_stl_conversation(self, ped, partner=None, forced=False):
+        """Start one tagged local exchange, never over an active chase."""
+        if self.chatter_cooldown > 0 or self.wanted_level > 0:
+            return False
+        if not forced and random.randrange(CHATTER_BARGE_CHANCE):
+            return False
+        hood = hood_at(ped.rect.centerx // TILE_SIZE, ped.rect.centery // TILE_SIZE)
+        # Was: build the whole eligible list and random.choice it, every time,
+        # with no memory. Deal from a shuffled deck instead, biased to the
+        # neighbourhood you are actually standing in.
+        scene = self.chatter.pick(hood, STL_CITYWIDE, STL_LOCAL_BY_HOOD)
+        if scene is None:
+            return False
+        lines = scene[1:]
+        self.chatter_cooldown = CHATTER_COOLDOWN
+        for index, line in enumerate(lines):
+            if index % 2 == 0:
+                speaker = ped
+            else:
+                speaker = partner if partner is not None else 'player'
+            self.add_speech_bubble(speaker, line, delay=index * int(FPS * 1.05))
+        self.play_sound(f'yell{(self.frame // 7) % 4}', ped.rect.center,
+                        vol=0.28, gap=45)
+        ped.mood = 'gawk'
+        ped.mood_timer = FPS * 2
+        if partner is not None:
+            ped.gawk_at(partner.rect.center, FPS * 2)
+            partner.gawk_at(ped.rect.center, FPS * 2)
+        return True
+
+    def update_chatter(self):
+        """Let nearby calm pedestrians occasionally talk to each other."""
+        if self.chatter_cooldown > 0:
+            self.chatter_cooldown -= 1
+        if (self.chatter_cooldown > 0 or self.wanted_level > 0
+                or self.frame % CHATTER_CHECK_STEPS != 0):
+            return
+        ax, ay = self.active_rect().center
+        nearby = [ped for ped in self.pedestrians
+                  if ped.mood == 'calm' and ped.down_timer <= 0
+                  and (ped.rect.centerx - ax) ** 2 + (ped.rect.centery - ay) ** 2
+                  < 190 ** 2]
+        random.shuffle(nearby)
+        for i, ped in enumerate(nearby):
+            partner = next((other for other in nearby[i + 1:]
+                            if (other.rect.centerx - ped.rect.centerx) ** 2
+                            + (other.rect.centery - ped.rect.centery) ** 2 < 62 ** 2), None)
+            if partner is not None:
+                self.maybe_start_stl_conversation(ped, partner, forced=True)
+                return
+        # Nobody is standing close enough to anybody to hold a conversation.
+        # A lone passer-by can still say one thing - which is what keeps the
+        # thinner neighbourhoods from being silent.
+        if nearby and random.random() < 0.5:
+            self.maybe_solo_bark(nearby[0])
+
+    # ---------------- rail traffic control ----------------
+    def rail_gate_holds(self, car):
+        return any(crossing.holds(car) for crossing in self.rail_crossings)
+
+    def update_rail_crossings(self):
+        """Animate gates from train position and sound each warning edge once."""
+        here = pygame.Vector2(self.active_rect().center)
+        for crossing in self.rail_crossings:
+            started = crossing.update(self.rail)
+            if (started and here.distance_to((crossing.x, crossing.y)) < 950):
+                self.play_sound('horn', (crossing.x, crossing.y), vol=0.72,
+                                gap=FPS, reach=1200.0)
+
+    def update_train_collisions(self):
+        """Closed gates are advice; ignoring one gives the train right-of-way."""
+        trains = [vehicle for vehicle in self.rail
+                  if vehicle.kind == 'metrolink']
+        if not trains:
+            return
+        vehicles = self.combat_vehicle_pool()
+        if self.driving is not None and self.driving not in vehicles:
+            vehicles.append(self.driving)
+        for train in trains:
+            hitbox = train.rect.inflate(-6, -4)
+            travel = 1.0 if train.speed >= 0 else -1.0
+            for car in vehicles:
+                if not hitbox.colliderect(car.rect):
+                    continue
+                if self.frame - getattr(car, 'train_hit_frame', -10 ** 9) < FPS:
+                    continue
+                car.train_hit_frame = self.frame
+                car.damage(RAIL_TRAIN_COLLISION_DAMAGE)
+                car.velocity = travel * min(4.0, abs(train.speed) + 0.7)
+                car.vlat += travel * 2.8
+                self.spawn_burst(car.rect.center, 18,
+                                 ('spark', 'glass', 'debris'), 4.2)
+                self.play_impact(car.rect.center, 9.0, gap=4)
+                self.kick(7.0, freeze=2, flash=4)
+                if car is self.driving:
+                    self.add_callout("TRAIN WINS", hud_HUD_RED, ttl=FPS, scale=2)
+
+            for ped in list(self.pedestrians):
+                if hitbox.colliderect(ped.rect):
+                    impulse = pygame.Vector2(travel * 11.0, 0.0)
+                    self.splatter_ped(ped, impulse, score=False)
+            if self.driving is None and hitbox.colliderect(self.player_rect):
+                self.player_hp = 0
+                self.wasted("HIT BY METROLINK")
+                return
 
     def handle_collisions(self):
         if not self.driving:
@@ -12431,8 +15945,9 @@ class Game:
                 ped.bump_cooldown = 90
                 # Knockback along a blend of the car's heading and the radial,
                 # scaled by speed - a flat-out clip launches, a crawl stumbles.
+                travel_sign = -1.0 if self.driving.velocity < 0 else 1.0
                 heading = pygame.Vector2(math.cos(self.driving.angle),
-                                         math.sin(self.driving.angle))
+                                         math.sin(self.driving.angle)) * travel_sign
                 radial = pygame.Vector2(ped.rect.centerx - self.driving.rect.centerx,
                                         ped.rect.centery - self.driving.rect.centery)
                 radial = radial.normalize() if radial.length() > 0 else heading
@@ -12474,6 +15989,27 @@ class Game:
                     oy = other.rect.centery - ped.rect.centery
                     if ox * ox + oy * oy < 82 * 82:
                         other.gawk_at(ped.rect.center, random.randint(90, 150))
+        for cop in list(self.foot_police):
+            if cop.bump_cooldown > 0 or not self.driving.rect.colliderect(cop.rect.inflate(6, 6)):
+                continue
+            cop.bump_cooldown = 75
+            travel_sign = -1.0 if self.driving.velocity < 0 else 1.0
+            heading = pygame.Vector2(math.cos(self.driving.angle),
+                                     math.sin(self.driving.angle)) * travel_sign
+            radial = pygame.Vector2(cop.rect.centerx - self.driving.rect.centerx,
+                                    cop.rect.centery - self.driving.rect.centery)
+            radial = radial.normalize() if radial.length() > 0 else heading
+            impulse = heading * 0.65 + radial * 0.65
+            if impulse.length() > 0:
+                impulse = impulse.normalize() * (3.0 + speed * 2.1)
+            self.play_impact(cop.rect.center, speed, gap=3)
+            if speed >= SPLAT_SPEED:
+                self.damage_foot_cop(cop, COP_FOOT_HP, impulse,
+                                     cause='vehicle', lethal=True)
+            elif speed >= NUDGE_SPEED:
+                self.damage_foot_cop(cop, max(18.0, speed * 12.0), impulse,
+                                     cause='vehicle')
+                cop.down_timer = max(cop.down_timer, COP_FOOT_KNOCKDOWN)
         for car in self.cars:
             if car is self.driving or car.driver == 'player':
                 continue
@@ -12550,9 +16086,9 @@ class Game:
             spot = free_point_near(col * TILE_SIZE + TILE_SIZE // 2,
                                    row * TILE_SIZE + TILE_SIZE // 2,
                                    VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H, max_rings=1)
-            if spot is not None:
+            if spot is not None and self.spot_is_free(*spot):
                 return spot
-        return self.police_station
+        return self.police_station if self.spot_is_free(*self.police_station) else None
 
     def cop_can_see(self, cop, target, fov=None):
         """Can this cruiser actually see the player right now?
@@ -12635,9 +16171,11 @@ class Game:
     def update_foot_police(self, star, active, active_c):
         """Beat cops: the only unit that can complete an arrest on foot."""
         want = COP_FOOT_BY_STAR[star]
-        while len(self.foot_police) < want:
+        if self.foot_cop_respawn > 0:
+            self.foot_cop_respawn -= 1
+        while len(self.foot_police) < want and self.foot_cop_respawn <= 0:
             aim = self.dispatch_target()
-            spot = ring_spawn_near(aim[0], aim[1], rmin=260, rmax=520)
+            spot = ring_spawn_near(aim[0], aim[1], rmin=330, rmax=620)
             if spot is None:
                 spot = free_point_near(aim[0], aim[1], 14, 14, max_rings=8)
             if spot is None:
@@ -12652,31 +16190,245 @@ class Game:
         seen = False
         touching = False
         for cop in self.foot_police:
+            if cop.tick_hit_state():
+                cop.move_speed = COP_FOOT_SEARCH_SPEED
+                continue
             cop.sight_range = COP_FOOT_SIGHT
             if self.cop_can_see(cop, active_c, fov=COP_FOOT_FOV):
+                if cop.alert != 'chase':
+                    cop.chase_steps = 0
+                else:
+                    cop.chase_steps += 1
                 cop.alert = 'chase'
                 cop.last_seen = active_c
                 cop.search_timer = COP_FOOT_GIVEUP
                 cop.lost_timer = 0
+                cop.move_speed = (COP_FOOT_BURST_SPEED
+                                  if cop.chase_steps < COP_FOOT_BURST_STEPS
+                                  else COP_FOOT_CHASE_SPEED)
                 seen = True
             else:
+                cop.chase_steps = 0
                 cop.lost_timer += 1
                 cop.search_timer -= 1
                 if cop.alert == 'chase':
                     cop.alert = 'search'
+                cop.move_speed = COP_FOOT_SEARCH_SPEED
                 if cop.search_timer <= 0 or cop.last_seen is None:
                     cop.last_seen = self.cop_search_point(cop)
                     cop.search_timer = COP_FOOT_GIVEUP // 2
             cop.step_toward(cop.last_seen or active_c)
-            if cop.rect.colliderect(active.inflate(6, 6)):
+            if cop.alert == 'chase' and cop.rect.colliderect(active.inflate(2, 2)):
                 touching = True
         return seen, touching
+
+    def pursuit_heading(self):
+        """Unit vector describing where a containment point belongs."""
+        if self.driving is not None:
+            angle = self.driving.angle
+            if self.driving.velocity < -0.2:
+                angle += math.pi
+            return pygame.Vector2(math.cos(angle), math.sin(angle))
+        motion = pygame.Vector2(self.player_dir)
+        if motion.length_squared() > 0:
+            return motion.normalize()
+        return pygame.Vector2(math.cos(self.player_aim), math.sin(self.player_aim))
+
+    @staticmethod
+    def roadblock_layout(cx, cy, orientation):
+        """Collision geometry for a complete two-car closure at ``cx, cy``."""
+        if orientation == 'horizontal':
+            strip = pygame.Rect(0, 0, ROADBLOCK_STRIP_THICK, ROADBLOCK_STRIP_LONG)
+            strip.center = (cx, cy)
+            cars = ((cx - 34, cy - 15, 0.0), (cx + 34, cy + 15, math.pi))
+        else:
+            strip = pygame.Rect(0, 0, ROADBLOCK_STRIP_LONG, ROADBLOCK_STRIP_THICK)
+            strip.center = (cx, cy)
+            cars = ((cx - 15, cy - 34, math.pi / 2),
+                    (cx + 15, cy + 34, -math.pi / 2))
+        return strip, cars
+
+    def roadblock_spawn_point(self, slot=0):
+        """Best deterministic, legal road closure ahead of the player.
+
+        Every road tile in the forward envelope is scored by lateral miss and
+        distance from the slot's preferred range. Intersections are excluded so
+        the strip has an unambiguous road axis, and the complete strip plus both
+        cruiser colliders must fit before a candidate can win.
+        """
+        origin = pygame.Vector2(self.active_rect().center)
+        heading = self.pursuit_heading()
+        preferred = ROADBLOCK_PREFERRED[min(slot, len(ROADBLOCK_PREFERRED) - 1)]
+        candidates = []
+        for row in range(2, MAP_TILES_H - 2):
+            for col in range(2, MAP_TILES_W - 2):
+                tile = GAME_MAP[row][col]
+                if tile['type'] != TILE_ROAD or tile['collidable']:
+                    continue
+                horizontal = row in ROAD_LINES and col not in ROAD_LINES
+                vertical = col in ROAD_LINES and row not in ROAD_LINES
+                if not horizontal and not vertical:
+                    continue
+                road_dir = pygame.Vector2(1, 0) if horizontal else pygame.Vector2(0, 1)
+                if abs(road_dir.dot(heading)) < 0.48:
+                    continue
+                center = pygame.Vector2(col * TILE_SIZE + TILE_SIZE // 2,
+                                        row * TILE_SIZE + TILE_SIZE // 2)
+                rel = center - origin
+                ahead = rel.dot(heading)
+                if not ROADBLOCK_AHEAD_MIN <= ahead <= ROADBLOCK_AHEAD_MAX:
+                    continue
+                lateral = abs(rel.cross(heading))
+                orientation = 'horizontal' if horizontal else 'vertical'
+                score = lateral * 2.2 + abs(ahead - preferred)
+                candidates.append((score, row, col, orientation, center))
+
+        occupied = list(self.cars) + list(self.police)
+        if self.driving is not None:
+            occupied = [car for car in occupied if car is not self.driving]
+        for _score, _row, _col, orientation, center in sorted(candidates,
+                                                               key=lambda item: item[:3]):
+            cx, cy = int(center.x), int(center.y)
+            if any(math.hypot(cx - block['center'][0], cy - block['center'][1]) < 210
+                   for block in self.roadblocks):
+                continue
+            strip, specs = self.roadblock_layout(cx, cy, orientation)
+            if is_blocked(strip) or not pygame.Rect(0, 0, MAP_WIDTH, MAP_HEIGHT).contains(strip):
+                continue
+            unit_rects = []
+            legal = True
+            for ux, uy, _angle in specs:
+                rect = pygame.Rect(0, 0, VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H)
+                rect.center = (ux, uy)
+                if is_blocked(rect) or not pygame.Rect(0, 0, MAP_WIDTH, MAP_HEIGHT).contains(rect):
+                    legal = False
+                    break
+                unit_rects.append(rect)
+            if not legal:
+                continue
+            # Do not materialise on a moving entity. This does not affect the
+            # deterministic road score; it only advances to the next legal tile.
+            if any(rect.colliderect(car.rect.inflate(8, 8))
+                   for rect in unit_rects for car in occupied):
+                continue
+            return (cx, cy, orientation, strip, specs)
+        return None
+
+    def deploy_roadblock(self, slot=0):
+        placement = self.roadblock_spawn_point(slot)
+        if placement is None:
+            return False
+        cx, cy, orientation, strip, specs = placement
+        units = []
+        for ux, uy, angle in specs:
+            unit = Car(ux, uy, color=POLICE_COLOR, variant='police')
+            unit.angle = angle
+            unit.velocity = 0.0
+            unit.driver = 'roadblock'
+            unit.parked = True
+            units.append(unit)
+        self.roadblock_serial += 1
+        self.roadblocks.append({
+            'center': (cx, cy), 'orientation': orientation, 'strip': strip,
+            'cars': units, 'serial': self.roadblock_serial,
+            'spawn_frame': self.frame, 'last_hit': -10 ** 9,
+            'last_impact': -10 ** 9,
+        })
+        self.add_callout("ROADBLOCK AHEAD", hud_HUD_RED, ttl=FPS, scale=1,
+                         tag='roadblock')
+        return True
+
+    def update_roadblocks(self, star):
+        """Maintain the star-indexed containment quota and redeploy passed blocks."""
+        target = ROADBLOCK_COUNT_BY_STAR[star]
+        if target <= 0:
+            self.roadblocks = []
+            self.roadblock_deploy_after = self.frame
+            return
+        if self.driving is None:
+            return
+
+        heading = self.pursuit_heading()
+        origin = pygame.Vector2(self.driving.rect.center)
+        kept = []
+        retired = False
+        for block in self.roadblocks:
+            rel = pygame.Vector2(block['center']) - origin
+            far_behind = (rel.length() > ROADBLOCK_RETIRE_DISTANCE
+                          and rel.dot(heading) < -ROADBLOCK_RETIRE_BEHIND)
+            too_far = rel.length() > ROADBLOCK_AHEAD_MAX + ROADBLOCK_RETIRE_DISTANCE
+            if far_behind or too_far:
+                retired = True
+            else:
+                kept.append(block)
+        self.roadblocks = kept[:target]
+        if retired:
+            self.roadblock_deploy_after = max(
+                self.roadblock_deploy_after,
+                self.frame + ROADBLOCK_REDEPLOY_BY_STAR[star])
+
+        seen_target = getattr(self, 'roadblock_target_seen', 0)
+        if target > seen_target:
+            self.roadblock_deploy_after = min(self.roadblock_deploy_after, self.frame)
+        self.roadblock_target_seen = target
+        if len(self.roadblocks) < target and self.frame >= self.roadblock_deploy_after:
+            if self.deploy_roadblock(len(self.roadblocks)):
+                self.roadblock_deploy_after = (
+                    self.frame + ROADBLOCK_REDEPLOY_BY_STAR[star])
+            else:
+                self.roadblock_deploy_after = self.frame + FPS
+
+    def update_roadblock_contacts(self):
+        """Resolve spike and parked-unit contact against the player car."""
+        car = self.driving
+        if car is None:
+            return
+        speed = abs(car.velocity)
+        for block in self.roadblocks:
+            if (speed >= 0.6 and car.spike_cd <= 0
+                    and car.rect.colliderect(block['strip'])):
+                car.spike_cd = ROADBLOCK_HIT_COOLDOWN
+                car.puncture_steps = max(car.puncture_steps, SPIKE_PUNCTURE_STEPS)
+                car.hp = max(1.0, car.hp - SPIKE_DAMAGE)
+                car.velocity *= SPIKE_ENTRY_SPEED_SCALE
+                car.vlat += 0.9 if block['serial'] % 2 else -0.9
+                block['last_hit'] = self.frame
+                self.kick(4.0, freeze=1)
+                self.spawn_burst(car.rect.center, 9, ('spark', 'debris'), 2.4)
+                self.play_impact(car.rect.center, max(4.0, speed), gap=15)
+                self.add_callout("TIRES SHREDDED", hud_HUD_RED, ttl=FPS * 2,
+                                 scale=2, tag='spikes')
+                self.add_toast("SPIKE STRIP - SPEED AND STEERING CRIPPLED")
+
+            for unit in block['cars']:
+                if not car.rect.colliderect(unit.rect):
+                    continue
+                overlap = car.rect.clip(unit.rect)
+                if overlap.width <= overlap.height:
+                    dx = -(overlap.width + 1) if car.rect.centerx < unit.rect.centerx else overlap.width + 1
+                    candidate = car.rect.move(dx, 0)
+                else:
+                    dy = -(overlap.height + 1) if car.rect.centery < unit.rect.centery else overlap.height + 1
+                    candidate = car.rect.move(0, dy)
+                if (pygame.Rect(0, 0, MAP_WIDTH, MAP_HEIGHT).contains(candidate)
+                        and not is_blocked(candidate)):
+                    car.rect.topleft = candidate.topleft
+                if speed > 1.0 and self.frame - block['last_impact'] >= ROADBLOCK_HIT_COOLDOWN:
+                    block['last_impact'] = self.frame
+                    car.crash_damage(min(18.0, speed * PLAYER_RAM_DAMAGE))
+                    car.velocity *= -0.20
+                    car.vlat *= 0.35
+                    self.kick(min(5.5, speed), freeze=1)
+                    self.spawn_burst(car.rect.center, 6, ('spark', 'glass'), 2.0)
+                    self.play_impact(car.rect.center, speed, gap=12)
 
     def update_police(self):
         star = min(self.wanted_level, WANTED_MAX)
         target_count = COP_COUNT_BY_STAR[star]
         active = self.active_rect()
         active_c = active.center
+        self.update_roadblocks(star)
+        self.update_roadblock_contacts()
 
         # Dispatch delay: a fresh star no longer materialises a cruiser on top
         # of you. At one star the call has to go out first.
@@ -12684,19 +16436,25 @@ class Game:
             if self.cop_dispatch > 0:
                 self.cop_dispatch -= 1
             else:
-                sx, sy = self.cop_spawn_point()
-                cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
-                cop.driver = 'police'
-                # Cops used to spawn with Car.__init__'s random heading *and*
-                # a random civilian body, so a patrol car could arrive as a
-                # blue school bus pointed the wrong way. Now: a cruiser
-                # pointed at the address the call came from.
-                aim = self.dispatch_target()
-                cop.angle = math.atan2(aim[1] - sy, aim[0] - sx)
-                cop.last_seen = aim
-                cop.search_timer = COP_SEARCH_STEPS
-                self.police.append(cop)
-                self.cop_dispatch = COP_RESPONSE_BY_STAR[star]
+                spot = self.cop_spawn_point()
+                if spot is None:
+                    # Every off-screen approach is occupied this frame. Wait
+                    # briefly instead of materialising a cruiser inside a car.
+                    self.cop_dispatch = FPS // 2
+                else:
+                    sx, sy = spot
+                    cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
+                    cop.driver = 'police'
+                    # Cops used to spawn with Car.__init__'s random heading *and*
+                    # a random civilian body, so a patrol car could arrive as a
+                    # blue school bus pointed the wrong way. Now: a cruiser
+                    # pointed at the address the call came from.
+                    aim = self.dispatch_target()
+                    cop.angle = math.atan2(aim[1] - sy, aim[0] - sx)
+                    cop.last_seen = aim
+                    cop.search_timer = COP_SEARCH_STEPS
+                    self.police.append(cop)
+                    self.cop_dispatch = COP_RESPONSE_BY_STAR[star]
         while len(self.police) > target_count:
             self.police.pop()
 
@@ -12750,7 +16508,9 @@ class Game:
             # kill you: it eases off well short of a pedestrian.
             brake_at = 34 if (star >= COP_RAMMING_STAR or self.driving) else 52
             cop.chase_ai(aim, brake_at=brake_at)
-            if cop.rect.colliderect(active.inflate(4, 4)):
+            # A cruiser can pin a stopped car, but it cannot reach through the
+            # windshield or magically handcuff somebody standing on a sidewalk.
+            if self.driving is not None and cop.rect.colliderect(active.inflate(4, 4)):
                 touching = True
 
         foot_seen, foot_touch = self.update_foot_police(star, active, active_c)
@@ -12856,6 +16616,9 @@ class Game:
             self.wanted_decay_timer = 0
             peak = self.peak_star
             self.wanted_level = max(0, self.wanted_level - 1)
+            if self.wanted_level < 4:
+                self.roadblocks = []
+                self.roadblock_deploy_after = self.frame
             # Shed a cop with the star, this same step, so the police count
             # never disagrees with the star display even for one frame. (A far
             # cop that update_police wouldn't trim on count alone.)
@@ -12873,6 +16636,27 @@ class Game:
                 where = landmark_at(self.active_rect())
                 self.add_toast(f"Lost 'em in {where}" if where else "Lost 'em")
 
+    HOOD_BANNER_STEPS = FPS * 3
+
+    def update_place_names(self):
+        """Track the neighbourhood and street under the player.
+
+        Crossing into a new neighbourhood raises a short title, GTA-style.
+        The street name updates quietly under the radar.
+        """
+        rect = self.active_rect()
+        col, row = rect.centerx // TILE_SIZE, rect.centery // TILE_SIZE
+        hood = hood_at(col, row)
+        if hood != self.hood_now:
+            if self.hood_now is not None:
+                self.hood_banner = self.HOOD_BANNER_STEPS
+            self.hood_now = hood
+        elif self.hood_banner > 0:
+            self.hood_banner -= 1
+        name = street_name(col, row)
+        if name is not None:
+            self.street_now = name
+
     def check_landmark_discovery(self):
         name = landmark_at(self.active_rect())
         if name and name not in self.discovered:
@@ -12880,6 +16664,9 @@ class Game:
             self.add_score(150, self.active_rect().center, mult=False)
             self.add_callout("NEW TURF", hud_HUD_GOLD, scale=1)
             self.add_toast(f"Discovered: {name}!")
+            plaque = LANDMARK_PLAQUES.get(name)
+            if plaque:
+                self.add_toast(plaque)
 
     # ---------------- drawing ----------------
     _TREE_GREENS = ((58, 84, 46), (50, 74, 40), (66, 92, 52), (46, 66, 38))
@@ -12954,7 +16741,32 @@ class Game:
                 self._draw_street_tree(rect.centerx, rect.centery, (n >> 6) & 3)
             return
 
+        if t == TILE_RAIL:
+            pygame.draw.rect(self.screen, (72, 68, 62), rect)
+            n = _noise(c, r, 31)
+            for i in range(7):
+                gx = rect.left + ((n >> (i * 3)) % 58) + 3
+                gy = rect.top + ((n >> (i * 4 + 2)) % 46) + 9
+                shade = (92, 88, 80) if i & 1 else (54, 52, 50)
+                self.screen.fill(shade, (gx, gy, 3, 2))
+            return
+
         # --- Roads ---
+        # Diagonal tiles reserve a walkable corridor, but the asphalt itself is
+        # drawn once as a continuous polyline in draw_diagonal_network().  A
+        # square of asphalt per tile was the source of the staircase/plaza look.
+        if tile.get('diagonal') and not (c in ROAD_LINES and r in ROAD_LINES):
+            pygame.draw.rect(self.screen, COLOR_SIDEWALK, rect)
+            n = _noise(c, r, 17)
+            pygame.draw.line(self.screen, COLOR_PLAZA_SEAM,
+                             (rect.left, rect.centery), (rect.right, rect.centery), 1)
+            pygame.draw.line(self.screen, COLOR_PLAZA_SEAM,
+                             (rect.centerx, rect.top), (rect.centerx, rect.bottom), 1)
+            px = rect.left + (n % 48) + 8
+            py = rect.top + ((n >> 6) % 48) + 8
+            pygame.draw.rect(self.screen, COLOR_SIDEWALK_SEAM, (px, py, 5, 3))
+            return
+
         pygame.draw.rect(self.screen, COLOR_ROAD, rect)
         n = _noise(c, r, 3)
 
@@ -13006,6 +16818,82 @@ class Game:
             for x in range(rect.left + 4, rect.right - 8, 14):
                 pygame.draw.rect(self.screen, COLOR_ROAD_LINE, (x, rect.centery - 2, 8, 4))
 
+    DIAG_ROAD_WIDTH = 50
+    DIAG_KERB_WIDTH = 62
+
+    @staticmethod
+    def ground_color_at(c, r):
+        """What colour the flat ground of a tile is drawn, or None if it is a
+        building (those get their own roof pass) or plain asphalt."""
+        if not (0 <= c < MAP_TILES_W and 0 <= r < MAP_TILES_H):
+            return None
+        tile = GAME_MAP[r][c]
+        t = tile['type']
+        if t in (TILE_BUILDING, TILE_ROAD):
+            return None
+        if t == TILE_GRASS:
+            return COLOR_GRASS
+        if t == TILE_WATER:
+            return COLOR_WATER
+        if t == TILE_RAIL:
+            return (72, 68, 62)
+        return tile['color']            # park and plaza carry their own
+
+    def draw_diagonal_road(self, rect, c, r):
+        """Draw the clipped piece of a smooth diagonal through one tile.
+
+        Kept as a small rendering primitive for tests and previews; normal
+        gameplay draws whole polylines at once so no tile seam can square them.
+        """
+        pygame.draw.rect(self.screen, COLOR_SIDEWALK, rect)
+        ux, uy = DIAGONAL_DIR.get((c, r), (0.75, 0.66))
+        cx, cy = rect.center
+        ends = ((cx - ux * 54, cy - uy * 54), (cx + ux * 54, cy + uy * 54))
+        pygame.draw.line(self.screen, COLOR_SIDEWALK_SEAM, *ends, self.DIAG_KERB_WIDTH)
+        pygame.draw.line(self.screen, COLOR_SIDEWALK, *ends, self.DIAG_KERB_WIDTH - 2)
+        pygame.draw.line(self.screen, COLOR_ROAD, *ends, self.DIAG_ROAD_WIDTH)
+        pygame.draw.line(self.screen, COLOR_ROAD_DARK, *ends, 7)
+        pygame.draw.line(self.screen, COLOR_ROAD_LINE,
+                         (cx - ux * 13, cy - uy * 13),
+                         (cx + ux * 3, cy + uy * 3), 3)
+
+    def draw_diagonal_network(self):
+        """Draw every named diagonal as one continuous, normal-width road."""
+        for _name, points, _width in DIAGONAL_STREETS:
+            screen_points = [
+                (int(c * TILE_SIZE + TILE_SIZE * 0.5 - self.camera.x),
+                 int(r * TILE_SIZE + TILE_SIZE * 0.5 - self.camera.y))
+                for c, r in points
+            ]
+            if len(screen_points) < 2:
+                continue
+
+            # A narrow kerb/sidewalk shoulder defines the edge without turning
+            # the reserved 64px tiles into visible asphalt squares.
+            pygame.draw.lines(self.screen, COLOR_SIDEWALK_SEAM, False,
+                              screen_points, self.DIAG_KERB_WIDTH)
+            pygame.draw.lines(self.screen, COLOR_SIDEWALK, False,
+                              screen_points, self.DIAG_KERB_WIDTH - 2)
+            pygame.draw.lines(self.screen, COLOR_ROAD, False,
+                              screen_points, self.DIAG_ROAD_WIDTH)
+            pygame.draw.lines(self.screen, COLOR_ROAD_DARK, False,
+                              screen_points, 7)
+
+            # Dashed centre line follows the true polyline, not the tile steps.
+            for (x0, y0), (x1, y1) in zip(screen_points, screen_points[1:]):
+                dx, dy = x1 - x0, y1 - y0
+                length = math.hypot(dx, dy)
+                if length <= 0:
+                    continue
+                ux, uy = dx / length, dy / length
+                pos = 6.0
+                while pos < length:
+                    end = min(length, pos + 13.0)
+                    pygame.draw.line(self.screen, COLOR_ROAD_LINE,
+                                     (x0 + ux * pos, y0 + uy * pos),
+                                     (x0 + ux * end, y0 + uy * end), 3)
+                    pos += 27.0
+
     def draw_props(self, c, r):
         """Street furniture. Placement is deterministic per tile so nothing
         flickers between frames."""
@@ -13052,7 +16940,7 @@ class Game:
 
     def landmark_has_art(self, tile):
         name = tile['landmark']
-        return name is not None and lm_has_art(name)
+        return name is not None and lm_has_art(landmark_owner(name))
 
     def draw_landmark_art(self):
         """Blit each visible landmark as one composition over its whole
@@ -13066,6 +16954,16 @@ class Game:
                                                  lw * TILE_SIZE, lh * TILE_SIZE))
             if rect.colliderect(clip):
                 lm_draw_landmark(self.screen, name, rect, clip)
+
+    def draw_arch_foreground(self):
+        """Occlude actors with the elevated Arch after the entity pass."""
+        entry = next(e for e in LANDMARKS if e[5] == "Gateway Arch")
+        rect = self.camera.apply(pygame.Rect(entry[0] * TILE_SIZE,
+                                             entry[1] * TILE_SIZE,
+                                             entry[2] * TILE_SIZE,
+                                             entry[3] * TILE_SIZE))
+        lm_draw_arch_foreground(self.screen, rect,
+                                pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT))
 
     def draw_building_shadow(self, c, r):
         """Cast shadow of an extruded block onto the ground south-east of it.
@@ -13099,6 +16997,19 @@ class Game:
         style = roofs_style_for(c, r, tile['landmark'])
         roofs_draw_roof_detail(self.screen, pygame.Rect(roof), roof_col, c, r, style)
 
+    def _draw_neighborhood_building(self, rect, c, r):
+        """Blit one native 64px district tile directly over its collider."""
+        hood = hood_at(c, r)
+        variants = NEIGHBORHOOD_BUILDING_SPRITES.get(hood, ())
+        if not variants:
+            return False
+        if hood == 'downtown' and len(variants) > 1 and c >= river_bank(r) - 8:
+            sprite = variants[-1]             # sawtooth riverfront warehouse
+        else:
+            sprite = variants[_noise(c, r, 3307) % len(variants)]
+        self.screen.blit(sprite, rect.topleft)
+        return True
+
     def draw_building_facade(self, c, r):
         """Hybrid look: a building tile whose south neighbour is open ground
         shows its front wall - brick courses, a row of windows, and either a
@@ -13111,6 +17022,12 @@ class Game:
             return                                  # interior of the mass
         rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
         if rect.right < 0 or rect.left > SCREEN_WIDTH or rect.bottom < -8 or rect.top > SCREEN_HEIGHT:
+            return
+
+        # One in three exposed addresses uses the generated district atlases; the
+        # others retain procedural storefront/house variants. Both choices are
+        # deterministic, so a street keeps its identity as the camera moves.
+        if _noise(c, r, 3299) % 3 == 0 and self._draw_neighborhood_building(rect, c, r):
             return
 
         base = building_art_color(c, r, tile)
@@ -13511,6 +17428,186 @@ class Game:
         hud_text(self.screen, "ENTER PICK   ESC CANCEL   PGUP/PGDN MOVE",
                  58, 305, hud_HUD_GREY_DIM, True, 1)
 
+    def draw_roadblock_strips(self):
+        """Steel spike teeth and warning end-caps, beneath the parked units."""
+        viewport = pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+        for block in self.roadblocks:
+            rect = self.camera.apply(block['strip'])
+            if not rect.colliderect(viewport):
+                continue
+            pygame.draw.rect(self.screen, (20, 22, 24), rect)
+            pygame.draw.rect(self.screen, (224, 186, 54), rect, 2)
+            if block['orientation'] == 'horizontal':
+                for y in range(rect.top + 4, rect.bottom - 2, 7):
+                    pygame.draw.polygon(self.screen, (210, 218, 220),
+                                        ((rect.left + 2, y + 2),
+                                         (rect.centerx, y - 2),
+                                         (rect.right - 2, y + 2)))
+                caps = ((rect.centerx, rect.top - 5), (rect.centerx, rect.bottom + 5))
+            else:
+                for x in range(rect.left + 4, rect.right - 2, 7):
+                    pygame.draw.polygon(self.screen, (210, 218, 220),
+                                        ((x + 2, rect.top + 2),
+                                         (x - 2, rect.centery),
+                                         (x + 2, rect.bottom - 2)))
+                caps = ((rect.left - 5, rect.centery), (rect.right + 5, rect.centery))
+            for x, y in caps:
+                pygame.draw.circle(self.screen, COLOR_OUTLINE, (x, y), 4)
+                pygame.draw.circle(self.screen, hud_HUD_RED, (x, y), 2)
+
+    def draw_rail_infrastructure(self):
+        """MetroLink ballast and double rail along the whole polyline, station
+        platforms at the named stops, plus the street-running trolley rail."""
+        clip = pygame.Rect(-40, -40, SCREEN_WIDTH + 80, SCREEN_HEIGHT + 80)
+        for c0, r0, c1, r1, axis in METROLINK_SEGMENTS:
+            x0 = c0 * TILE_SIZE + TILE_SIZE // 2 - self.camera.x
+            y0 = r0 * TILE_SIZE + TILE_SIZE // 2 - self.camera.y
+            x1 = c1 * TILE_SIZE + TILE_SIZE // 2 - self.camera.x
+            y1 = r1 * TILE_SIZE + TILE_SIZE // 2 - self.camera.y
+            if axis == 'h':
+                bed = pygame.Rect(int(min(x0, x1)), int(y0 - 24),
+                                  int(abs(x1 - x0)) + 1, 48)
+            else:
+                bed = pygame.Rect(int(x0 - 24), int(min(y0, y1)),
+                                  48, int(abs(y1 - y0)) + 1)
+            if not bed.colliderect(clip):
+                continue
+            pygame.draw.rect(self.screen, (66, 62, 58), bed)
+            # ties, then the two rail heads either side of the centre line
+            if axis == 'h':
+                lo, hi = int(min(x0, x1)), int(max(x0, x1))
+                start = max(lo, -20) // 14 * 14
+                for sx in range(start, min(hi, SCREEN_WIDTH + 20) + 1, 14):
+                    for off in METROLINK_TRACK_OFFSETS:
+                        pygame.draw.rect(self.screen, (76, 54, 42),
+                                         (sx - 1, int(y0) + off - 7, 3, 15))
+                for off in METROLINK_TRACK_OFFSETS:
+                    for rail in (-4, 4):
+                        y = int(y0) + off + rail
+                        pygame.draw.line(self.screen, (34, 34, 38), (lo, y + 1), (hi, y + 1), 3)
+                        pygame.draw.line(self.screen, (178, 184, 180), (lo, y), (hi, y), 1)
+            else:
+                lo, hi = int(min(y0, y1)), int(max(y0, y1))
+                start = max(lo, -20) // 14 * 14
+                for sy in range(start, min(hi, SCREEN_HEIGHT + 20) + 1, 14):
+                    for off in METROLINK_TRACK_OFFSETS:
+                        pygame.draw.rect(self.screen, (76, 54, 42),
+                                         (int(x0) + off - 7, sy - 1, 15, 3))
+                for off in METROLINK_TRACK_OFFSETS:
+                    for rail in (-4, 4):
+                        x = int(x0) + off + rail
+                        pygame.draw.line(self.screen, (34, 34, 38), (x + 1, lo), (x + 1, hi), 3)
+                        pygame.draw.line(self.screen, (178, 184, 180), (x, lo), (x, hi), 1)
+
+        # grade crossings: the road surface is repainted over the ballast
+        for crossing in self.rail_crossings:
+            cx = int(crossing.x - self.camera.x)
+            cy = int(crossing.y - self.camera.y)
+            if not (-60 < cx < SCREEN_WIDTH + 60 and -60 < cy < SCREEN_HEIGHT + 60):
+                continue
+            if crossing.axis == 'h':
+                pygame.draw.rect(self.screen, COLOR_ROAD, (cx - 31, cy - 24, 62, 48))
+                pygame.draw.line(self.screen, COLOR_ROAD_LINE_WHITE,
+                                 (cx, cy - 23), (cx, cy + 23), 1)
+            else:
+                pygame.draw.rect(self.screen, COLOR_ROAD, (cx - 24, cy - 31, 48, 62))
+                pygame.draw.line(self.screen, COLOR_ROAD_LINE_WHITE,
+                                 (cx - 23, cy), (cx + 23, cy), 1)
+
+        # station platforms, with the name on the shelter
+        for (col, row, name) in METROLINK_STATIONS:
+            px = int(col * TILE_SIZE + TILE_SIZE // 2 - self.camera.x)
+            py = int(row * TILE_SIZE + TILE_SIZE // 2 - self.camera.y)
+            if not (-120 < px < SCREEN_WIDTH + 120 and -80 < py < SCREEN_HEIGHT + 80):
+                continue
+            plat = pygame.Rect(px - 46, py - 34, 92, 13)
+            pygame.draw.rect(self.screen, (150, 148, 142), plat)
+            pygame.draw.rect(self.screen, COLOR_OUTLINE, plat, 1)
+            pygame.draw.rect(self.screen, (86, 96, 116), (px - 26, py - 44, 52, 11))
+            pygame.draw.rect(self.screen, COLOR_OUTLINE, (px - 26, py - 44, 52, 11), 1)
+            label = name[:11]
+            hud_text(self.screen, label,
+                     px - hud_text_width(label, 1) // 2, py - 42,
+                     hud_HUD_WHITE, True, 1)
+
+        # the Loop trolley: rails inset into Delmar, and only where it runs
+        trolley_y = TROLLEY_ROW * TILE_SIZE + TILE_SIZE // 2
+        tsy = int(trolley_y - self.camera.y)
+        tleft = int(TROLLEY_COL_MIN * TILE_SIZE - self.camera.x)
+        tright = int((TROLLEY_COL_MAX + 1) * TILE_SIZE - self.camera.x)
+        if -12 < tsy < SCREEN_HEIGHT + 12 and tright >= 0 and tleft <= SCREEN_WIDTH:
+            for offset in (-6, 6):
+                pygame.draw.line(self.screen, (32, 32, 36),
+                                 (tleft, tsy + offset + 1),
+                                 (tright, tsy + offset + 1), 3)
+                pygame.draw.line(self.screen, (170, 174, 170),
+                                 (tleft, tsy + offset), (tright, tsy + offset), 1)
+
+    def draw_rail_crossing_gates(self):
+        """Paired animated arms and alternating red crossing lamps."""
+        for crossing in self.rail_crossings:
+            sx, sy = self.camera.apply_pos((crossing.x, crossing.y))
+            if not (-70 < sx < SCREEN_WIDTH + 70 and -70 < sy < SCREEN_HEIGHT + 70):
+                continue
+            flash = bool((self.frame // 7) & 1)
+            setups = ((-28, -35, -math.pi / 2, math.pi / 2),
+                      (28, 35, math.pi / 2, math.pi / 2))
+            for ox, oy, base_angle, sweep in setups:
+                px, py = int(sx + ox), int(sy + oy)
+                pygame.draw.rect(self.screen, COLOR_OUTLINE, (px - 4, py - 4, 9, 10))
+                pygame.draw.rect(self.screen, (190, 190, 178), (px - 2, py - 3, 5, 8))
+                for lx in (-3, 3):
+                    lit = crossing.warning and flash == (lx > 0)
+                    color = hud_HUD_RED if lit else (82, 24, 24)
+                    pygame.draw.circle(self.screen, COLOR_OUTLINE, (px + lx, py - 7), 3)
+                    pygame.draw.circle(self.screen, color, (px + lx, py - 7), 2)
+                angle = base_angle + sweep * crossing.arm
+                length = 52
+                ex = px + int(math.cos(angle) * length)
+                ey = py + int(math.sin(angle) * length)
+                pygame.draw.line(self.screen, COLOR_OUTLINE, (px, py), (ex, ey), 6)
+                for index in range(7):
+                    a = index / 7.0
+                    b = (index + 1) / 7.0
+                    p1 = (px + int((ex - px) * a), py + int((ey - py) * a))
+                    p2 = (px + int((ex - px) * b), py + int((ey - py) * b))
+                    pygame.draw.line(self.screen,
+                                     hud_HUD_RED if index & 1 else (238, 232, 206),
+                                     p1, p2, 3)
+
+    def draw_side_mission_world(self):
+        """Contact and breakable props, kept as chunky world objects."""
+        if self.side_mission is None and self.side_mission_cooldown <= 0:
+            (cx, cy), _name = self.side_mission_contact()
+            sx, sy = self.camera.apply_pos((cx, cy))
+            if -24 < sx < SCREEN_WIDTH + 24 and -24 < sy < SCREEN_HEIGHT + 24:
+                pulse = (self.frame // 7) % 3
+                pygame.draw.circle(self.screen, SIDE_MISSION_MARKER_COLORS[1],
+                                   (int(sx), int(sy)), 12 + pulse)
+                pygame.draw.circle(self.screen, SIDE_MISSION_MARKER_COLORS[0],
+                                   (int(sx), int(sy)), 9 + pulse, 2)
+                hud_text(self.screen, "?", int(sx) - 2, int(sy) - 5,
+                         hud_HUD_WHITE, True, 1)
+                label = "SIDE JOB"
+                hud_text(self.screen, label,
+                         int(sx) - hud_text_width(label, 1) // 2,
+                         int(sy) + 15, SIDE_MISSION_MARKER_COLORS[0], True, 1)
+        for index, target in enumerate(self.smash_targets):
+            if target['hp'] <= 0:
+                continue
+            sx, sy = self.camera.apply_pos(target['pos'])
+            if not (-20 < sx < SCREEN_WIDTH + 20 and -20 < sy < SCREEN_HEIGHT + 20):
+                continue
+            x, y = int(sx), int(sy)
+            flash = self.frame - target['last_hit'] < 5
+            body = hud_HUD_WHITE if flash else (72, 92, 108)
+            self.screen.fill((30, 28, 30), (x - 7, y + 7, 15, 4))
+            self.screen.fill(body, (x - 6, y - 8, 13, 16))
+            self.screen.fill((186, 214, 224), (x - 4, y - 6, 9, 9))
+            self.screen.fill(SIDE_MISSION_MARKER_COLORS[0], (x - 7, y - 10, 15, 3))
+            hud_text(self.screen, str(index + 1), x - 2, y - 4,
+                     (32, 30, 34), True, 1)
+
     def draw(self):
         if self.state == STATE_TITLE:
             self.draw_title_screen()
@@ -13537,6 +17634,7 @@ class Game:
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):
                 self.draw_tile(c, r)
+        self.draw_diagonal_network()
         self.draw_landmark_art()
         self.draw_decals()          # stains sit on the ground, under everything
         for r in range(start_row, end_row):
@@ -13551,6 +17649,9 @@ class Game:
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):
                 self.draw_building_facade(c, r)
+        self.draw_rail_infrastructure()
+        self.draw_roadblock_strips()
+        self.draw_side_mission_world()
 
         for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
             frect = self.camera.apply(pygame.Rect(lx * TILE_SIZE, ly * TILE_SIZE,
@@ -13571,6 +17672,9 @@ class Game:
         for car in self.cars:
             if car is not self.driving:
                 car.draw(self.screen, self.camera, flash)
+        for block in self.roadblocks:
+            for unit in block['cars']:
+                unit.draw(self.screen, self.camera, flash)
         for cop in self.police:
             cop.draw(self.screen, self.camera, flash)
 
@@ -13591,8 +17695,10 @@ class Game:
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
             self.screen.blit(sprite, rect)
 
+        self.draw_rail_crossing_gates()
         self.draw_punch()
         self.draw_bullets()
+        self.draw_throwables()
         self.draw_fx()
         self.draw_weapon_pickups()
         self.draw_grub_pickups()
@@ -13600,6 +17706,8 @@ class Game:
         self.draw_potholes()
         self.draw_dropped_cash()
         self.draw_foot_police()
+        self.draw_arch_foreground()
+        self.draw_speech_bubbles()
         self.draw_frenzy_icon()
         self.draw_job_marker()
         self.draw_pops()
@@ -13832,8 +17940,43 @@ class Game:
                 continue
             tx = sx - b['vx'] * 0.45
             ty = sy - b['vy'] * 0.45
-            pygame.draw.line(self.screen, (255, 236, 168),
+            tracer = {'shotgun': (255, 196, 112),
+                      'smg': (214, 238, 220)}.get(b.get('kind'), (255, 236, 168))
+            pygame.draw.line(self.screen, tracer,
                              (int(tx), int(ty)), (int(sx), int(sy)), 2)
+
+    def draw_throwables(self):
+        """Hard-pixel projectiles and persistent ground fire."""
+        for zone in self.throwable_system.fire_zones():
+            sx, sy = self.camera.apply_pos(zone.center)
+            if not (-80 < sx < SCREEN_WIDTH + 80 and -80 < sy < SCREEN_HEIGHT + 80):
+                continue
+            pulse = (self.frame + zone.zone_id * 3) % 8
+            for ox, oy, size in ((-22, 4, 9), (-8, -7, 11), (8, 5, 10),
+                                 (23, -3, 8), (1, 16, 7)):
+                x, y = int(sx + ox), int(sy + oy)
+                pygame.draw.circle(self.screen, (92, 42, 30), (x, y), size)
+                pygame.draw.rect(self.screen, (232, 92, 42),
+                                 (x - 3, y - 7 - pulse // 3, 6, 9))
+                pygame.draw.rect(self.screen, (255, 202, 70),
+                                 (x - 1, y - 10 - pulse // 2, 3, 7))
+        for item in self.throwable_system.projectiles():
+            sx, sy = self.camera.apply_pos(item.position)
+            if not (-12 < sx < SCREEN_WIDTH + 12 and -12 < sy < SCREEN_HEIGHT + 12):
+                continue
+            y = int(sy - item.height)
+            x = int(sx)
+            pygame.draw.ellipse(self.screen, (26, 24, 26),
+                                (x - 4, int(sy) + 2, 9, 4))
+            if item.kind == throwable_logic.TIMED_EXPLOSIVE:
+                pygame.draw.rect(self.screen, (48, 48, 52), (x - 4, y - 3, 9, 7))
+                pygame.draw.rect(self.screen, (178, 156, 86), (x - 3, y - 2, 7, 2))
+                if (item.fuse_remaining // 6) % 2 == 0:
+                    self.screen.fill(hud_HUD_RED, (x + 3, y - 4, 2, 2))
+            else:
+                pygame.draw.rect(self.screen, (66, 110, 74), (x - 3, y - 4, 6, 9))
+                pygame.draw.rect(self.screen, (236, 228, 184), (x - 2, y - 6, 4, 3))
+                self.screen.fill((240, 124, 44), (x - 1, y - 8, 2, 3))
 
     def draw_weapon_pickups(self):
         bob = (self.frame // 8) % 2
@@ -13844,10 +17987,32 @@ class Game:
             if not (-16 < sx < SCREEN_WIDTH + 16 and -16 < sy < SCREEN_HEIGHT + 16):
                 continue
             x, y = int(sx) - 6, int(sy) - 5 - bob
+            kind = w.get('kind', 'pistol')
+            accent = {'pistol': (212, 184, 90), 'bat': (178, 124, 72),
+                      'shotgun': (188, 76, 58), 'smg': (74, 142, 118),
+                      throwable_logic.TIMED_EXPLOSIVE: (214, 164, 54),
+                      throwable_logic.FIRE_BOTTLE: (206, 74, 42)}[kind]
             self.screen.fill((26, 24, 26), (x + 1, y + 8, 12, 3))     # shadow
             self.screen.fill((58, 56, 62), (x, y, 12, 7))             # crate
             self.screen.fill((92, 90, 98), (x, y, 12, 2))
-            self.screen.fill(hud_HUD_GOLD, (x + 4, y + 2, 4, 3))      # brass
+            self.screen.fill(accent, (x + 1, y + 2, 10, 3))
+            if kind == 'bat':
+                pygame.draw.line(self.screen, (232, 208, 162),
+                                 (x + 2, y + 5), (x + 9, y), 2)
+            elif kind == 'pistol':
+                self.screen.fill((230, 222, 190), (x + 4, y + 1, 5, 2))
+                self.screen.fill((230, 222, 190), (x + 7, y + 3, 2, 3))
+            elif kind == 'shotgun':
+                self.screen.fill((226, 220, 190), (x + 1, y + 1, 10, 1))
+            elif kind == throwable_logic.TIMED_EXPLOSIVE:
+                self.screen.fill((42, 42, 46), (x + 3, y, 6, 6))
+                self.screen.fill((240, 186, 62), (x + 8, y, 2, 2))
+            elif kind == throwable_logic.FIRE_BOTTLE:
+                self.screen.fill((82, 124, 78), (x + 4, y, 5, 6))
+                self.screen.fill((238, 220, 172), (x + 5, y - 1, 3, 2))
+            else:
+                self.screen.fill((220, 226, 214), (x + 2, y + 1, 8, 2))
+                self.screen.fill((220, 226, 214), (x + 4, y + 3, 3, 2))
 
     # Each food is drawn as itself rather than as a generic crate, because
     # the whole joke only lands if you can tell a pork steak from a concrete
@@ -13986,11 +18151,16 @@ class Game:
                     and -24 < pos[1] < SCREEN_HEIGHT + 24):
                 continue
             px, py = int(pos[0]), int(pos[1])
-            ring = hud_HUD_RED if cop.alert == 'chase' else hud_HUD_GOLD
-            if cop.alert == 'chase' and (self.frame // 8) % 2 == 0:
-                ring = _blend(ring, (255, 240, 220), 0.5)
-            pygame.draw.ellipse(self.screen, ring, (px - 9, py + 3, 18, 7), 1)
-            sprite, shadow = ped_sprite(cop.kind, cop.facing, True, cop.anim)
+            if cop.down_timer <= 0:
+                ring = hud_HUD_RED if cop.alert == 'chase' else hud_HUD_GOLD
+                if cop.alert == 'chase' and (self.frame // 8) % 2 == 0:
+                    ring = _blend(ring, (255, 240, 220), 0.5)
+                pygame.draw.ellipse(self.screen, ring, (px - 9, py + 3, 18, 7), 1)
+            sprite, shadow = ped_sprite(cop.kind, cop.facing,
+                                        cop.down_timer <= 0, cop.anim)
+            if cop.down_timer > 0:
+                sprite = pygame.transform.rotate(sprite, 90)
+                shadow = pygame.transform.rotate(shadow, 90)
             rect = sprite.get_rect(center=(px, py))
             self.screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
             self.screen.blit(sprite, rect)
@@ -14001,8 +18171,18 @@ class Game:
             return
         ang = self.aim_angle()
         px, py = self.camera.apply_pos(self.player_rect.center)
-        r = PUNCH_RANGE * (0.55 + 0.45 * (8 - self.punch_timer) / 8.0)
+        info = WEAPON_DEFS.get(self.weapon, WEAPON_DEFS['fists'])
+        reach = info.get('range', PUNCH_RANGE)
+        r = reach * (0.55 + 0.45 * (8 - self.punch_timer) / 8.0)
         col = hud_HUD_WHITE if self.punch_timer > 4 else hud_HUD_GREY_DIM
+        if self.weapon == 'bat':
+            side = -0.62 + (8 - self.punch_timer) / 8.0 * 1.24
+            ex = px + math.cos(ang + side) * r
+            ey = py + math.sin(ang + side) * r
+            pygame.draw.line(self.screen, (194, 142, 84), (int(px), int(py)),
+                             (int(ex), int(ey)), 3)
+            pygame.draw.circle(self.screen, col, (int(ex), int(ey)), 2)
+            return
         for k in (-0.5, 0.0, 0.5):
             ex = px + math.cos(ang + k) * r
             ey = py + math.sin(ang + k) * r
@@ -14032,6 +18212,58 @@ class Game:
                                  (x, y, 2, 2))
             else:  # debris
                 self.screen.fill((88, 82, 74), (x, y, 2, 2))
+
+    @staticmethod
+    def _speech_lines(text, max_width=190):
+        words = str(text).split()
+        lines = []
+        current = ''
+        for word in words:
+            trial = word if not current else f"{current} {word}"
+            if current and hud_text_width(trial, 1) > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+        return lines or ['...']
+
+    def draw_speech_bubbles(self):
+        """Render active dialogue over its speaker instead of in the HUD feed."""
+        for bubble in self.speech_bubbles:
+            if not bubble['start'] <= self.frame <= bubble['end']:
+                continue
+            speaker = bubble['speaker']
+            anchor = self.active_rect().center if speaker == 'player' else speaker.rect.center
+            sx, sy = self.camera.apply_pos(anchor)
+            if not (-40 < sx < SCREEN_WIDTH + 40 and -40 < sy < SCREEN_HEIGHT + 40):
+                continue
+            label = self.speech_label(speaker)
+            lines = self._speech_lines(bubble['text'])
+            width = max([hud_text_width(label, 1)]
+                        + [hud_text_width(line, 1) for line in lines]) + 10
+            height = 10 + len(lines) * 9 + 8
+            x = max(5, min(SCREEN_WIDTH - width - 5, int(sx - width * 0.5)))
+            y = int(sy - height - 16)
+            below = y < 5
+            if below:
+                y = int(sy + 13)
+            y = max(5, min(SCREEN_HEIGHT - height - 5, y))
+
+            tip_x = max(x + 5, min(x + width - 6, int(sx)))
+            if below:
+                pointer = ((tip_x - 4, y), (tip_x + 4, y), (int(sx), int(sy) + 5))
+            else:
+                pointer = ((tip_x - 4, y + height - 1),
+                           (tip_x + 4, y + height - 1), (int(sx), int(sy) - 5))
+            pygame.draw.polygon(self.screen, (16, 16, 20), pointer)
+            pygame.draw.rect(self.screen, (16, 16, 20), (x, y, width, height))
+            pygame.draw.rect(self.screen, (118, 112, 104), (x, y, width, height), 1)
+            hud_text(self.screen, label, x + 5, y + 4, hud_HUD_GOLD, False, 1)
+            for index, line in enumerate(lines):
+                hud_text(self.screen, line, x + 5, y + 13 + index * 9,
+                         hud_HUD_WHITE, False, 1)
 
     def draw_pops(self):
         for p in self.pops:
@@ -14069,6 +18301,46 @@ class Game:
     JOB_MARKER_COLORS = ((250, 214, 78), (196, 150, 34))
     JOB_DROP_COLORS = ((110, 226, 118), (44, 146, 62))
 
+    def side_mission_marker(self):
+        mission = self.side_mission
+        if mission is None:
+            return None
+        if mission.family == mission_logic.VEHICLE_THEFT:
+            if mission.stage in ('steal', 'recover') and self.side_target_car is not None:
+                return self.side_target_car.rect.center
+            return self.side_target_pos
+        if mission.family == mission_logic.SMASH_TARGETS:
+            live = [target for target in self.smash_targets if target['hp'] > 0]
+            if not live:
+                return None
+            here = pygame.Vector2(self.active_rect().center)
+            return min(live, key=lambda item: here.distance_to(item['pos']))['pos']
+        if mission.family == mission_logic.EVADE_HEAT and mission.stage == 'reach_safehouse':
+            return self.side_target_pos
+        return None
+
+    def side_mission_hud(self):
+        mission = self.side_mission
+        if mission is None:
+            return None
+        if mission.family == mission_logic.VEHICLE_THEFT:
+            if mission.stage == 'steal':
+                sub = "STEAL THE MARKED RIDE"
+            elif mission.stage == 'recover':
+                sub = "GET BACK IN THE MARKED RIDE"
+            else:
+                sub = "DELIVER IT TO THE CHOP SHOP"
+        elif mission.family == mission_logic.SMASH_TARGETS:
+            sub = f"SMASH TARGETS {mission.progress}/{mission.target}"
+        elif mission.stage == 'break_contact':
+            sub = "BREAK POLICE CONTACT"
+        elif mission.stage == 'lay_low':
+            remain = max(0, mission.cool_steps - mission.clean_steps)
+            sub = f"STAY UNSEEN {math.ceil(remain / FPS)}S"
+        else:
+            sub = "MAKE THE SAFEHOUSE ON THE HILL"
+        return mission.name.upper(), sub, mission.steps_left
+
     def current_objective_marker(self):
         """One marker contract for world, radar and map."""
         finale_owns = (self.arch_job_unlocked and not self.arch_job_completed and
@@ -14081,6 +18353,9 @@ class Game:
             colors = (self.JOB_DROP_COLORS if self.arch_job_phase in
                       (ARCH_ESCAPE, ARCH_LAY_LOW) else self.JOB_MARKER_COLORS)
             return pos, colors[0], colors[1]
+        side = self.side_mission_marker()
+        if side is not None:
+            return side, SIDE_MISSION_MARKER_COLORS[0], SIDE_MISSION_MARKER_COLORS[1]
         if self.job is not None:
             colors = self.JOB_DROP_COLORS if self.job.collected else self.JOB_MARKER_COLORS
             return self.job.target_pos, colors[0], colors[1]
@@ -14123,19 +18398,24 @@ class Game:
 
     # ---------------- overlays ----------------
     PAUSE_LINES = (
-        ("WASD / ARROWS", "MOVE OR DRIVE"),
-        ("LSHIFT", "HANDBRAKE"),
-        ("E", "ENTER / EXIT VEHICLE"),
+        ("W / UP", "FORWARD / ACCELERATE"),
+        ("S / DOWN", "BACK UP / BRAKE"),
+        ("A D / LEFT RIGHT", "MOVE / STEER"),
+        ("LSHIFT", "SPRINT / HANDBRAKE"),
+        ("E", "CAR / ACCEPT SIDE JOB"),
         ("R", "REROLL THE RUN ON OFFER"),
-        ("SPACE / F", "PUNCH OR SHOOT"),
+        ("SPACE / F", "USE WEAPON"),
+        ("Q / WHEEL", "CYCLE WEAPON IN PLAY"),
         ("GAMEPAD", "RT GO  LT BRAKE  A CAR"),
-        ("", "LB HANDBRAKE  X HIT"),
+        ("", "LB SPRINT/BRAKE  RB WEAPON"),
+        ("", "X / B USE WEAPON"),
         ("M / TAB", "FULL CITY MAP"),
         ("F11", "FULLSCREEN"),
         ("ESC / P", "PAUSE"),
         ("F5 / F9", "SAVE / LOAD"),
         ("F2", "CRT FILTER"),
         ("F3", "DEBUG OVERLAY"),
+        ("F4", "MUSIC ON / OFF"),
         ("Q", "QUIT - FROM HERE ONLY"),
     )
 
@@ -14437,6 +18717,9 @@ class Game:
                 blip((g['x'], g['y']), GRUB_KINDS[g['kind']][3], 2)
         if self.frenzy_icon is not None:
             blip(self.frenzy_icon[:2], hud_HUD_RED, 3)
+        if self.side_mission is None and self.side_mission_cooldown <= 0:
+            contact, _name = self.side_mission_contact()
+            blip(contact, SIDE_MISSION_MARKER_COLORS[0], 3)
         marker = self.current_objective_marker()
         if marker is not None:
             pos, bright, _dark = marker
@@ -14445,6 +18728,9 @@ class Game:
         for cop in list(self.police) + list(self.foot_police):
             if not blip(cop.rect.center, hud_HUD_RED, 2):
                 chevron(cop.rect.center, hud_HUD_RED)
+        for block in self.roadblocks:
+            if not blip(block['center'], (246, 194, 52), 5):
+                chevron(block['center'], (246, 194, 52))
 
         # the player: a triangle pointed the way you are actually facing, which
         # a dot can never be, and which is most of why the old radar was hard
@@ -14464,12 +18750,36 @@ class Game:
                             [(int(x), int(y)) for x, y in pts])
         hud_draw_radar_frame(self.screen, pygame.Rect(rx, ry, RADAR_SIZE, RADAR_SIZE))
 
+    def draw_place_names(self, right):
+        """The street you are on, bottom right, and a neighbourhood title
+        across the middle for a moment after you cross a boundary."""
+        if self.street_now:
+            txt = self.street_now
+            w = hud_text_width(txt, 1)
+            x = right - w
+            y = SCREEN_HEIGHT - 16
+            pygame.draw.rect(self.screen, (12, 12, 16), (x - 4, y - 3, w + 8, 13))
+            hud_text(self.screen, txt, x, y, hud_HUD_WHITE, True, 1)
+        if self.hood_banner > 0 and self.hood_now:
+            txt = hood_name(self.hood_now)
+            fade = min(1.0, self.hood_banner / float(FPS))
+            w = hud_text_width(txt, 2)
+            x = (SCREEN_WIDTH - w) // 2
+            y = SCREEN_HEIGHT - 62
+            box = pygame.Rect(x - 8, y - 5, w + 16, 22)
+            shade = pygame.Surface(box.size, pygame.SRCALPHA)
+            shade.fill((10, 10, 14, int(190 * fade)))
+            self.screen.blit(shade, box.topleft)
+            pygame.draw.rect(self.screen, hud_HUD_GOLD, box, 1)
+            hud_text(self.screen, txt, x, y, hud_HUD_GOLD, True, 2)
+
     def draw_hud(self):
         """GTA1 arcade gauge: chunky score and cash right-aligned at the top,
         wanted stars and the radar stacked beneath on the same right edge."""
         right = SCREEN_WIDTH - 10
         ticks = pygame.time.get_ticks()
 
+        self.draw_place_names(right)
         hud_draw_score(self.screen, self.score, right, 6, 2)
         # Two numbers, because they mean different things: white is the roll
         # in your pocket, which you lose when you are killed, and gold is what
@@ -14500,17 +18810,23 @@ class Game:
         # represented anywhere on screen - no number, no bar, no engine note -
         # in a game whose entire verb is driving.
         if self.driving is not None:
+            gear = self.driving.drive_gear()
             v = abs(self.driving.velocity)
             frac = min(1.0, v / max(1.0, self.driving.base_max_speed))
             bar_y = ry + RADAR_SIZE + 5
             pygame.draw.rect(self.screen, (30, 30, 38), (rx, bar_y, RADAR_SIZE, 5))
-            col = (hud_HUD_RED if frac > 0.92
+            col = ((174, 224, 232) if gear == 'R'
+                   else hud_HUD_RED if frac > 0.92
                    else hud_HUD_GOLD if frac > 0.70 else hud_HUD_WHITE)
             pygame.draw.rect(self.screen, col,
                              (rx, bar_y, int(RADAR_SIZE * frac), 5))
-            mph = f"{int(v * HUD_MPH_PER_PX)} MPH"
+            mph = f"{gear} {int(v * HUD_MPH_PER_PX)} MPH"
             hud_text(self.screen, mph, right - hud_text_width(mph, 1),
                      bar_y + 7, hud_HUD_GREY_DIM, True, 1)
+            if self.driving.puncture_steps > 0:
+                tires = f"TIRES {math.ceil(self.driving.puncture_steps / FPS)}S"
+                hud_text(self.screen, tires, right - hud_text_width(tires, 1),
+                         bar_y + 16, hud_HUD_RED, True, 1)
 
         # chaos multiplier + its progress bar, under the speedo
         cy0 = ry + RADAR_SIZE + 26
@@ -14550,14 +18866,22 @@ class Game:
                     else hud_HUD_GOLD if hp_frac > 0.25 else hud_HUD_RED)
             pygame.draw.rect(self.screen, hcol, (12, by, int(78 * max(0.0, hp_frac)), 4))
             hud_text(self.screen, hlabel, 12, by - 10, hud_HUD_GREY_DIM, True, 1)
+            if self.driving is None:
+                stamina = max(0.0, min(1.0, self.player_stamina / PLAYER_STAMINA_MAX))
+                pygame.draw.rect(self.screen, (30, 30, 38), (100, by, 64, 4))
+                scol = hud_HUD_GOLD if self.sprint_ready else hud_HUD_GREY_DIM
+                pygame.draw.rect(self.screen, scol, (100, by, int(64 * stamina), 4))
+                hud_text(self.screen, "SPRINT", 100, by - 10,
+                         hud_HUD_GREY_DIM, True, 1)
 
         # mode + weapon readout, bottom left
         mode = "DRIVING" if self.driving else "ON FOOT"
         hud_text(self.screen, mode, 12, SCREEN_HEIGHT - 18, hud_HUD_GOLD, True, 1)
-        arm = f"PISTOL {self.ammo}" if self.weapon == 'pistol' and self.ammo > 0 else "FISTS"
+        info = WEAPON_DEFS.get(self.weapon, WEAPON_DEFS['fists'])
+        arm = info['label'] if info.get('melee') else f"{info['label']} {self.ammo}"
         hud_text(self.screen, arm, 12 + hud_text_width(mode, 1) + 12,
                  SCREEN_HEIGHT - 18,
-                 hud_HUD_WHITE if self.weapon == 'pistol' else hud_HUD_GREY_DIM, True, 1)
+                 hud_HUD_WHITE if self.weapon != 'fists' else hud_HUD_GREY_DIM, True, 1)
 
         # toasts stack above the mode readout
         for i, toast in enumerate(reversed(self.toasts[-3:])):
@@ -14599,13 +18923,38 @@ class Game:
                          hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
             return 8 + ph
 
+        side_text = self.side_mission_hud()
+        if side_text is not None:
+            head, sub, steps_left = side_text
+            head = self._fit_menu_text(head, 254)
+            sub = self._fit_menu_text(sub, 254)
+            clock_gutter = hud_text_width("000", 1) + 8
+            pw = min(286, max(hud_text_width(head, 1) + clock_gutter,
+                              hud_text_width(sub, 1)) + 16)
+            hud_draw_panel(self.screen, pygame.Rect(8, 8, pw, 40), alpha=218)
+            hud_text(self.screen, head, 15, 13,
+                     SIDE_MISSION_MARKER_COLORS[0], True, 1)
+            hud_text(self.screen, sub, 15, 24, hud_HUD_WHITE, True, 1)
+            frac = steps_left / float(max(1, self.side_mission.time_limit_steps))
+            bw = pw - 16
+            pygame.draw.rect(self.screen, (30, 30, 38), (15, 34, bw, 4))
+            pygame.draw.rect(self.screen,
+                             hud_HUD_RED if frac < 0.25 else SIDE_MISSION_MARKER_COLORS[0],
+                             (15, 34, int(bw * max(0.0, min(1.0, frac))), 4))
+            secs = str(int(math.ceil(steps_left / float(FPS))))
+            hud_text(self.screen, secs,
+                     8 + pw - hud_text_width(secs, 1) - 7, 13,
+                     hud_HUD_RED if frac < 0.25 else hud_HUD_WHITE, True, 1)
+            return 48
+
         if self.job is None:
             return 8
         job = self.job
         verb = "DELIVER TO" if job.collected else "PICK UP AT"
         col = hud_HUD_GREEN if job.collected else hud_HUD_GOLD
         head = f"{verb} {job.target_name}"
-        sub = job.cargo if job.collected else f"PAYS ${job.base_reward}"
+        sub = (f"{job.label}: {job.cargo}" if job.collected
+               else f"{job.label}  PAYS ${job.base_reward}")
 
         # The countdown is drawn right-aligned on the headline row, so the
         # panel has to reserve a gutter for it or a long landmark name runs
@@ -14698,6 +19047,7 @@ class Game:
             elapsed = self.clock.tick(FPS) / 1000.0
             self.fps_now = self.clock.get_fps()
             self.handle_events()
+            self.sync_soundtrack()
             if not self.running:
                 break
             if self.should_advance_sim():
@@ -14707,6 +19057,8 @@ class Game:
                 self.sim_steps = 0
             self.draw()
 
+        if self.music_started and pygame.mixer.get_init() is not None:
+            pygame.mixer.music.stop()
         pygame.quit()
 
     # ---------------- headless ----------------
@@ -14769,6 +19121,40 @@ class Game:
             if not (0 <= cop.rect.centerx <= MAP_WIDTH
                     and 0 <= cop.rect.centery <= MAP_HEIGHT):
                 return f"foot cop left the map at {cop.rect.center}"
+        roadblock_quota = ROADBLOCK_COUNT_BY_STAR[self.wanted_level]
+        if len(self.roadblocks) > roadblock_quota:
+            return (f"roadblock count {len(self.roadblocks)} exceeds "
+                    f"{roadblock_quota} for {self.wanted_level} stars")
+        for block in self.roadblocks:
+            col = block['center'][0] // TILE_SIZE
+            row = block['center'][1] // TILE_SIZE
+            if tile_type_at(col, row) != TILE_ROAD or is_blocked(block['strip']):
+                return f"roadblock left road geometry at {block['center']}"
+            if len(block['cars']) != 2 or any(is_blocked(car.rect) for car in block['cars']):
+                return f"roadblock has illegal cruiser footprint at {block['center']}"
+        for train in (vehicle for vehicle in self.rail
+                      if vehicle.kind == 'metrolink'):
+            if not 0.0 <= train.s <= train.length:
+                return f"MetroLink left its track bounds at s={train.s:.1f}"
+            # The body must stay on reserved rail. Sample the centre line
+            # rather than the corners: a train is longer than the 64px tile
+            # it turns through, so on a corner its bounding box legitimately
+            # overhangs the block on the inside of the curve.
+            for ahead in (-train.w * 0.4, 0.0, train.w * 0.4):
+                col = max(0, min(MAP_TILES_W - 1,
+                                 int(train.x + train.dx * ahead) // TILE_SIZE))
+                row = max(0, min(MAP_TILES_H - 1,
+                                 int(train.y + train.dy * ahead) // TILE_SIZE))
+                tile = GAME_MAP[row][col]
+                if tile['collidable'] or tile.get('rail') != 'metrolink':
+                    return f"MetroLink left reserved rail at {col},{row}"
+        for crossing in self.rail_crossings:
+            if not 0.0 <= crossing.arm <= 1.0:
+                return f"rail gate arm out of range at column {crossing.col}"
+            tile = GAME_MAP[crossing.row][crossing.col]
+            if tile['type'] != TILE_ROAD or not tile.get('rail_crossing'):
+                return (f"rail crossing lost road geometry at "
+                        f"{crossing.col},{crossing.row}")
         if self.cash < 0:
             return f"negative cash: {self.cash}"
         if self.score < 0:
@@ -14777,6 +19163,13 @@ class Game:
             return f"multiplier out of range: {self.multiplier}"
         if not finite(self.player_hp) or self.player_hp > PLAYER_MAX_HP + 0.5:
             return f"player hp out of range: {self.player_hp}"
+        if (not finite(self.player_stamina)
+                or not 0 <= self.player_stamina <= PLAYER_STAMINA_MAX + 0.5):
+            return f"player stamina out of range: {self.player_stamina}"
+        if self.weapon not in WEAPON_DEFS or self.weapon not in self.owned_weapons:
+            return f"invalid selected weapon: {self.weapon}"
+        if self.ammo < 0:
+            return f"negative ammo: {self.ammo}"
         if self.frenzy is not None and self.frenzy.steps_left < 0:
             return "frenzy timer went negative"
         valid_arch = {ARCH_LOCKED, ARCH_READY, ARCH_CUTTER, ARCH_RETURN,
@@ -14799,6 +19192,9 @@ class Game:
             if not (-TILE_SIZE <= car.rect.centerx <= MAP_WIDTH + TILE_SIZE
                     and -TILE_SIZE <= car.rect.centery <= MAP_HEIGHT + TILE_SIZE):
                 return f"car left the map at {car.rect.center}"
+        for cop in self.foot_police:
+            if not finite(cop.fx, cop.fy, cop.hp) or not 0 < cop.hp <= COP_FOOT_HP:
+                return f"foot cop state invalid: {cop.hp} at {cop.rect.center}"
         if self.job is not None and self.job.collected and self.job.steps_left < 0:
             return "job timer went negative"
         if self.driving is not None and self.driving.driver != 'player':

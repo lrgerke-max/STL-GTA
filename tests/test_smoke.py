@@ -15,6 +15,7 @@ import os
 import random
 import sys
 import tempfile
+import wave
 from unittest.mock import patch
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -57,6 +58,14 @@ def reset(g):
     g.jobs_failed = 0
     g.job_cooldown = 0
     g.job = M.Job.generate()
+    g.side_mission = None
+    g.side_mission_serial = 0
+    g.side_mission_cooldown = 0
+    g.side_target_car = None
+    g.side_target_pos = None
+    g.smash_targets = []
+    g.side_missions_done = 0
+    g.side_missions_failed = 0
     g.arch_job_unlocked = False
     g.arch_job_completed = False
     g.arch_job_phase = M.ARCH_LOCKED
@@ -71,6 +80,7 @@ def reset(g):
     g.death_stats = None
     g.cop_dispatch = 0
     g.foot_police = []
+    g.foot_cop_respawn = 0
     g.crime_pos = None
     g.crime_frame = -10 ** 9
     g.peak_star = 0
@@ -81,6 +91,9 @@ def reset(g):
     g.searching = False
     g.hidden = False
     g.hide_timer = 0
+    g.hs_cooldown = 0
+    g.chatter_cooldown = 0
+    g.speech_bubbles = []
     g.hurt_cd = 0
     g.grub_until = {}
     for _g in g.grub_pickups:
@@ -100,11 +113,20 @@ def reset(g):
     g.fx = []
     g.pops = []
     g.callouts = []
+    g.toasts = []
     g.decals = []
     g.player_hp = M.PLAYER_MAX_HP
+    g.player_stamina = M.PLAYER_STAMINA_MAX
+    g.sprinting = False
+    g.sprint_active = False
+    g.sprint_ready = True
     g.weapon = 'fists'
     g.ammo = 0
+    g.weapon_ammo = {kind: 0 for kind in M.WEAPON_ORDER}
+    g.owned_weapons = {'fists'}
+    g.throwable_system = M.throwable_logic.ThrowableSystem()
     g.attack_cd = 0
+    g.attack_held = False
     g.punch_timer = 0
     g.bullets = []
     if hasattr(g, 'player_motion'):
@@ -220,6 +242,47 @@ def test_job_pairs_are_far_apart_and_reachable():
             assert not M.is_blocked(probe), f"{job.target_name} marker is inside geometry"
 
 
+def test_job_cards_change_the_route_in_more_than_name_only():
+    a, b = M.LANDMARKS[0], M.LANDMARKS[8]
+    courier = M.Job(a, b, kind='courier')
+    rush = M.Job(a, b, kind='rush')
+    hot = M.Job(a, b, kind='hot')
+    heavy = M.Job(a, b, kind='heavy')
+    assert rush.time_limit < courier.time_limit < heavy.time_limit
+    assert rush.base_reward > courier.base_reward
+    assert hot.base_reward > courier.base_reward
+    assert heavy.base_reward > courier.base_reward
+    assert len({j.label for j in (courier, rush, hot, heavy)}) == 4
+
+
+def test_job_dealer_does_not_repeat_either_recent_card():
+    g = game()
+    g.recent_job_kinds = []
+    dealt = [g.deal_job().kind for _ in range(12)]
+    for i, kind in enumerate(dealt):
+        assert kind not in dealt[max(0, i - 2):i], dealt
+
+
+def test_hot_load_starts_a_chase_and_heavy_haul_has_weight():
+    g = game()
+    a, b = M.LANDMARKS[0], M.LANDMARKS[8]
+    g.job = M.Job(a, b, kind='hot')
+    teleport(g, g.job.pickup_pos)
+    g.update_job()
+    assert g.job.collected and g.wanted_level == 2
+
+    g.wanted_level = 0
+    g.police = []
+    g.job = M.Job(a, b, kind='heavy')
+    teleport(g, g.job.pickup_pos)
+    g.update_job()
+    car = _drive(g)
+    baseline = car.base_max_speed
+    g.apply_grub_to_car()
+    assert car.max_speed < baseline, "the heavy haul does not change handling"
+    g.driving = None
+
+
 def test_full_delivery_pays_out_and_streaks():
     g = game()
     start_cash = g.cash
@@ -306,13 +369,13 @@ def test_cops_spawn_within_reach_of_the_player():
         assert d <= M.COP_SPAWN_MAX + M.TILE_SIZE, d
 
 
-def test_single_frame_of_contact_does_not_bust_you():
+def test_a_cruiser_cannot_handcuff_an_on_foot_player():
     g = game()
     dispatch_cops(g, 2)
     g.police[0].rect.center = g.player_rect.center
     g.update_police()
-    assert g.state == M.STATE_PLAYING, "one touch must not be an instant bust"
-    assert g.bust_meter > 0
+    assert g.state == M.STATE_PLAYING
+    assert g.bust_meter == 0, "cruiser contact counted as an on-foot arrest"
 
 
 def test_sustained_contact_does_bust_you():
@@ -780,6 +843,30 @@ def test_frenzy_icon_is_reachable_and_counts_down():
     assert g.frenzy.steps_left == left - 1
 
 
+def test_cop_frenzy_spawns_and_counts_foot_officers_and_cruisers():
+    g = game()
+    g.frame = 14  # (frame // 7) % 3 selects the cop frenzy.
+    g.frenzy_icon = None
+    g.spawn_frenzy_icon()
+    assert g.frenzy_icon is not None and g.frenzy_icon[2] == 'cop'
+    assert M.COP_FOOT_BY_STAR[4] > 0 and M.COP_FOOT_BY_STAR[5] > 0
+
+    g.frenzy = M.Frenzy('cop')
+    g.frenzy.remaining = 2
+    foot = M.FootCop(g.player_rect.centerx + 40, g.player_rect.centery)
+    g.foot_police = [foot]
+    g.kill_foot_cop(foot, cause='test')
+    assert g.frenzy is not None and g.frenzy.remaining == 1
+
+    cruiser = M.Car(g.player_rect.centerx + 80, g.player_rect.centery,
+                    color=M.POLICE_COLOR, variant='police')
+    cruiser.driver = 'police'
+    g.police = [cruiser]
+    g.explode(cruiser)
+    assert g.frenzy is None, "destroying a cruiser should complete the cop frenzy"
+    assert any('FRENZY DONE' in callout['text'] for callout in g.callouts)
+
+
 def test_camera_shake_is_zero_at_rest():
     """Shake must not perturb the world when nothing has hit - the camera-pan
     flicker test depends on a still frame being still."""
@@ -1010,10 +1097,15 @@ def test_traffic_pulls_out_around_a_car_parked_in_its_lane():
         "parked cars must not be parked in the driving lane")
     g = game()
     row = sorted(M.ROAD_LINES)[6]
-    y = row * M.TILE_SIZE + M.TILE_SIZE // 2
     lane = M.traffic__lane_coord(0, row)
-    mover = M.Car(6 * M.TILE_SIZE, int(lane), variant='sedan')
-    mover.rect.center = (6 * M.TILE_SIZE, int(lane))
+    # Start mid-block on the longest clear span. The grid is irregular now, so
+    # "col 6" is no longer guaranteed to have room to complete a pass before
+    # the next junction, and a car that turns first never overtakes anything.
+    lines = sorted(M.ROAD_LINES)
+    a, b = max(zip(lines, lines[1:]), key=lambda pair: pair[1] - pair[0])
+    start_col = a + 1
+    mover = M.Car(start_col * M.TILE_SIZE, int(lane), variant='sedan')
+    mover.rect.center = (start_col * M.TILE_SIZE, int(lane))
     mover.angle = 0.0
     mover.driver = None
     mover.parked = False
@@ -1027,6 +1119,8 @@ def test_traffic_pulls_out_around_a_car_parked_in_its_lane():
     x0 = mover.rect.centerx
     for _ in range(420):
         M.traffic_drive(mover, (mover, blocker))
+        if mover.rect.centerx > blocker.rect.centerx + 40:
+            break            # it passed; where it goes afterwards is its own business
     assert mover.rect.centerx > blocker.rect.centerx + 40, (
         f"traffic queued behind a parked car instead of passing it: "
         f"moved {mover.rect.centerx - x0}px")
@@ -1103,6 +1197,92 @@ def test_pistol_pickup_arms_you_and_bullets_kill():
         g.update_bullets()
     assert victim not in g.pedestrians, "the bullet should have killed them"
     assert len(g.pedestrians) == n_before
+
+
+def _spawn_foot_cop(g):
+    g.wanted_level = 1
+    g.foot_cop_respawn = 0
+    g.update_police()
+    assert g.foot_police
+    return g.foot_police[0]
+
+
+def test_foot_cops_can_be_hit_killed_and_stay_gone_for_reinforcement_delay():
+    g = game()
+    cop = _spawn_foot_cop(g)
+    cop.rect.center = (g.player_rect.centerx + 20, g.player_rect.centery)
+    cop.fx, cop.fy = map(float, cop.rect.center)
+    g.player_aim = 0.0
+    g.weapon = 'bat'
+    g.owned_weapons.add('bat')
+    g.player_attack()
+    assert cop not in g.foot_police, "baseball bat left the beat cop invulnerable"
+    assert g.foot_cop_respawn == M.COP_FOOT_RESPAWN
+    assert g.wanted_level >= 3
+    g.update_foot_police(3, g.player_rect, g.player_rect.center)
+    assert not g.foot_police, "dead officer was replaced immediately"
+
+
+def test_pistol_rounds_damage_foot_cops_and_interrupt_an_arrest():
+    g = game()
+    cop = _spawn_foot_cop(g)
+    cop.rect.center = (g.player_rect.centerx + 25, g.player_rect.centery)
+    cop.fx, cop.fy = map(float, cop.rect.center)
+    g.bust_meter = M.BUST_CONTACT_STEPS // 2
+    g.weapon = 'pistol'
+    g.owned_weapons.add('pistol')
+    g.ammo = 2
+    g.weapon_ammo['pistol'] = 2
+    g.player_aim = 0.0
+    g.player_attack()
+    for _ in range(3):
+        g.update_bullets()
+    assert cop.hp < M.COP_FOOT_HP
+    assert cop.down_timer > 0
+    assert g.bust_meter < M.BUST_CONTACT_STEPS // 2
+
+
+def test_a_fast_car_splatters_a_foot_cop():
+    g = game()
+    cop = _spawn_foot_cop(g)
+    car = _drive(g)
+    car.velocity = M.SPLAT_SPEED + 1.0
+    cop.rect.center = car.rect.center
+    cop.fx, cop.fy = map(float, cop.rect.center)
+    g.handle_collisions()
+    assert cop not in g.foot_police
+
+
+def test_sprint_is_faster_than_a_beat_cop_but_has_a_stamina_budget():
+    g = game()
+    road_row = sorted(M.ROAD_LINES)[1]      # row 4 is no longer a street
+    teleport(g, (10 * M.TILE_SIZE + 32, road_row * M.TILE_SIZE + 32))
+    g.sync_player_float()
+    g.player_dir = [1.0, 0.0]
+    g.sprinting = True
+    start = g.player_rect.centerx
+    for _ in range(M.FPS * 2):
+        g.move_player_on_foot()
+    assert g.player_rect.centerx - start > M.PLAYER_SPEED * M.FPS * 2
+    assert g.player_stamina < M.PLAYER_STAMINA_MAX
+    assert M.PLAYER_SPRINT_SPEED > M.COP_FOOT_BURST_SPEED
+    assert M.COP_FOOT_SEARCH_SPEED < M.PLAYER_SPEED
+
+
+def test_weapon_pickups_cover_the_full_arsenal_and_shotgun_has_a_spread():
+    g = game()
+    assert {w['kind'] for w in g.weapon_pickups} == set(M.WEAPON_PICKUP_KINDS)
+    g.owned_weapons.update(M.WEAPON_ORDER)
+    g.weapon_ammo.update({'pistol': 5, 'shotgun': 3, 'smg': 12})
+    g.weapon = 'shotgun'
+    g.ammo = 3
+    g.player_attack()
+    assert len(g.bullets) == M.WEAPON_DEFS['shotgun']['pellets']
+    assert g.ammo == 2
+    angles = {round(math.atan2(b['vy'], b['vx']), 2) for b in g.bullets}
+    assert len(angles) > 1
+    g.cycle_weapon()
+    assert g.weapon == 'smg'
 
 
 def test_ramming_a_car_actually_moves_it():
@@ -1183,8 +1363,18 @@ def test_busch_fans_and_south_city_hoosiers_are_local_flavor():
     with patch.object(M.random, "random", return_value=0.0), \
             patch.object(M.random, "randrange", return_value=2):
         assert M.Game._ped_kind_for(bx, by) == "cards_fan#2"
+        # St. Louis Hills puts south siders on the street
         assert M.Game._ped_kind_for(10 * M.TILE_SIZE, 90 * M.TILE_SIZE) == "hoosier#2"
-        assert M.Game._ped_kind_for(68 * M.TILE_SIZE, 30 * M.TILE_SIZE) is None
+        # ... and a neighbourhood with no bias entry still gets the generic mix
+        plain = next(c for c, r in ((34, 30), (12, 5), (2, 50))
+                     if M.hood_at(c, r) not in M.Game.HOOD_PED_BIAS)
+        row = next(r for c, r in ((34, 30), (12, 5), (2, 50)) if c == plain)
+        assert M.Game._ped_kind_for(plain * M.TILE_SIZE, row * M.TILE_SIZE) is None
+    # every biased hood names a body the archetype table actually has
+    for pairs in M.Game.HOOD_PED_BIAS.values():
+        for kind, chance in pairs:
+            assert kind in M.peds_ARCHETYPES, kind
+            assert 0.0 < chance <= 1.0
     assert M.peds_ARCHETYPES["cards_fan"]["w"] == 0
     assert M.peds_ARCHETYPES["hoosier"]["w"] == 0
     assert "mullet" in M.peds__resolve("hoosier#0")["acc"]
@@ -1206,6 +1396,25 @@ def test_the_rare_black_trans_am_has_its_own_art_and_handling():
               for x in range(frames[0].get_width())}
     assert M.cars_TRANS_AM_BODY in colors
     assert M.cars_TRANS_AM_GOLD in colors
+
+
+def test_local_showcase_vehicles_are_unique_stealable_destinations():
+    g = M.Game(start_fullscreen=False)
+    by_name = {entry[5]: entry for entry in M.LANDMARKS}
+    assert len(g.cars) == M.PARKED_CAR_COUNT + M.MOVING_CAR_COUNT
+    for variant, venue in M.SHOWCASE_VEHICLES:
+        found = [car for car in g.cars if car.variant == variant]
+        assert len(found) == 1, f"expected one {variant}, got {len(found)}"
+        car = found[0]
+        assert car.parked and car.driver is None
+        assert not M.is_blocked(car.rect)
+        target = M.landmark_dropoff_point(by_name[venue])
+        assert math.hypot(car.rect.centerx - target[0],
+                          car.rect.centery - target[1]) <= M.TILE_SIZE * 4
+        for color in M.CAR_COLORS:
+            assert (variant, color) in M.CAR_SPRITES
+    assert M.VEHICLE_TUNING['mudfoot']['speed_factor'] > 1.0
+    assert M.VEHICLE_TUNING['grocery_cart']['speed_factor'] < 0.8
 
 
 def test_route_70_metrobus_is_a_moving_fixed_livery():
@@ -1267,7 +1476,8 @@ def test_gamepad_is_optional_and_never_crashes_without_one():
 
 
 def test_gamepad_buttons_map_onto_real_keys():
-    keys = {M.pygame.K_e, M.pygame.K_SPACE, M.pygame.K_m, M.pygame.K_ESCAPE}
+    keys = {M.pygame.K_e, M.pygame.K_SPACE, M.pygame.K_m,
+            M.pygame.K_ESCAPE, M.pygame.K_q}
     assert set(M.PAD_BUTTON_KEYS.values()) <= keys
     for essential in (M.PAD_A, M.PAD_X, M.PAD_START):
         assert essential in M.PAD_BUTTON_KEYS
@@ -1309,8 +1519,10 @@ def test_neighbourhoods_pick_their_own_character():
     """The Hill should read Italian, the Loop should read Loop - the whole
     point of the hood table is that blocks are not interchangeable."""
     def signs(col, row):
-        return {M.hood_pick_sign(col, row, M._noise(col, row, 71) + i * 7)[0]
-                for i in range(40)}
+        # Sample across the whole pool. Feeding n a small stride only moves the
+        # low bits, and hood_pick_sign shifts them off - so the old version
+        # sampled three signs out of eleven and called it a survey.
+        return {M.hood_pick_sign(col, row, i << 7)[0] for i in range(64)}
 
     hill = signs(30, 62)
     loop = signs(12, 17)
@@ -1322,7 +1534,7 @@ def test_neighbourhoods_pick_their_own_character():
     for style in ('shotgun', 'gable_brick', 'mansard', 'painted_lady', 'flat_front'):
         assert any(style in pool for pool in M.HOOD_HOUSES.values())
     assert M.HOOD_HOUSES['hill'].count('flat_front') >= 2
-    assert M.HOOD_HOUSES['south'].count('flat_front') >= 2
+    assert M.HOOD_HOUSES['bevo'].count('flat_front') >= 2
     hill_frontages = {M.facade_is_storefront('The Hill', kind) for kind in range(1, 10)}
     assert hill_frontages == {False, True}, "The Hill should be mixed-use, not wall-to-wall shops"
 
@@ -1332,12 +1544,15 @@ def test_south_city_yards_have_local_micro_landmarks_only():
     expected = {'chainlink', 'above_pool', 'tub_madonna',
                 'backyard_bbq', 'clothesline'}
     seen = set()
+    yard_hood = sorted(M.props_YARD_HOODS)[0]
     for r in range(M.MAP_TILES_H):
         for c in range(M.MAP_TILES_W):
-            items = M.props_props_for_tile(c, r, M.TILE_PLAZA, False, 'south')
+            items = M.props_props_for_tile(c, r, M.TILE_PLAZA, False, yard_hood)
             seen.update(name for name, _x, _y in items)
             assert not M.props_props_for_tile(c, r, M.TILE_PLAZA, False, 'downtown')
     assert expected <= seen, seen
+    # the eligible list must name hoods that actually exist
+    assert M.props_YARD_HOODS <= set(M.HOOD_SIGNS), M.props_YARD_HOODS - set(M.HOOD_SIGNS)
     M.props_bake()
     assert set(M.props_PROPS) == set(M.props__BUILDERS) == set(M.props__ANCHORS)
     for name in expected:
@@ -1346,19 +1561,24 @@ def test_south_city_yards_have_local_micro_landmarks_only():
         assert sprite.get_bounding_rect().width > 0
         assert M.props_get_shadow(name).get_size() == sprite.get_size()
 
-    # More importantly, each joke must occur in the actual generated Hill,
-    # not just somewhere in a theoretical coordinate scan.
-    actual_hill = set()
+    # More importantly, each joke must occur in the actual generated south
+    # side, not just somewhere in a theoretical coordinate scan. Landmark
+    # tiles with hand-made art are skipped because draw_props skips them too.
+    actual = set()
     for r, row in enumerate(M.GAME_MAP):
         for c, tile in enumerate(row):
-            if M.hood_at(c, r) != 'hill' or tile['type'] != M.TILE_PLAZA:
+            hood = M.hood_at(c, r)
+            if hood not in M.props_YARD_HOODS or tile['type'] != M.TILE_PLAZA:
+                continue
+            owner = tile['landmark']
+            if owner is not None and M.lm_has_art(M.landmark_owner(owner)):
                 continue
             kerbside = any(M.tile_type_at(c + dc, r + dr) == M.TILE_ROAD
                            for dc, dr in ((-1, 0), (1, 0), (0, -1), (0, 1)))
             if not kerbside:
-                actual_hill.update(name for name, _x, _y in
-                                   M.props_props_for_tile(c, r, tile['type'], False, 'hill'))
-    assert expected <= actual_hill, actual_hill
+                actual.update(name for name, _x, _y in
+                              M.props_props_for_tile(c, r, tile['type'], False, hood))
+    assert expected <= actual, actual
 
 
 def test_the_fox_is_in_grand_center_and_nowhere_else():
@@ -1373,8 +1593,8 @@ def test_the_fox_is_in_grand_center_and_nowhere_else():
             assert hood == 'grove', f"the Grove is hanging in {hood}"
     assert M.hood_at(12, 17) == 'loop'
     assert M.hood_at(56, 34) == 'grand'
-    assert M.hood_at(80, 12) == 'north', "north city is not downtown"
-    assert M.hood_at(20, 84) == 'south', "St Louis Hills is not The Hill"
+    assert M.hood_at(80, 12) == 'oldnorth', "north city is not downtown"
+    assert M.hood_at(20, 84) == 'sthills', "St Louis Hills is not The Hill"
 
 
 def test_every_hood_has_signs_and_houses():
@@ -1387,6 +1607,29 @@ def test_every_hood_has_signs_and_houses():
             for c in range(0, M.MAP_TILES_W, 3)}
     for hood in seen:
         assert hood in M.HOOD_SIGNS, f"hood_at returns {hood!r} with no signs"
+
+
+def test_generated_building_atlas_supplies_every_neighbourhood():
+    game()  # Game.__init__ slices the checked-in alpha atlas.
+    assert all(os.path.exists(path) for path in M.BUILDING_ATLAS_PATHS)
+    seen = {M.hood_at(c, r)
+            for r in range(0, M.MAP_TILES_H, 3)
+            for c in range(0, M.MAP_TILES_W, 3)}
+    for hood in seen:
+        sprites = M.NEIGHBORHOOD_BUILDING_SPRITES.get(hood)
+        assert sprites, f"generated atlas has no {hood} building"
+        assert len(sprites) >= 2, f"{hood} has no alternate generated building"
+        for sprite in sprites:
+            assert sprite.get_size() == (M.BUILDING_ATLAS_CELL_SIZE,
+                                         M.BUILDING_ATLAS_CELL_SIZE)
+            assert sprite.get_flags() & pygame.SRCALPHA
+            assert sprite.get_bounding_rect(min_alpha=1).width > 8
+            colors = {tuple(sprite.get_at((x, y)))
+                      for y in range(sprite.get_height())
+                      for x in range(sprite.get_width())}
+            assert {color[3] for color in colors} <= {0, 255}, "no antialiased alpha"
+            assert len(colors) <= 32, "native facade palette became too high-detail"
+    assert M.HOOD_BRICKS['cwe'] != M.HOOD_BRICKS['soulard']
 
 
 def test_ted_drewes_is_its_own_landmark_you_can_walk_up_to():
@@ -1436,6 +1679,35 @@ def test_the_arch_lets_you_walk_under_the_span():
     row = sorted({sy for _, sy in solid})[0]
     for sx in range(min(cols) + 1, max(cols)):
         assert not M.GAME_MAP[ly + row][lx + sx]['collidable']
+
+
+def test_the_arch_has_a_transparent_actor_occlusion_pass():
+    """The collision was open but actors drew over the steel, visually walking
+    on top of the Arch.  The foreground pass must contain only sparse steel."""
+    arch = next(e for e in M.LANDMARKS if e[5] == "Gateway Arch")
+    art = M.lm__bake_arch_foreground(arch[2] * M.TILE_SIZE,
+                                      arch[3] * M.TILE_SIZE)
+    opaque = sum(1 for y in range(art.get_height()) for x in range(art.get_width())
+                 if art.get_at((x, y)).a)
+    assert opaque > 100, "the raised steel pass is empty"
+    assert opaque < art.get_width() * art.get_height() // 8, (
+        "the foreground pass covers the lawn instead of just the Arch")
+
+
+def test_market_street_and_downtown_cross_streets_fit_a_car():
+    """Downtown landmarks must occupy blocks, not erase the street graph."""
+    def clear_at(col, row):
+        rect = pygame.Rect(0, 0, M.VEHICLE_DEFAULT_W, M.VEHICLE_DEFAULT_H)
+        rect.center = (col * M.TILE_SIZE + M.TILE_SIZE // 2,
+                       row * M.TILE_SIZE + M.TILE_SIZE // 2)
+        return not M.is_blocked(rect)
+
+    for row in (43, 50):
+        assert all(clear_at(col, row) for col in range(52, 82)), (
+            f"downtown east/west street {row} is not continuous")
+    for col in (57, 63, 68, 73, 79):
+        assert all(clear_at(col, row) for row in range(42, 58)), (
+            f"downtown cross street {col} is blocked")
 
 
 def test_the_police_station_is_not_inside_a_landmark():
@@ -1770,7 +2042,8 @@ def test_one_star_is_a_beat_cop_on_foot_not_a_cruiser():
             break
     assert g.foot_police, "no beat cop ever turned up for one star"
     assert not g.police, "one star must not put a cruiser on the street"
-    assert M.COP_FOOT_SPEED > M.PLAYER_SPEED, "he has to be able to catch you"
+    assert M.COP_FOOT_SPEED > M.PLAYER_SPEED, "walking should still lose ground"
+    assert M.COP_FOOT_SPEED < M.PLAYER_SPRINT_SPEED, "sprinting must open a gap"
     assert M.COP_FOOT_SPEED < M.COP_SPEED_BY_STAR[2], "but not like a car"
 
 
@@ -2387,6 +2660,26 @@ def test_sound_calls_are_harmless_with_no_mixer():
     assert g.check_invariants() is None
 
 
+def test_packaged_soundtrack_is_a_valid_standard_midi():
+    assert os.path.isfile(M.GAME_MUSIC_SOURCE_PATH)
+    with open(M.GAME_MUSIC_SOURCE_PATH, 'rb') as fh:
+        data = fh.read()
+    assert data[:4] == b'MThd'
+    assert int.from_bytes(data[4:8], 'big') == 6
+    assert b'MTrk' in data
+    assert len(data) > 1024
+    assert 0.0 < M.GAME_MUSIC_VOLUME < 1.0
+
+
+def test_rendered_chiptune_is_long_streamable_pcm():
+    assert os.path.isfile(M.GAME_MUSIC_PATH)
+    with wave.open(M.GAME_MUSIC_PATH, 'rb') as soundtrack:
+        assert soundtrack.getframerate() == M.snd_SR
+        assert soundtrack.getnchannels() == 1
+        assert soundtrack.getsampwidth() == 2
+        assert soundtrack.getnframes() / soundtrack.getframerate() >= 180.0
+
+
 def test_rate_limiting_stops_a_wall_scrape_becoming_a_drone():
     M.snd__last_played.clear()
     M.snd_set_frame(0)
@@ -2565,6 +2858,25 @@ def test_somebody_asks_where_you_went_to_high_school():
         assert M.hud_text_width(text, 1) > 0, text
 
 
+def test_ambient_stl_conversations_are_tagged_and_pause_during_chases():
+    g = game()
+    ped, partner = g.pedestrians[:2]
+    ped.rect.center = (20 * M.TILE_SIZE, 84 * M.TILE_SIZE)
+    partner.rect.center = (ped.rect.centerx + 20, ped.rect.centery)
+    g.chatter_cooldown = 0
+    assert g.maybe_start_stl_conversation(ped, partner, forced=True)
+    assert len(g.speech_bubbles) >= 2
+    assert g.speech_bubbles[0]['speaker'] is ped
+    assert g.speech_bubbles[1]['speaker'] is partner
+    assert ped.mood == partner.mood == 'gawk'
+
+    g.chatter_cooldown = 0
+    g.wanted_level = 1
+    before = len(g.speech_bubbles)
+    assert not g.maybe_start_stl_conversation(ped, partner, forced=True)
+    assert len(g.speech_bubbles) == before
+
+
 def test_character_creator_has_the_whole_local_school_question():
     names = [name for name, _group in M.STL_HIGH_SCHOOLS]
     assert len(names) >= 150, "the selector is a sample, not the promised metro-area list"
@@ -2611,7 +2923,7 @@ def test_school_combobox_types_filters_and_selects():
     assert g.character_school == "St. Louis University High School"
 
 
-def test_character_profile_and_arch_progress_round_trip_in_v4_save():
+def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
     g = game()
     old_cwd = os.getcwd()
     with tempfile.TemporaryDirectory() as td:
@@ -2619,24 +2931,47 @@ def test_character_profile_and_arch_progress_round_trip_in_v4_save():
             os.chdir(td)
             g.character_look = len(M.CHARACTER_LOOKS) - 1
             g.character_school = "Vashon High School"
+            g.job_types_done = {'courier', 'hot'}
             g.arch_job_unlocked = True
             g.arch_job_completed = False
             g.arch_job_phase = M.ARCH_ESCAPE  # active attempts deliberately do not resume
+            g.owned_weapons.update(('bat', 'shotgun', M.throwable_logic.FIRE_BOTTLE))
+            g.weapon_ammo['shotgun'] = 7
+            g.weapon_ammo[M.throwable_logic.FIRE_BOTTLE] = 2
+            g.throwable_system = M.throwable_logic.ThrowableSystem({
+                M.throwable_logic.FIRE_BOTTLE: 2,
+            })
+            g.side_missions_done = 4
+            g.side_missions_failed = 1
+            g.side_mission_serial = 5
+            g.weapon = 'shotgun'
+            g.ammo = 7
             g.save_game()
             with open("savegame.json", "r") as f:
                 raw = json.load(f)
-            assert raw['version'] == 4
+            assert raw['version'] == 6
             assert raw['character']['high_school'] == "Vashon High School"
+            assert raw['job_types_done'] == ['courier', 'hot']
             g.character_look = 0
             g.character_school = "NOT FROM AROUND HERE"
+            g.job_types_done = set()
             g.arch_job_unlocked = False
             g.arch_job_phase = M.ARCH_LOCKED
+            g.owned_weapons = {'fists'}
+            g.weapon = 'fists'
+            g.ammo = 0
             assert g.load_game()
             assert g.character_look == len(M.CHARACTER_LOOKS) - 1
             assert g.character_school == "Vashon High School"
+            assert g.job_types_done == {'courier', 'hot'}
             assert g.arch_job_unlocked and not g.arch_job_completed
             assert g.arch_job_phase == M.ARCH_READY
             assert g.job is None
+            assert g.weapon == 'shotgun' and g.ammo == 7
+            assert 'bat' in g.owned_weapons
+            assert g.throwable_system.inventory(M.throwable_logic.FIRE_BOTTLE) == 2
+            assert (g.side_missions_done, g.side_missions_failed,
+                    g.side_mission_serial) == (4, 1, 5)
         finally:
             os.chdir(old_cwd)
 
@@ -2927,6 +3262,12 @@ def test_the_hill_paints_its_hydrants():
     assert any(plain.get_at((x, y)) != painted.get_at((x, y))
                for x in range(plain.get_width())
                for y in range(plain.get_height()))
+    assert len(M.HILL_HYDRANT_TILES) >= 6
+    for (col, row), anchor in M.HILL_HYDRANT_TILES.items():
+        tile = M.GAME_MAP[row][col]
+        props = M.props_props_for_tile(col, row, tile['type'], True)
+        assert ('hydrant_hill', *anchor) in props, (col, row, props)
+        assert not tile['collidable'], f"Hill hydrant at {col},{row} is inside a wall"
 
 
 def _run_all():
