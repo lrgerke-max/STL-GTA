@@ -274,13 +274,15 @@ def test_traffic_does_not_come_to_rest_inside_another_car():
         game.player_dir = [random.choice([-1, 0, 1]), random.choice([-1, 0, 1])]
         game.update()
         cars = [c for c in game.cars
-                if c.driver is None and c is not game.driving]
+            if c.driver is None and c is not game.driving]
         for i, a in enumerate(cars):
             for b in cars[i + 1:]:
-                if not a.rect.colliderect(b.rect):
+                ar = game.traffic_footprint(a)
+                br = game.traffic_footprint(b)
+                if not ar.colliderect(br):
                     continue
-                over = a.rect.clip(b.rect)
-                small = min(a.rect.w * a.rect.h, b.rect.w * b.rect.h)
+                over = ar.clip(br)
+                small = min(ar.w * ar.h, br.w * br.h)
                 if over.w * over.h >= 0.30 * small:
                     bad += 1
     assert bad <= 40, f"{bad} badly stacked car pairs over 600 steps"

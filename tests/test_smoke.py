@@ -1458,6 +1458,63 @@ def test_local_showcase_vehicles_are_unique_stealable_destinations():
     assert M.VEHICLE_TUNING['grocery_cart']['speed_factor'] < 0.8
 
 
+def test_city_service_and_route_70_are_guaranteed_near_the_player():
+    for seed in range(4):
+        random.seed(seed)
+        g = M.Game(start_fullscreen=False)
+        moving = [car for car in g.cars if not car.parked]
+        for variant in M.GUARANTEED_AMBIENT_VARIANTS:
+            found = [car for car in moving if car.variant == variant]
+            assert found, (seed, variant, [car.variant for car in moving])
+            assert min(math.dist(car.rect.center, g.player_rect.center)
+                       for car in found) <= 430
+
+
+def test_local_legend_rumors_mark_and_discover_the_rare_rides():
+    g = M.Game(start_fullscreen=False)
+    assert not g.legend_rumors and not g.legend_discovered
+    g.frame = M.LOCAL_LEGEND_HINT_FIRST
+    g.update_local_legends()
+    assert g.legend_rumors == {'mudfoot'}
+    fuzzy = g.local_legend_marker('mudfoot')
+    truck = g.local_legend_car('mudfoot')
+    assert fuzzy != truck.rect.center
+
+    before = g.score
+    teleport(g, truck.rect.center)
+    g.update_local_legends()
+    assert 'mudfoot' in g.legend_discovered
+    assert g.local_legend_marker('mudfoot') == truck.rect.center
+    assert g.score == before + 500
+
+    g.camera.snap_to(truck.rect)
+    g.screen.fill((1, 2, 3))
+    g.draw_local_legend_markers()
+    colors = {g.screen.get_at((x, y))[:3]
+              for y in range(M.SCREEN_HEIGHT)
+              for x in range(M.SCREEN_WIDTH)}
+    assert M.LOCAL_LEGENDS['mudfoot']['color'] in colors
+
+
+def test_local_legend_art_reads_before_the_entry_toast():
+    mudfoot = M.cars_big_grid('mudfoot')
+    cart = M.cars_big_grid('grocery_cart')
+    mud_colors = {pixel for row in mudfoot for pixel in row if pixel is not None}
+    cart_colors = {pixel for row in cart for pixel in row if pixel is not None}
+    assert {M.cars_MUDFOOT_WHITE, M.cars_MUDFOOT_RED} <= mud_colors
+    assert {M.cars_CART_PANEL, M.cars_CART_INK} <= cart_colors
+    assert set(M.cars_CART_BAG_COLORS) <= cart_colors
+
+
+def test_corrected_landmark_plaques_do_not_repeat_false_claims():
+    soulard = M.LANDMARK_PLAQUES['Soulard Farmers Market']
+    garden = M.LANDMARK_PLAQUES['Missouri Botanical Garden']
+    assert 'older than the country' not in soulard.lower()
+    assert 'Louisiana Purchase' in soulard
+    assert 'never once closed' not in garden.lower()
+    assert 'continuously operating' in garden
+
+
 def test_route_70_metrobus_is_a_moving_fixed_livery():
     game()
     assert M.CIVILIAN_WEIGHTED.count("metrobus_70") == 1
@@ -3003,6 +3060,9 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             g.character_look = len(M.CHARACTER_LOOKS) - 1
             g.character_school = "Vashon High School"
             g.job_types_done = {'courier', 'hot'}
+            g.legend_rumors = {'mudfoot', 'grocery_cart'}
+            g.legend_discovered = {'mudfoot'}
+            g.legend_garage = {'mudfoot'}
             g.arch_job_unlocked = True
             g.arch_job_completed = False
             g.arch_job_phase = M.ARCH_ESCAPE  # active attempts deliberately do not resume
@@ -3024,9 +3084,15 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             assert raw['version'] == 6
             assert raw['character']['high_school'] == "Vashon High School"
             assert raw['job_types_done'] == ['courier', 'hot']
+            assert raw['legend_rumors'] == ['grocery_cart', 'mudfoot']
+            assert raw['legend_discovered'] == ['mudfoot']
+            assert raw['legend_garage'] == ['mudfoot']
             g.character_look = 0
             g.character_school = "NOT FROM AROUND HERE"
             g.job_types_done = set()
+            g.legend_rumors = set()
+            g.legend_discovered = set()
+            g.legend_garage = set()
             g.arch_job_unlocked = False
             g.arch_job_phase = M.ARCH_LOCKED
             g.owned_weapons = {'fists'}
@@ -3036,6 +3102,9 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             assert g.character_look == len(M.CHARACTER_LOOKS) - 1
             assert g.character_school == "Vashon High School"
             assert g.job_types_done == {'courier', 'hot'}
+            assert g.legend_rumors == {'mudfoot', 'grocery_cart'}
+            assert g.legend_discovered == {'mudfoot'}
+            assert g.legend_garage == {'mudfoot'}
             assert g.arch_job_unlocked and not g.arch_job_completed
             assert g.arch_job_phase == M.ARCH_READY
             assert g.job is None

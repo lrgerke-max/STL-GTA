@@ -2102,7 +2102,7 @@ LANDMARK_PLAQUES = {
     "Downtown":
         "The Wainwright of 1891 is one of the first true skyscrapers.",
     "Soulard Farmers Market":
-        "Trading since 1779 - older than the country it is in.",
+        "Trading since 1779 - before the Louisiana Purchase.",
     "Anheuser-Busch Brewery":
         "The Brew House is a National Historic Landmark. So are the horses.",
     "Grand Center Arts District":
@@ -2130,7 +2130,7 @@ LANDMARK_PLAQUES = {
     "Compton Hill Water Tower":
         "One of only seven standing water towers left in the country.",
     "Missouri Botanical Garden":
-        "Open to the public since 1859, and never once closed.",
+        "Founded in 1859 - America's oldest continuously operating botanical garden.",
     "Bevo Mill":
         "Built by August Busch in 1917, halfway to his farm.",
     "Cherokee Street":
@@ -2209,6 +2209,11 @@ CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 
                       + ['bus'] * 1 + ['metrobus_70'] * 1
                       + ['garbage_truck'] * 1 + ['trans_am'] * 1)
 
+# Random rarity made the orange truck absent from roughly two games in three,
+# and streaming preserves a car's variant forever. Reserve a real fleet slot so
+# the detail is part of St. Louis rather than something tests alone can see.
+GUARANTEED_AMBIENT_VARIANTS = ('garbage_truck', 'metrobus_70')
+
 # Rare local jokes belong at destinations, not clogging the ambient-traffic
 # pool. There is exactly one of each, parked where a player can deliberately
 # go find and steal it.
@@ -2217,6 +2222,25 @@ SHOWCASE_VEHICLES = (
     ('grocery_cart', "Soulard Farmers Market"),
 )
 SHOWCASE_VARIANTS = frozenset(v for v, _name in SHOWCASE_VEHICLES)
+LOCAL_LEGENDS = {
+    'mudfoot': {
+        'name': "THE ORIGINAL",
+        'venue': "Busch Stadium",
+        'rumor': "A monster truck is crushing scrap near Busch Stadium.",
+        'color': (96, 156, 244),
+        'offset': (-TILE_SIZE * 0.8, TILE_SIZE * 0.6),
+    },
+    'grocery_cart': {
+        'name': "THE BIG CART",
+        'venue': "Soulard Farmers Market",
+        'rumor': "Somebody parked a giant grocery cart near Soulard Market.",
+        'color': (238, 78, 72),
+        'offset': (TILE_SIZE * 0.7, -TILE_SIZE * 0.6),
+    },
+}
+LOCAL_LEGEND_HINT_FIRST = FPS * 8
+LOCAL_LEGEND_HINT_GAP = FPS * 75
+LOCAL_LEGEND_DISCOVERY_RADIUS = TILE_SIZE * 2.5
 
 # Default car collider. The kerbside parking layout is sized against this, so
 # it is a named constant both places can assert on rather than a loose 34/18.
@@ -4153,6 +4177,12 @@ cars_METROBUS_RED = (184, 48, 48)
 cars_METROBUS_ROUTE = (242, 184, 52)
 cars_CITY_SERVICE_ORANGE = (218, 104, 32)
 cars_CITY_SERVICE_LETTERING = (24, 22, 20)
+cars_MUDFOOT_WHITE = (230, 232, 224)
+cars_MUDFOOT_RED = (196, 48, 44)
+cars_CART_PANEL = (240, 232, 204)
+cars_CART_INK = (170, 38, 42)
+cars_CART_BAG_COLORS = ((226, 190, 54), (92, 146, 72),
+                        (232, 126, 54), (118, 88, 156))
 
 cars_SHADOW_ALPHA = 115  # 45% of 255
 
@@ -4529,6 +4559,8 @@ def cars_big_grid(kind):
     elif kind == 'mudfoot':
         body = (62, 78, 126)                    # period blue, no sponsor marks
         body_hi = (92, 110, 164)
+        legend_white = cars_MUDFOOT_WHITE
+        legend_red = cars_MUDFOOT_RED
         chassis = (40, 36, 38)
         hub = (150, 152, 148)
         # Four enormous tyres, with a small lifted pickup floating above them.
@@ -4544,6 +4576,14 @@ def cars_big_grid(kind):
         cars__put_r(grid, 35, 11, 38, 18, cars_GLASS_FRONT)
         cars__put_r(grid, 27, 11, 30, 18, cars_GLASS_REAR)
         cars__put_r(grid, 38, 10, 43, 19, body)                     # hood
+        # High-contrast period show-truck livery. The old all-blue pickup read
+        # as ordinary traffic until the post-entry toast explained the joke.
+        cars__put_r(grid, 10, 9, 24, 10, legend_white)
+        cars__put_r(grid, 10, 19, 24, 20, legend_white)
+        cars__put_r(grid, 31, 9, 37, 10, legend_white)
+        cars__put_r(grid, 31, 19, 37, 20, legend_white)
+        cars__put_r(grid, 39, 13, 43, 16, legend_white)
+        cars__put_r(grid, 40, 14, 42, 15, legend_red)
     elif kind == 'grocery_cart':
         red = (176, 48, 48)
         metal = (178, 180, 176)
@@ -4560,6 +4600,20 @@ def cars_big_grid(kind):
         for y in range(7, H - 6, 5):
             cars__put_r(grid, 10, y, 43, y, red)
         cars__put_r(grid, 13, 8, 21, H - 9, (206, 198, 172))       # child seat
+        # Two cream parade placards and a load of bright grocery bags make the
+        # enormous vehicle read as a promotional cart before it is entered.
+        panel = cars_CART_PANEL
+        ink = cars_CART_INK
+        for y0 in (4, H - 9):
+            cars__put_r(grid, 23, y0, 39, y0 + 4, panel)
+            # A chunky supermarket-S mark survives rotation and 1.45x scaling.
+            cars__put_r(grid, 25, y0 + 1, 31, y0 + 1, ink)
+            cars__put_r(grid, 25, y0 + 2, 27, y0 + 2, ink)
+            cars__put_r(grid, 29, y0 + 2, 31, y0 + 2, ink)
+            cars__put_r(grid, 25, y0 + 3, 31, y0 + 3, ink)
+        for (x, y), color in zip(((24, 10), (29, 13), (35, 10), (39, 14)),
+                                 cars_CART_BAG_COLORS):
+            cars__put_r(grid, x, y, x + 3, y + 3, color)
         cars__put_r(grid, 10, H // 2 - 1, 47, H // 2 + 1, dark)
         cars__put_r(grid, 44, 6, 49, H - 7, red)                    # basket nose
     else:  # box_truck
@@ -12734,18 +12788,24 @@ class Game:
             car.parked = True
             car.velocity = 0.0
             self.cars.append(car)
-        for _ in range(MOVING_CAR_COUNT):
+        for traffic_index in range(MOVING_CAR_COUNT):
             # seeded around the player, not smeared over the whole map, so the
             # first street you see already has traffic on it - and never on top
             # of a car that is already there. Diagonal arterials are player
             # roads but not valid inputs to the cardinal traffic driver.
+            guaranteed = (GUARANTEED_AMBIENT_VARIANTS[traffic_index]
+                          if traffic_index < len(GUARANTEED_AMBIENT_VARIANTS)
+                          else None)
+            # Put the guaranteed civic vehicles in the near ring on boot. A
+            # guarantee somewhere in a 100x100 map is still invisible in play.
+            spawn_outer = 360 if guaranteed else POP_KEEP_RADIUS
             spot = self.free_spawn_spot(
                 tries=24, grid_traffic=True, ax=px, ay=py, road_only=True,
-                rmin=140, rmax=POP_KEEP_RADIUS)
+                rmin=140, rmax=spawn_outer)
             if spot is None:
                 spot = self.fallback_traffic_spawn()
             cx, cy = spot if spot else random_open_spawn(road_only=True)
-            self.cars.append(Car(cx, cy))
+            self.cars.append(Car(cx, cy, variant=guaranteed))
 
         self.rail = build_rail_vehicles()
         self.rail_crossings = build_rail_crossings()
@@ -12797,6 +12857,10 @@ class Game:
         self.banked = 0          # safe. Only banked money counts for the ladder.
         self.dropped = []        # rolls of cash left where somebody died
         self.discovered = set()
+        self.legend_rumors = set()
+        self.legend_discovered = set()
+        self.legend_garage = set()
+        self.legend_hint_after = LOCAL_LEGEND_HINT_FIRST
         self.toasts = []
         self.speech_bubbles = []  # timed world-space dialogue anchored to speakers
         self.busted_flash = 0
@@ -13029,6 +13093,10 @@ class Game:
             value = state.get(key)
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"invalid {key} list")
+        for key in ('legend_rumors', 'legend_discovered', 'legend_garage'):
+            value = state.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise ValueError(f"invalid {key} list")
         arsenal = state['weapons']
         owned = arsenal.get('owned')
         ammo = arsenal.get('ammo')
@@ -13086,6 +13154,9 @@ class Game:
             'banked': self.banked,
             'wanted_level': self.wanted_level,
             'discovered': list(self.discovered),
+            'legend_rumors': sorted(self.legend_rumors),
+            'legend_discovered': sorted(self.legend_discovered),
+            'legend_garage': sorted(self.legend_garage),
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
             'side_missions_done': self.side_missions_done,
@@ -13132,6 +13203,16 @@ class Game:
             self.banked = state.get('banked', 0)
             self.wanted_level = min(WANTED_MAX, max(0, int(state.get('wanted_level', 0))))
             self.discovered = set(state.get('discovered', []))
+            self.legend_rumors = {
+                kind for kind in state.get('legend_rumors', []) if kind in LOCAL_LEGENDS
+            }
+            self.legend_discovered = {
+                kind for kind in state.get('legend_discovered', []) if kind in LOCAL_LEGENDS
+            }
+            self.legend_garage = {
+                kind for kind in state.get('legend_garage', []) if kind in LOCAL_LEGENDS
+            }
+            self.legend_hint_after = self.frame + LOCAL_LEGEND_HINT_FIRST
             self.jobs_done = state.get('jobs_done', 0)
             self.jobs_failed = state.get('jobs_failed', 0)
             self.side_missions_done = state.get('side_missions_done', 0)
@@ -15620,6 +15701,7 @@ class Game:
         self.update_job()
         self.update_frenzy()
         self.update_multiplier()
+        self.update_local_legends()
         self.check_landmark_discovery()
         self.update_place_names()
         self.update_fx()
@@ -16997,6 +17079,46 @@ class Game:
             if plaque:
                 self.add_toast(plaque)
 
+    def local_legend_car(self, variant):
+        return next((car for car in self.cars if car.variant == variant), None)
+
+    def local_legend_marker(self, variant):
+        """Exact after discovery; a deliberately fuzzy venue rumor before it."""
+        info = LOCAL_LEGENDS[variant]
+        car = self.local_legend_car(variant)
+        if variant in self.legend_discovered and car is not None:
+            return car.rect.center
+        entry = next(item for item in LANDMARKS if item[5] == info['venue'])
+        x, y = landmark_dropoff_point(entry)
+        ox, oy = info['offset']
+        return int(x + ox), int(y + oy)
+
+    def update_local_legends(self):
+        """Deal sparse rumors and recognize a rare ride before it is entered."""
+        pending = [kind for kind, _venue in SHOWCASE_VEHICLES
+                   if kind not in self.legend_rumors]
+        if pending and self.frame >= self.legend_hint_after:
+            kind = pending[0]
+            self.legend_rumors.add(kind)
+            self.legend_hint_after = self.frame + LOCAL_LEGEND_HINT_GAP
+            self.add_callout("LOCAL LEGEND RUMOR", LOCAL_LEGENDS[kind]['color'],
+                             ttl=FPS * 2, scale=1)
+            self.add_toast(LOCAL_LEGENDS[kind]['rumor'])
+
+        center = self.active_rect().center
+        for kind in LOCAL_LEGENDS:
+            if kind in self.legend_discovered:
+                continue
+            car = self.local_legend_car(kind)
+            if car is None or math.dist(center, car.rect.center) > LOCAL_LEGEND_DISCOVERY_RADIUS:
+                continue
+            self.legend_rumors.add(kind)
+            self.legend_discovered.add(kind)
+            info = LOCAL_LEGENDS[kind]
+            self.add_score(500, car.rect.center, mult=False)
+            self.add_callout(info['name'], info['color'], ttl=FPS * 2, scale=2)
+            self.add_toast(f"Local Legend discovered near {info['venue']}")
+
     # ---------------- drawing ----------------
     _TREE_GREENS = ((58, 84, 46), (50, 74, 40), (66, 92, 52), (46, 66, 38))
 
@@ -18035,6 +18157,22 @@ class Game:
             hud_text(self.screen, str(index + 1), x - 2, y - 4,
                      (32, 30, 34), True, 1)
 
+    def draw_local_legend_markers(self):
+        """World labels make the joke readable before the player steals it."""
+        for kind in self.legend_rumors:
+            car = self.local_legend_car(kind)
+            if car is None:
+                continue
+            sx, sy = self.camera.apply_pos(car.rect.center)
+            if not (-60 < sx < SCREEN_WIDTH + 60 and -60 < sy < SCREEN_HEIGHT + 60):
+                continue
+            info = LOCAL_LEGENDS[kind]
+            pulse = 13 + (self.frame // 8) % 3
+            pygame.draw.circle(self.screen, info['color'], (int(sx), int(sy)), pulse, 2)
+            label = info['name'] if kind in self.legend_discovered else "LOCAL LEGEND ?"
+            hud_text(self.screen, label, int(sx) - hud_text_width(label, 1) // 2,
+                     int(sy) - pulse - 10, info['color'], True, 1)
+
     def draw(self):
         if self.state == STATE_TITLE:
             self.draw_title_screen()
@@ -18104,6 +18242,8 @@ class Game:
                 unit.draw(self.screen, self.camera, flash)
         for cop in self.police:
             cop.draw(self.screen, self.camera, flash)
+
+        self.draw_local_legend_markers()
 
         if self.driving:
             self.driving.draw(self.screen, self.camera, flash)
@@ -18930,6 +19070,14 @@ class Game:
             pygame.draw.circle(self.screen, (110, 170, 220), (sx2, sy2), 3)
             pygame.draw.circle(self.screen, (12, 16, 28), (sx2, sy2), 3, 1)
 
+        for kind in sorted(self.legend_rumors):
+            lx, ly = to_map(*self.local_legend_marker(kind))
+            color = LOCAL_LEGENDS[kind]['color']
+            pygame.draw.circle(self.screen, color, (lx, ly), 4, 1)
+            hud_text(self.screen,
+                     "L" if kind in self.legend_discovered else "?",
+                     lx - 2, ly - 3, color, True, 1)
+
         stx, sty = to_map(*self.police_station)
         pygame.draw.circle(self.screen, (90, 150, 240), (stx, sty), 3)
         pygame.draw.circle(self.screen, (12, 16, 28), (stx, sty), 3, 1)
@@ -18995,9 +19143,10 @@ class Game:
                    in enumerate(LANDMARKS, 1)]
         entries.append(("", None))
         entries += [("YOU", (232, 232, 232)), ("PICKUP", hud_HUD_GOLD),
-                    ("DROP-OFF", hud_HUD_GREEN), ("POLICE", hud_HUD_RED),
-                    ("STATION", (90, 150, 240)),
-                    ("BODY SHOP $300", (110, 170, 220))]
+                     ("DROP-OFF", hud_HUD_GREEN), ("POLICE", hud_HUD_RED),
+                     ("STATION", (90, 150, 240)),
+                     ("BODY SHOP $300", (110, 170, 220)),
+                     ("? LOCAL LEGEND", (238, 176, 68))]
         colw = 104
         for i, (name, col) in enumerate(entries):
             cx = lx0 + (i // rows) * colw
@@ -19142,6 +19291,9 @@ class Game:
         for g in self.grub_pickups:
             if not g['taken']:
                 blip((g['x'], g['y']), GRUB_KINDS[g['kind']][3], 2)
+        for kind in self.legend_rumors:
+            blip(self.local_legend_marker(kind), LOCAL_LEGENDS[kind]['color'],
+                 4 if kind in self.legend_discovered else 3)
         if self.frenzy_icon is not None:
             blip(self.frenzy_icon[:2], hud_HUD_RED, 3)
         if self.side_mission is None and self.side_mission_cooldown <= 0:
