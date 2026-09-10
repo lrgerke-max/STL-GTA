@@ -1651,6 +1651,7 @@ JOB_OFFER_SECONDS = 100
 JOB_CHAIN_WINDOW = FPS * 6
 JOB_CHAIN_BONUS = 0.20
 JOB_MASTERY_BONUS = 200     # first completion of each run type
+CITY_EVENT_JOB_BONUS = 0.10 # today's civic mess makes every completed run richer
 JOB_KIND_ORDER = ('courier', 'rush', 'hot', 'heavy')
 
 # --- Side jobs ------------------------------------------------------------
@@ -2260,6 +2261,82 @@ LOCAL_CHALLENGE_COLORS = {
     'grocery_cart': (238, 78, 72),
     'trash_day': (238, 134, 40),
     'hill_hydrants': (60, 202, 92),
+}
+
+RADIO_STATIONS = (
+    {
+        'name': "K-SHE 95ISH",
+        'color': (236, 116, 54),
+        'breaks': (
+            "Heritage rock, KSHE-ish and proudly stuck in the left lane.",
+            "Traffic: somebody lost a ladder on forty again.",
+            "This set goes out to everyone calling Highway 40 Highway 40.",
+            "The forecast says eighty, then hail, then eighty again.",
+        ),
+    },
+    {
+        'name': "K-D-H-X 88ISH",
+        'color': (100, 206, 176),
+        'breaks': (
+            "Community radio: one basement, twelve genres, no algorithm.",
+            "Coming up: a local band whose drummer works at Vintage Vinyl.",
+            "Listener calendar: block party, record fair, questionable puppet show.",
+            "You are west of the river. The signal is doing its best.",
+        ),
+    },
+    {
+        'name': "K-M-O-X 1120ISH",
+        'color': (166, 190, 232),
+        'breaks': (
+            "News, weather, traffic, baseball, and weather interrupting baseball.",
+            "Caller says the Cardinals need one more middle reliever.",
+            "Avoid Grand. No reason given. You already understand.",
+            "Tonight's low is somehow tomorrow afternoon's high.",
+        ),
+    },
+)
+RADIO_BREAK_FIRST = FPS * 18
+RADIO_BREAK_GAP = FPS * 38
+
+CITY_EVENT_DEFS = {
+    'cardinals_day': ("CARDINALS DAY", "Downtown is red. Traffic is not moving.", (214, 56, 58)),
+    'soulard_parade': ("SOULARD PARADE", "Barricades, beads, and absolutely no parking.", (154, 74, 186)),
+    'dogtown_parade': ("DOGTOWN PARADE", "The whole neighborhood called in Irish.", (62, 176, 86)),
+    'first_monday': ("FIRST MONDAY", "It is eleven. Those are only the sirens.", (232, 190, 64)),
+    'tower_grove_market': ("MARKET DAY", "Tower Grove has produce and nowhere to park.", (92, 170, 84)),
+    'cherokee_festival': ("CHEROKEE STREET", "The street belongs to the crowd today.", (224, 112, 60)),
+    'blues_night': ("GLORIA NIGHT", "Every bar has found the same song.", (72, 126, 214)),
+    'grand_construction': ("GRAND CONSTRUCTION", "One lane closed. Nobody knows which one.", (236, 134, 40)),
+    'trolley_delay': ("LOOP TROLLEY DELAY", "Two miles of track. Infinite possibilities.", (202, 76, 70)),
+    'halloween_jokes': ("ST. LOUIS HALLOWEEN", "Tell a joke or nobody hands over candy.", (238, 126, 38)),
+}
+HALLOWEEN_JOKES = (
+    "Why did the toasted ravioli cross the road? It was breaded that way.",
+    "What high school did the ghost attend? Boo-mont.",
+    "Why is the Arch calm? Nothing gets under its skin but everybody walks under it.",
+    "What does a St. Louis vampire order? A concrete, hold the sunlight.",
+    "Why did the temp tag expire? It was only printed for one administration.",
+)
+CITY_EVENT_ANNOUNCE_AT = FPS * 4
+CITY_EVENT_VENUES = {
+    'cardinals_day': (76, 47),
+    'soulard_parade': (76, 54),
+    'dogtown_parade': (15, 53),
+    'tower_grove_market': (45, 63),
+    'cherokee_festival': (62, 78),
+    'blues_night': (76, 47),
+    'grand_construction': (57, 35),
+    'trolley_delay': (8, 17),
+}
+CITY_EVENT_TRAFFIC_SCALE = {
+    'cardinals_day': 0.72,
+    'soulard_parade': 0.55,
+    'dogtown_parade': 0.58,
+    'tower_grove_market': 0.72,
+    'cherokee_festival': 0.62,
+    'blues_night': 0.78,
+    'grand_construction': 0.48,
+    'trolley_delay': 0.65,
 }
 
 # Default car collider. The kerbside parking layout is sized against this, so
@@ -5061,6 +5138,9 @@ peds_ARCHETYPES = {
                        sh=(_MAROON, _CARDS, _BRICKY),   pa=(_PA_DENIM, _PA_KHAKI, _PA_CARDS)),
     'hoosier':    dict(w=0, gait=0.88, acc=('mullet', 'tallboy'), hair='brown',
                        sh=(_OFFWHT, _GREYBLUE, _MAROON), pa=(_PA_DENIM, _PA_DENIM, _PA_BLACK)),
+    'trick_or_treater': dict(w=0, gait=0.82, acc=('hood',),
+                             sh=(_MUSTARD, _PURPLE, _TEAL),
+                             pa=(_PA_BLACK, _PA_NAVY, _PA_GREY)),
 }
 
 peds_COP_KEY = 'cop#0'
@@ -11297,6 +11377,35 @@ def snd__make_cicadas():
     return out
 
 
+def snd__make_vehicle_signature(kind):
+    """Short spatial cues for rare/service vehicles before they enter view."""
+    n = int(snd_SR * (0.48 if kind == 'bigblock' else 0.34))
+    out = []
+    phase = 0.0
+    filtered = 0.0
+    for i in range(n):
+        t = i / float(n)
+        env = min(1.0, t * 10.0) * snd__env(i, n, 1.4)
+        if kind == 'bigblock':
+            freq = 48.0 + 7.0 * math.sin(t * math.tau * 4.0)
+            phase += math.tau * freq / snd_SR
+            pulse = 0.68 + 0.32 * math.sin(t * math.tau * 8.0)
+            value = (snd__saw((phase / math.tau) % 1.0) * 0.46
+                     + math.sin(phase * 2.0) * 0.30) * pulse
+        elif kind == 'cart_rattle':
+            tick = 1.0 if i % max(1, int(snd_SR * 0.047)) < 38 else 0.0
+            filtered += (snd__noise() - filtered) * 0.42
+            value = filtered * tick * 0.55 + math.sin(i * math.tau * 1640 / snd_SR) * tick * 0.18
+        elif kind == 'hydraulic':
+            filtered += (snd__noise() - filtered) * (0.08 + t * 0.35)
+            value = filtered * 0.42 + math.sin(i * math.tau * (70 + 90 * t) / snd_SR) * 0.30
+        else:  # reverse beep
+            gate = 1.0 if (i // int(snd_SR * 0.09)) % 2 == 0 else 0.0
+            value = snd__sqr((i * 930.0 / snd_SR) % 1.0) * gate * 0.42
+        out.append(value * env)
+    return out
+
+
 def snd_bake():
     """Bake the whole bank. Safe to call twice; a no-op without a mixer."""
     global snd__ready, snd__enabled
@@ -11337,6 +11446,14 @@ def snd_bake():
     b['bad'] = snd__sound(snd__make_chime((330.0, 233.1), 0.22), 0.6)
     b['horn'] = snd__sound(snd__make_train_horn(), 0.7)
     b['cicadas'] = snd__sound(snd__make_cicadas(), 0.5)
+    b['bigblock'] = snd__sound(snd__make_vehicle_signature('bigblock'), 0.78)
+    b['cart_rattle'] = snd__sound(snd__make_vehicle_signature('cart_rattle'), 0.64)
+    b['hydraulic'] = snd__sound(snd__make_vehicle_signature('hydraulic'), 0.70)
+    b['reverse_beep'] = snd__sound(snd__make_vehicle_signature('reverse_beep'), 0.58)
+    for index, notes in enumerate(((220.0, 330.0, 440.0),
+                                   (293.7, 370.0, 523.3),
+                                   (196.0, 246.9, 293.7))):
+        b[f'radio{index}'] = snd__sound(snd__make_chime(notes, 0.10), 0.42)
     snd__enabled = any(v is not None for v in b.values())
 
 
@@ -12565,6 +12682,9 @@ class Pedestrian:
         self.threat = None                 # unit (dx, dy) pointing away from danger
         self.knock = pygame.Vector2()      # decaying shove from being hit
         self.down_timer = 0
+        self.event_actor = False
+        self.event_kid = False
+        self.joke_told = False
 
     def set_kind(self, kind=None):
         """Retype a streamed pedestrian without leaving dog or gait ghosts."""
@@ -13080,6 +13200,14 @@ class Game:
         self.music_started = False
         self.music_paused = False
         self.music_muted = False
+        self.radio_index = 0
+        self.radio_break_after = RADIO_BREAK_FIRST
+        self.radio_break_serial = 0
+        self.city_event_seed = random.randrange(1 << 30)
+        self.city_event_key = tuple(CITY_EVENT_DEFS)[self.city_event_seed % len(CITY_EVENT_DEFS)]
+        self.city_event_announced = False
+        self.halloween_kids = []
+        self.halloween_jokes_told = 0
         if not self._headless:
             self.load_soundtrack()
 
@@ -13133,6 +13261,9 @@ class Game:
             value = state.get(key, [])
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"invalid {key} list")
+        for key in ('radio_index', 'city_event_seed'):
+            if key in state and (isinstance(state[key], bool) or not isinstance(state[key], int)):
+                raise ValueError(f"invalid {key}")
         arsenal = state['weapons']
         owned = arsenal.get('owned')
         ammo = arsenal.get('ammo')
@@ -13194,6 +13325,8 @@ class Game:
             'legend_discovered': sorted(self.legend_discovered),
             'legend_garage': sorted(self.legend_garage),
             'legend_mastery': sorted(self.legend_mastery),
+            'radio_index': self.radio_index,
+            'city_event_seed': self.city_event_seed,
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
             'side_missions_done': self.side_missions_done,
@@ -13255,6 +13388,17 @@ class Game:
             }
             self.local_challenge = None
             self.hill_hint_shown = 'hill_hydrants' in self.legend_mastery
+            self.radio_index = int(state.get('radio_index', 0)) % len(RADIO_STATIONS)
+            prior_event_seed = int(state.get('city_event_seed', self.city_event_seed))
+            self.city_event_seed = (prior_event_seed * 1103515245 + 12345) & 0x3fffffff
+            self.city_event_key = tuple(CITY_EVENT_DEFS)[self.city_event_seed % len(CITY_EVENT_DEFS)]
+            self.city_event_announced = False
+            self.halloween_kids = []
+            self.halloween_jokes_told = 0
+            for ped in self.pedestrians:
+                ped.event_actor = False
+                ped.event_kid = False
+            self.radio_break_after = self.frame + RADIO_BREAK_FIRST
             self.legend_hint_after = self.frame + LOCAL_LEGEND_HINT_FIRST
             self.jobs_done = state.get('jobs_done', 0)
             self.jobs_failed = state.get('jobs_failed', 0)
@@ -13731,6 +13875,172 @@ class Game:
         self.music_muted = not self.music_muted
         self.sync_soundtrack()
         self.add_toast("Music off" if self.music_muted else "Music on")
+
+    def cycle_radio(self):
+        if self.driving is not None and self.driving.variant == 'trans_am':
+            self.radio_index = 0
+            self.add_toast("THE RADIO IS STILL STUCK ON K-SHE 95ISH")
+            return
+        self.radio_index = (self.radio_index + 1) % len(RADIO_STATIONS)
+        self.radio_break_after = self.frame + FPS * 2
+        station = RADIO_STATIONS[self.radio_index]
+        self.add_callout(station['name'], station['color'], ttl=FPS, scale=1)
+        self.play_sound(f'radio{self.radio_index}', vol=0.65)
+
+    def update_radio_programming(self):
+        if self.driving is None or self.frame < self.radio_break_after:
+            return
+        station = RADIO_STATIONS[self.radio_index]
+        line = station['breaks'][self.radio_break_serial % len(station['breaks'])]
+        self.radio_break_serial += 1
+        self.radio_break_after = self.frame + RADIO_BREAK_GAP
+        self.add_toast(f"{station['name']}: {line}")
+        self.play_sound(f'radio{self.radio_index}', vol=0.42, gap=FPS)
+
+    def stage_city_event_people(self):
+        """Retype a visible slice of the crowd so today's event changes streets."""
+        for ped in self.pedestrians:
+            ped.event_actor = False
+            ped.event_kid = False
+        tile = CITY_EVENT_VENUES.get(self.city_event_key)
+        center = ((tile[0] * TILE_SIZE + TILE_SIZE // 2,
+                   tile[1] * TILE_SIZE + TILE_SIZE // 2)
+                  if tile is not None else self.active_rect().center)
+        nearby = sorted(self.pedestrians,
+                        key=lambda ped: math.dist(center, ped.rect.center))[:10]
+        key = self.city_event_key
+        if key == 'halloween_jokes':
+            self.halloween_kids = nearby[:4]
+            for index, ped in enumerate(self.halloween_kids):
+                ped.set_kind(f'trick_or_treater#{index % peds__VARIANTS}')
+                ped.event_kid = True
+                ped.event_actor = True
+                ped.joke_told = False
+        else:
+            archetype = {
+                'cardinals_day': 'cards_fan',
+                'soulard_parade': 'tourist',
+                'dogtown_parade': 'tourist',
+                'tower_grove_market': 'shopper',
+                'cherokee_festival': 'streetwear',
+                'grand_construction': 'hi_vis',
+                'blues_night': 'streetwear',
+            }.get(key)
+            if archetype:
+                for index, ped in enumerate(nearby[:6]):
+                    ped.set_kind(f'{archetype}#{index % peds__VARIANTS}')
+                    ped.event_actor = True
+                    angle = math.tau * index / 6.0
+                    spot = pedestrian_point_near(
+                        center[0] + math.cos(angle) * (54 + 10 * (index % 2)),
+                        center[1] + math.sin(angle) * (54 + 10 * (index % 2)),
+                        max_rings=5)
+                    if spot is not None:
+                        ped.rect.center = spot
+
+    def city_event_center(self):
+        tile = CITY_EVENT_VENUES.get(self.city_event_key)
+        if tile is None:
+            return None
+        return (tile[0] * TILE_SIZE + TILE_SIZE // 2,
+                tile[1] * TILE_SIZE + TILE_SIZE // 2)
+
+    def update_city_event(self):
+        if not self.city_event_announced and self.frame >= CITY_EVENT_ANNOUNCE_AT:
+            self.city_event_announced = True
+            title, line, color = CITY_EVENT_DEFS[self.city_event_key]
+            self.add_callout(title, color, ttl=FPS * 2, scale=2)
+            self.add_toast(line)
+            self.stage_city_event_people()
+            if self.city_event_key == 'first_monday':
+                self.play_sound('wailmid', self.active_rect().center, vol=0.62)
+            elif self.city_event_key == 'blues_night':
+                self.radio_index = 0
+            elif self.city_event_key == 'trolley_delay':
+                for vehicle in self.rail:
+                    if vehicle.kind == 'trolley':
+                        vehicle.speed = math.copysign(0.65, vehicle.speed)
+        elif self.city_event_key == 'halloween_jokes' and self.frame % (FPS * 8) == 0:
+            # Streamed children keep the costume even after population recycling.
+            for index, ped in enumerate(self.halloween_kids):
+                if not getattr(ped, 'joke_told', False):
+                    ped.set_kind(f'trick_or_treater#{index % peds__VARIANTS}')
+
+        center = self.city_event_center()
+        scale = CITY_EVENT_TRAFFIC_SCALE.get(self.city_event_key)
+        if center is not None and scale is not None:
+            # Named events happen in their named neighborhoods. Ambient cars
+            # bunch and crawl there, while the player's car stays responsive.
+            limit = (TILE_SIZE * 6) ** 2
+            for car in self.cars:
+                if car.driver is None and not car.parked:
+                    dx = car.rect.centerx - center[0]
+                    dy = car.rect.centery - center[1]
+                    if dx * dx + dy * dy <= limit:
+                        cap = car.base_max_speed * scale
+                        car.velocity = max(-cap, min(cap, car.velocity))
+
+    def try_halloween_joke(self):
+        if self.city_event_key != 'halloween_jokes' or self.driving is not None:
+            return False
+        center = self.player_rect.center
+        candidates = [ped for ped in self.halloween_kids
+                      if not getattr(ped, 'joke_told', False)
+                      and math.dist(center, ped.rect.center) <= 46]
+        if not candidates:
+            return False
+        child = min(candidates, key=lambda ped: math.dist(center, ped.rect.center))
+        child.joke_told = True
+        joke = HALLOWEEN_JOKES[self.halloween_jokes_told % len(HALLOWEEN_JOKES)]
+        self.halloween_jokes_told += 1
+        self.cash += 25
+        self.player_hp = min(PLAYER_MAX_HP, self.player_hp + 12)
+        self.add_callout("JOKE FOR CANDY", CITY_EVENT_DEFS['halloween_jokes'][2],
+                         ttl=FPS * 2, scale=1)
+        self.add_toast(joke)
+        self.add_pop(child.rect.center, "+$25 + CANDY", hud_HUD_GOLD)
+        self.play_sound('cash', child.rect.center, vol=0.55)
+        return True
+
+    def update_special_vehicle_audio(self):
+        center = self.active_rect().center
+        audible = [car for car in self.cars
+                   if math.dist(center, car.rect.center) <= 900]
+        for variant, key, cadence, volume, reach in (
+                ('mudfoot', 'bigblock', 92, 0.72, 920),
+                ('grocery_cart', 'cart_rattle', 73, 0.62, 760)):
+            candidates = [car for car in audible if car.variant == variant]
+            if candidates and self.frame % cadence == 0:
+                nearest = min(candidates, key=lambda car: math.dist(center, car.rect.center))
+                self.play_sound(key, nearest.rect.center, vol=volume,
+                                gap=cadence - 10, reach=reach)
+        trucks = [car for car in audible if car.variant == 'garbage_truck']
+        if trucks:
+            nearest = min(trucks, key=lambda car: math.dist(center, car.rect.center))
+            if nearest.velocity < -0.15 and self.frame % 55 == 0:
+                self.play_sound('reverse_beep', nearest.rect.center, vol=0.60,
+                                gap=45, reach=800)
+            elif self.frame % 181 == 0:
+                self.play_sound('hydraulic', nearest.rect.center, vol=0.55,
+                                gap=150, reach=760)
+
+    def draw_city_event_world(self):
+        """Keep the event's interaction legible without adding another map icon."""
+        if self.city_event_key != 'halloween_jokes' or self.driving is not None:
+            return
+        for child in self.halloween_kids:
+            if getattr(child, 'joke_told', False):
+                continue
+            sx, sy = self.camera.apply_pos(child.rect.center)
+            if not (-24 < sx < SCREEN_WIDTH + 24 and -24 < sy < SCREEN_HEIGHT + 24):
+                continue
+            pulse = 10 + (self.frame // 6) % 3
+            pygame.draw.circle(self.screen, (250, 142, 58),
+                               (int(sx), int(sy)), pulse, 1)
+            label = "E: TELL JOKE"
+            hud_text(self.screen, label,
+                     int(sx) - hud_text_width(label, 1) // 2, int(sy) - 24,
+                     (255, 224, 130), True, 1)
 
     def play_sound(self, key, world_pos=None, vol=1.0, gap=0, reach=620.0):
         """Every sound the game makes goes through here, so the camera is the
@@ -14439,6 +14749,9 @@ class Game:
             if moved >= POP_RECYCLE_PER_STEP:
                 break
             invalid_ground = not pedestrian_ground_is_clear(ped.rect)
+            if (self.city_event_announced and getattr(ped, 'event_actor', False)
+                    and not invalid_ground):
+                continue
             if ped.down_timer > 0 and not invalid_ground:
                 # Do not vanish a body mid-fall unless it is already somewhere
                 # impossible, such as a roof tile exposed by bad placement.
@@ -15045,6 +15358,10 @@ class Game:
         return (hx, -hy)
 
     def handle_pad_button(self, button):
+        if (button == PAD_Y and self.state == STATE_PLAYING
+                and not self.show_map and self.driving is not None):
+            self.cycle_radio()
+            return
         if self.state in (STATE_TITLE, STATE_CHARACTER):
             if button == PAD_A:
                 self.handle_keydown(pygame.K_RETURN)
@@ -15344,7 +15661,6 @@ class Game:
         if key == pygame.K_F4:
             self.toggle_soundtrack()
             return
-
         if self.arch_victory_timer > 0:
             if key in (pygame.K_RETURN, pygame.K_KP_ENTER, pygame.K_SPACE,
                        pygame.K_e, pygame.K_ESCAPE):
@@ -15387,12 +15703,18 @@ class Game:
                 self.load_game()
             return
 
+        if key == pygame.K_F6:
+            if self.driving is not None:
+                self.cycle_radio()
+            return
+
         if key in (pygame.K_SPACE, pygame.K_f):
             self.player_attack()
         elif key == pygame.K_q:
             self.cycle_weapon()
         elif key == pygame.K_e:
-            self.toggle_enter_exit()
+            if not self.try_halloween_joke():
+                self.toggle_enter_exit()
         elif key == pygame.K_r:
             self.reroll_job()
         elif key == pygame.K_F5:
@@ -15489,7 +15811,8 @@ class Game:
         elif best.variant == 'garbage_truck':
             self.start_local_challenge('trash_day')
         if best.variant == 'trans_am':
-            self.add_toast("THE RADIO IS STUCK ON KSHE")
+            self.radio_index = 0
+            self.add_toast("THE RADIO IS STUCK ON K-SHE 95ISH")
         elif best.variant == 'mudfoot':
             self.add_callout("THE ORIGINAL", hud_HUD_GOLD, scale=2)
             self.add_toast("BUILT BIG IN ST. LOUIS")
@@ -15751,6 +16074,9 @@ class Game:
         if self.punch_timer > 0:
             self.punch_timer -= 1
         self.update_population()
+        self.update_city_event()
+        self.update_radio_programming()
+        self.update_special_vehicle_audio()
         self.update_wrecks()
         self.update_police()
         self.update_side_mission()
@@ -16138,6 +16464,7 @@ class Game:
             if mastered:
                 paid += JOB_MASTERY_BONUS
                 self.job_types_done.add(self.job.kind)
+            paid = int(round(paid * (1.0 + CITY_EVENT_JOB_BONUS)))
             self.cash += paid
             self.add_score(50, mult=False)         # the careful loop stays flat
             self.jobs_done += 1
@@ -18474,6 +18801,7 @@ class Game:
 
         for ped in self.pedestrians:
             ped.draw(self.screen, self.camera)
+        self.draw_city_event_world()
         # Frame-driven, not wall-clock, so headless captures stay deterministic.
         flash = (self.frame // 8) % 2
         for car in self.cars:
@@ -19229,6 +19557,7 @@ class Game:
         ("F2", "CRT FILTER"),
         ("F3", "DEBUG OVERLAY"),
         ("F4", "MUSIC ON / OFF"),
+        ("F6", "CHANGE RADIO STATION"),
         ("Q", "QUIT - FROM HERE ONLY"),
     )
 
@@ -19663,13 +19992,16 @@ class Game:
             mph = f"{gear} {int(v * HUD_MPH_PER_PX)} MPH"
             hud_text(self.screen, mph, right - hud_text_width(mph, 1),
                      bar_y + 7, hud_HUD_GREY_DIM, True, 1)
+            station = RADIO_STATIONS[self.radio_index]['name']
+            hud_text(self.screen, station, right - hud_text_width(station, 1),
+                     bar_y + 16, RADIO_STATIONS[self.radio_index]['color'], True, 1)
             if self.driving.puncture_steps > 0:
                 tires = f"TIRES {math.ceil(self.driving.puncture_steps / FPS)}S"
                 hud_text(self.screen, tires, right - hud_text_width(tires, 1),
-                         bar_y + 16, hud_HUD_RED, True, 1)
+                         bar_y + 25, hud_HUD_RED, True, 1)
 
         # chaos multiplier + its progress bar, under the speedo
-        cy0 = ry + RADAR_SIZE + 26
+        cy0 = ry + RADAR_SIZE + 35
         # A multiplier of 1 is no multiplier; the old `or mult_prog > 0`
         # drew "X1" with a bar, which is a HUD element meaning nothing.
         if self.multiplier > 1:
@@ -19815,8 +20147,8 @@ class Game:
         verb = "DELIVER TO" if job.collected else "PICK UP AT"
         col = hud_HUD_GREEN if job.collected else hud_HUD_GOLD
         head = f"{verb} {job.target_name}"
-        sub = (f"{job.label}: {job.cargo}" if job.collected
-               else f"{job.label}  PAYS ${job.base_reward}")
+        sub = (f"{job.label}: {job.cargo} / CITY +10%" if job.collected
+               else f"{job.label}  PAYS ${job.base_reward} + CITY 10%")
 
         # The countdown is drawn right-aligned on the headline row, so the
         # panel has to reserve a gutter for it or a long landmark name runs

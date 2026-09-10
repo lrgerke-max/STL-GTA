@@ -114,6 +114,13 @@ def reset(g):
     g.pops = []
     g.callouts = []
     g.toasts = []
+    g.radio_index = 0
+    g.radio_break_after = M.RADIO_BREAK_FIRST
+    g.radio_break_serial = 0
+    g.city_event_key = 'cardinals_day'
+    g.city_event_announced = False
+    g.halloween_kids = []
+    g.halloween_jokes_told = 0
     g.decals = []
     g.player_hp = M.PLAYER_MAX_HP
     g.player_stamina = M.PLAYER_STAMINA_MAX
@@ -1576,6 +1583,93 @@ def test_expired_temp_tags_are_uncommon_but_visible():
     car.draw(surf, cam)
     assert (244, 240, 218) in {surf.get_at((x, y))[:3]
                               for y in range(120) for x in range(160)}
+
+
+def test_three_radio_stations_cycle_and_the_trans_am_stays_on_kshe():
+    g = game()
+    assert len(M.RADIO_STATIONS) == 3
+    assert all(station['breaks'] for station in M.RADIO_STATIONS)
+    car = next(c for c in g.cars if c.variant not in ('trans_am', 'mudfoot'))
+    car.driver = 'player'
+    car.parked = False
+    g.driving = car
+    g.handle_keydown(pygame.K_F6)
+    assert g.radio_index == 1
+    g.handle_pad_button(M.PAD_Y)
+    assert g.radio_index == 2
+    trans_am = M.Car(car.rect.centerx + 50, car.rect.centery, variant='trans_am')
+    g.cars.append(trans_am)
+    car.driver = None
+    trans_am.driver = 'player'
+    trans_am.parked = False
+    g.driving = trans_am
+    g.cycle_radio()
+    assert g.radio_index == 0
+    assert any('STUCK' in toast.text for toast in g.toasts)
+
+
+def test_radio_input_is_ignored_outside_live_driving():
+    g = game()
+    for state in (M.STATE_TITLE, M.STATE_CHARACTER, M.STATE_PAUSED, M.STATE_DEAD):
+        g.state = state
+        before = (g.radio_index, len(g.callouts))
+        g.handle_keydown(pygame.K_F6)
+        assert (g.radio_index, len(g.callouts)) == before
+    g.state = M.STATE_PLAYING
+    g.driving = None
+    g.handle_keydown(pygame.K_F6)
+    assert g.radio_index == 0
+
+
+def test_halloween_event_stages_kids_and_rewards_a_joke():
+    g = game()
+    g.city_event_key = 'halloween_jokes'
+    g.frame = M.CITY_EVENT_ANNOUNCE_AT
+    g.update_city_event()
+    assert len(g.halloween_kids) == 4
+    assert all(ped.kind.startswith('trick_or_treater#')
+               for ped in g.halloween_kids)
+    child = g.halloween_kids[0]
+    teleport(g, child.rect.center)
+    g.player_hp = M.PLAYER_MAX_HP - 20
+    before = g.cash
+    assert g.try_halloween_joke()
+    assert child.joke_told
+    assert g.cash == before + 25
+    assert g.player_hp == M.PLAYER_MAX_HP - 8
+
+
+def test_named_city_events_stage_their_crowd_and_slow_local_traffic():
+    g = game()
+    g.city_event_key = 'cherokee_festival'
+    g.frame = M.CITY_EVENT_ANNOUNCE_AT
+    g.update_city_event()
+    center = g.city_event_center()
+    actors = [ped for ped in g.pedestrians if ped.event_actor]
+    assert len(actors) == 6
+    assert all(math.dist(ped.rect.center, center) < M.TILE_SIZE * 3
+               for ped in actors)
+    car = next(c for c in g.cars if c.driver is None)
+    car.parked = False
+    car.rect.center = center
+    car.velocity = car.base_max_speed
+    g.update_city_event()
+    assert abs(car.velocity) <= car.base_max_speed * M.CITY_EVENT_TRAFFIC_SCALE[
+        'cherokee_festival']
+
+
+def test_city_event_audio_and_special_vehicle_signatures_are_baked():
+    for kind in ('bigblock', 'cart_rattle', 'hydraulic', 'reverse_beep'):
+        samples = M.snd__make_vehicle_signature(kind)
+        assert len(samples) > 1000
+        assert any(abs(sample) > 0.01 for sample in samples)
+    g = game()
+    g.city_event_key = 'first_monday'
+    g.frame = M.CITY_EVENT_ANNOUNCE_AT
+    with patch.object(g, 'play_sound') as play:
+        g.update_city_event()
+    play.assert_called_once()
+    assert play.call_args.args[0] == 'wailmid'
 
 
 def test_corrected_landmark_plaques_do_not_repeat_false_claims():
