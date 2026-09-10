@@ -103,6 +103,34 @@ def test_blocks_are_not_all_the_same_size_any_more():
     assert len(sizes) >= 3, f"every block is still the same shape: {sizes}"
 
 
+def test_lambert_chain_of_rocks_and_des_peres_fit_the_existing_city():
+    assert (M.MAP_TILES_W, M.MAP_TILES_H) == (100, 100)
+    lambert = next(entry for entry in M.LANDMARKS if entry[5] == "Lambert Airport")
+    assert lambert[:4] == (0, 0, 8, 8)
+    assert M.hood_at(2, 2) == 'lambert'
+    assert M.lm_has_art("Lambert Airport")
+
+    chain = set(M.CHAIN_OF_ROCKS_TILES)
+    assert chain
+    assert any(col >= M.river_bank(row) for col, row in chain)
+    assert all(M.GAME_MAP[row][col].get('chain_of_rocks') for col, row in chain)
+    seen = {next(iter(chain))}
+    while True:
+        grown = seen | {tile for tile in chain if any(
+            abs(tile[0] - old[0]) + abs(tile[1] - old[1]) == 1 for old in seen)}
+        if grown == seen:
+            break
+        seen = grown
+    assert seen == chain
+
+    channel = set(M.RIVER_DES_PERES_TILES)
+    assert channel
+    assert all(not M.GAME_MAP[row][col]['collidable']
+               and M.GAME_MAP[row][col].get('des_peres')
+               for col, row in channel)
+    assert M.street_name(24, 96) == "RIVER DES PERES CHANNEL"
+
+
 # ------------------------------------------------------------- neighbourhoods
 def test_no_neighbourhood_swallows_the_city():
     counts = {}

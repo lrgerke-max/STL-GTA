@@ -49,9 +49,10 @@ def test_metrolink_has_continuous_reserved_track_and_real_grade_crossings(game):
         assert tile['type'] == M.TILE_ROAD and tile.get('rail_crossing')
 
     # the trolley runs on Delmar and STOPS, which is the whole point of it
-    assert all(M.GAME_MAP[M.TROLLEY_ROW][col].get('rail') == 'trolley'
+    assert all(M.GAME_MAP[M.TROLLEY_ROW][col].get('rail') in ('trolley', 'metrolink')
                for col in range(M.TROLLEY_COL_MIN, M.TROLLEY_COL_MAX + 1)
                if M.GAME_MAP[M.TROLLEY_ROW][col]['type'] == M.TILE_ROAD)
+    assert M.GAME_MAP[M.TROLLEY_ROW][2].get('rail') == 'metrolink'
     beyond = M.TROLLEY_COL_MAX + 4
     assert M.GAME_MAP[M.TROLLEY_ROW][beyond].get('rail') != 'trolley'
 
@@ -75,7 +76,8 @@ def test_metrolink_serves_the_stations_it_really_serves_and_skips_south_city():
         assert near, f"MetroLink never comes near {want}"
 
     names = {name for (_c, _r, name) in M.METROLINK_STATIONS}
-    assert {"ROCK ROAD", "CENTRAL WEST END", "GRAND", "UNION STATION"} <= names
+    assert {"LAMBERT AIRPORT", "NORTH HANLEY", "UMSL", "ROCK ROAD",
+            "CENTRAL WEST END", "GRAND", "UNION STATION"} <= names
     for col, row, _name in M.METROLINK_STATIONS:
         assert any(abs(c - col) + abs(r - row) <= 1 for c, r in on_route)
     order = {name: index for index, (_c, _r, name)

@@ -1558,6 +1558,35 @@ def test_each_local_mastery_route_can_be_completed_and_persists():
     assert 'hill_hydrants' in g.legend_mastery
 
 
+def test_fixed_lambert_bike_starts_and_completes_chain_of_rocks_escape():
+    g = M.Game(start_fullscreen=False)
+    bike = g.chain_bike
+    assert bike is not None and bike.variant == 'vespa' and bike.parked
+    teleport(g, bike.rect.center)
+    g.toggle_enter_exit()
+    assert g.driving is bike
+    assert g.local_challenge['kind'] == 'chain_escape'
+    assert g.wanted_level == 3
+    for point in g.local_challenge['points']:
+        bike.rect.center = point
+        g.update_local_challenge()
+    assert 'chain_escape' in g.legend_mastery
+    assert g.local_challenge is None
+    assert g.wanted_level == 0 and not g.police
+
+
+def test_chain_of_rocks_bollards_admit_bikes_not_cars():
+    row = 2
+    left = min(col for col, r in M.CHAIN_OF_ROCKS_TILES if r == row)
+    boundary = left * M.TILE_SIZE
+    sedan = M.Car(boundary - 20, row * M.TILE_SIZE + M.TILE_SIZE // 2,
+                  variant='sedan')
+    bike = M.Car(boundary - 20, row * M.TILE_SIZE + M.TILE_SIZE // 2,
+                 variant='vespa')
+    assert not sedan.move_forward_check(28, 0)
+    assert bike.move_forward_check(28, 0)
+
+
 def test_mudfoot_crush_targets_are_physical_and_masterable():
     g = M.Game(start_fullscreen=False)
     truck = g.local_legend_car('mudfoot')

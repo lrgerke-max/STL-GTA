@@ -234,6 +234,10 @@ ROAD_STEP = 6
 def street_name(col, row):
     """The street a tile is on, or None. A diagonal wins over the grid: if you
     are on Gravois you are on Gravois, whatever it happens to be crossing."""
+    if (col, row) in globals().get('RIVER_DES_PERES_TILES', ()):
+        return "RIVER DES PERES CHANNEL"
+    if (col, row) in globals().get('CHAIN_OF_ROCKS_TILES', ()):
+        return "OLD CHAIN OF ROCKS BRIDGE"
     diagonal = DIAGONAL_AT.get((col, row))
     if diagonal:
         return diagonal
@@ -1034,6 +1038,25 @@ STL_CONVERSATIONS = (
      "CHER-O-KEE."),
     (("cherokee",), "EVERYTHING'S CASH.", "MOST THINGS.", "BRING CASH."),
 
+    # --------------------------------------------------------------- Lambert
+    (("lambert",), "WHICH TERMINAL?", "THE ONE WITH THE ARCHES.",
+     "THAT'S STILL TWO OF THEM."),
+    (("lambert",), "YAMASAKI DREW THAT ROOF.", "BEFORE THE TOWERS.",
+     "LONG BEFORE."),
+    (("lambert",), "TWA USED TO OWN THIS PLACE.", "FELT LIKE IT.",
+     "RED ON EVERYTHING."),
+    (("lambert",), "METROLINK'S DOWNSTAIRS.", "RED LINE?", "ONLY LINE HERE."),
+    (("lambert",), "NORTH HANLEY NEXT.", "THEN UMSL.", "THEN THE CITY."),
+    (("lambert",), "MCDONNELL BUILT JETS HERE.", "AND SPACECRAFT.",
+     "MERCURY AND GEMINI."),
+    (("lambert",), "YOU PARKED WHERE?", "ECONOMY LOT D.",
+     "WRITE THAT DOWN."),
+    (("lambert",), "THE RUNWAY CROSSES NATURAL BRIDGE.", "UNDER IT.",
+     "KEEP YOUR HEAD DOWN."),
+    (("lambert",), "IS THAT YOUR BAG?", "SAME COLOR.", "NOT MY BAG."),
+    (("lambert",), "FLIGHT'S DELAYED.", "WEATHER HERE OR THERE?",
+     "YES."),
+
     # ------------------------------------------------------ Wells-Goodfellow
     (("wellsgoodfellow",), "WELLS OR GOODFELLOW?", "BOTH. THAT'S THE NAME.",
      "DON'T DROP THE S."),
@@ -1235,6 +1258,8 @@ STL_SOLO_BARKS = (
     (None, "PUT IT ON A PORK STEAK."),
     (None, "WHERE'D YOU GO TO SCHOOL, THOUGH."),
     (None, "BREAD AND MILK. JUST IN CASE."),
+    (("lambert",), "GATE CHANGED AGAIN."),
+    (("lambert",), "TAKE METROLINK THIS TIME."),
     (("loop",), "MIND THE TROLLEY TRACK."),
     (("loop",), "SOMEBODY'S BUSKING AGAIN."),
     (("wellston",), "THE 94 RUNS THROUGH HERE."),
@@ -1331,6 +1356,7 @@ STL_PANIC_LINES = (
     "CALL SOMEBODY!", "GET OFF THE STREET!", "NOT AGAIN!",
 )
 STL_PANIC_BY_HOOD = {
+    'lambert': ("NOT ON THE RUNWAY!", "THAT IS NOT A PICKUP LANE!"),
     'loop': ("NOT ON DELMAR!", "MIND THE TRACK!"),
     'wellston': ("NOT ON THIS BLOCK!", "SOMEBODY CALL IT IN!"),
     'wellsgoodfellow': ("NOT ACROSS GOODFELLOW!", "THAT'S THE CITY LINE!"),
@@ -1920,13 +1946,17 @@ TILE_RAIL = 6               # dedicated, non-road rail right-of-way
 # the Arch grounds. The previous alignment dropped to Chouteau and then ran
 # through the middle of the Arch footprint to reach the river.
 METROLINK_WAYPOINTS = (
-    (0, 23), (12, 23),      # in from the west, parallel to Delmar
+    (2, 2), (2, 23),        # Lambert / North Hanley / UMSL compressed north-west
+    (12, 23),               # east beside Delmar
     (12, 26), (62, 26),     # south a block, then east past the park and the CWE
     (62, 32),               # compact downtown connector, west of the Arch
     (82, 32),               # Olive to Laclede's Landing and the Eads
 )
 #: named stops, west to east: (col, row, name)
 METROLINK_STATIONS = (
+    (2, 2, "LAMBERT AIRPORT"),
+    (2, 9, "NORTH HANLEY"),
+    (2, 15, "UMSL"),
     (3, 23, "ROCK ROAD"),
     (6, 23, "WELLSTON"),
     (12, 25, "DELMAR LOOP"),
@@ -2056,6 +2086,7 @@ CAR_COLORS = [
 # alley. Each landmark now gets a shape that matches its art and reads at a
 # glance - see _landmark_tile().
 LANDMARK_LAYOUT = {
+    "Lambert Airport": "airport",
     "Gateway Arch": "arch",              # two leg footings; walk under the span
     "Busch Stadium": "stadium",          # solid bowl, one gate to the field
     "Ted Drewes": "drivein",             # stand at the back, queue in the lot
@@ -2088,6 +2119,10 @@ LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyar
 # Boulevard is drawn north/south through the middle of Grand Center at column
 # 57; it must remain continuous between the grid roads above and below.
 LANDMARK_THROUGH_ROADS = {
+    "Lambert Airport": {
+        'cols': frozenset((2,)),
+        'rows': frozenset((2,)),
+    },
     "Grand Center Arts District": {
         'cols': frozenset((57,)),
         'rows': frozenset(),
@@ -2101,6 +2136,8 @@ LANDMARK_THROUGH_ROADS = {
 # Loop up in the north-west, and the south-city parks (The Hill, Tower Grove)
 # down in the south. Compressed and not to scale, but recognisable in the hand.
 LANDMARKS = [
+    # --- Compressed northwest annex ---------------------------------------
+    (0, 0, 8, 8, "building", "Lambert Airport", (142, 148, 156)),
     # --- East: the river, the Arch, downtown, the ballpark ---
     (82, 40, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
     # Busch III was sited so the Arch stands over centre field; the two used
@@ -2168,6 +2205,8 @@ LANDMARKS = [
 # inside one. Discovery used to fire "Discovered: X!" and nothing else, which
 # is a scoring event, not a city. Everything here is checkable.
 LANDMARK_PLAQUES = {
+    "Lambert Airport":
+        "Yamasaki's arched terminal opened in 1956, built for the jet age.",
     "Gateway Arch":
         "630 feet, and exactly as wide. Saarinen, finished 1965.",
     "Fairground Park":
@@ -2244,6 +2283,11 @@ RIVER_BRIDGES = (32, 50)
 # connection to the street flood fill and read as accidental concrete islands.
 RIVER_POCKET_TILES = ((89, 12), (90, 12), (82, 18), (83, 18),
                       (89, 60), (90, 60))
+CHAIN_OF_ROCKS_WAYPOINTS = ((91, 2), (94, 2), (99, 4))
+RIVER_DES_PERES_WAYPOINTS = ((0, 96), (24, 96), (40, 94),
+                             (68, 96), (91, 96))
+CHAIN_OF_ROCKS_TILES = frozenset(_diagonal_run(CHAIN_OF_ROCKS_WAYPOINTS, 1))
+RIVER_DES_PERES_TILES = frozenset(_diagonal_run(RIVER_DES_PERES_WAYPOINTS, 1))
 
 # --- Features inside a landmark -------------------------------------------
 # Forest Park is one landmark, but it contains four or five places a St.
@@ -2326,6 +2370,7 @@ LOCAL_CHALLENGE_TIMES = {
     'grocery_cart': FPS * 75,
     'trash_day': FPS * 120,
     'hill_hydrants': FPS * 90,
+    'chain_escape': FPS * 75,
 }
 TRASH_DAY_TILES = ((15, 57), (21, 68), (32, 79),
                    (43, 73), (57, 63), (63, 57))
@@ -2338,7 +2383,9 @@ LOCAL_CHALLENGE_COLORS = {
     'grocery_cart': (238, 78, 72),
     'trash_day': (238, 134, 40),
     'hill_hydrants': (60, 202, 92),
+    'chain_escape': (116, 190, 206),
 }
+CHAIN_ESCAPE_TILES = ((2, 2), (32, 2), (63, 2), (91, 2), (94, 2), (99, 4))
 
 RADIO_STATIONS = (
     {
@@ -2710,6 +2757,7 @@ def build_map():
     # decks wholesale, which used to wipe the rail tag straight back off the
     # Eads and leave the MetroLink running on untagged road.
     _stamp_river(game_map)
+    _stamp_special_routes(game_map)
     _stamp_rail_corridors(game_map)
     return game_map
 
@@ -2855,7 +2903,8 @@ def _stamp_rail_corridors(game_map):
     # A landmark whose collision shape IS the landmark (a stadium bowl, the
     # market sheds, a water tower, the Arch grounds) is never touched.
     protected = {name for name, layout in LANDMARK_LAYOUT.items()
-                 if layout not in ("district", "strip")}
+                 if layout not in ("district", "strip")
+                 and name not in ("Lambert Airport", "Delmar Loop")}
     for (col, row, axis) in METROLINK_TILES:
         if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
             continue
@@ -2867,6 +2916,10 @@ def _stamp_rail_corridors(game_map):
         cross_road = (col in ROAD_LINES) if axis == 'h' else (row in ROAD_LINES)
         if owner is not None and owner in protected:
             continue                       # never cut a landmark that is a shape
+        if owner == "Delmar Loop" and existing['collidable']:
+            existing['type'] = TILE_RAIL
+            existing['collidable'] = False
+            existing['color'] = (72, 68, 62)
         if parallel_road or owner is not None:
             existing['rail'] = 'metrolink'
             existing['rail_axis'] = axis
@@ -2927,7 +2980,8 @@ def _stamp_rail_corridors(game_map):
     # one, instead of crossing the entire city.
     for col in range(TROLLEY_COL_MIN, min(TROLLEY_COL_MAX + 1, river_bank(TROLLEY_ROW))):
         tile = game_map[TROLLEY_ROW][col]
-        if tile['type'] == TILE_ROAD and not tile['collidable']:
+        if (tile['type'] == TILE_ROAD and not tile['collidable']
+                and tile.get('rail') != 'metrolink'):
             tile['rail'] = 'trolley'
 
 
@@ -2957,6 +3011,24 @@ def _stamp_river(game_map):
     for x, y in RIVER_POCKET_TILES:
         game_map[y][x] = {'type': TILE_WATER, 'collidable': True,
                           'landmark': None, 'color': COLOR_WATER}
+
+
+def _stamp_special_routes(game_map):
+    """Restore the two non-grid escape routes after the river owns its banks."""
+    for col, row in RIVER_DES_PERES_TILES:
+        if 0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H:
+            game_map[row][col] = {
+                'type': TILE_PLAZA, 'collidable': False, 'landmark': None,
+                'color': (104, 108, 106), 'des_peres': True,
+                'street': "RIVER DES PERES CHANNEL",
+            }
+    for col, row in CHAIN_OF_ROCKS_TILES:
+        if 0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H:
+            game_map[row][col] = {
+                'type': TILE_ROAD, 'collidable': False, 'landmark': None,
+                'color': (92, 94, 92), 'chain_of_rocks': True,
+                'street': "OLD CHAIN OF ROCKS BRIDGE",
+            }
 
 
 def _blend(a, b, t):
@@ -3118,6 +3190,7 @@ HOOD_REGIONS = (
     (31, 24, 49, 43, 'cwe'),           # Central West End, Euclid, the Basilica
     (8, 24, 30, 43, 'forestpark'),     # Forest Park itself and its ring
     (0, 10, 26, 23, 'loop'),           # the Delmar Loop, University City
+    (0, 0, 7, 8, 'lambert'),            # compressed airport / North County annex
     (8, 0, 26, 9, 'wellsgoodfellow'),   # city neighborhood, east of Wellston
     (43, 0, 57, 14, 'fairground'),      # Fairground Park and O'Fallon
     (63, 0, 85, 14, 'collegehill'),     # College Hill and the standpipes
@@ -3146,6 +3219,7 @@ HOOD_FALLBACK = 'bevo'
 
 #: What the city calls each one out loud. Shown when you cross a boundary.
 HOOD_NAMES = {
+    'lambert': "LAMBERT AIRPORT",
     'riverfront': "LACLEDE'S LANDING",
     'downtown': "DOWNTOWN",
     'grand': "GRAND CENTER",
@@ -3189,6 +3263,8 @@ def hood_name(hood):
 
 
 HOOD_SIGNS = {
+    'lambert': (SIGN_CAFE, SIGN_HARDWARE, SIGN_BBQ, SIGN_GROCERY,
+                SIGN_TAVERN, SIGN_SCHNUCKS),
     # The Loop: theatres, records, vintage, Fitz's bottling its own root beer,
     # Chuck Berry on the Walk of Fame, and a trolley nobody will stop bringing up
     'loop': (SIGN_TIVOLI, SIGN_PAGEANT, SIGN_FITZ, SIGN_VINTAGE, SIGN_RECORDS,
@@ -3271,6 +3347,7 @@ HOOD_SIGNS = {
                    SIGN_CHURCH, SIGN_BBQ, SIGN_HARDWARE),
 }
 HOOD_HOUSES = {
+    'lambert': ('flat_front', 'gable_brick', 'shotgun'),
     'loop': ('mansard', 'mansard', 'painted_lady', 'gable_brick'),
     'wellston': ('gable_brick', 'shotgun', 'flat_front', 'gable_brick'),
     'wellsgoodfellow': ('gable_brick', 'shotgun', 'flat_front', 'gable_brick'),
@@ -3305,6 +3382,7 @@ HOOD_HOUSES = {
 # beneath it now agree on the district instead of every block drawing from one
 # citywide bag of brick.
 HOOD_BRICKS = {
+    'lambert': (CITY_BRICKS[3], CITY_BRICKS[4], CITY_BRICKS[6]),
     'loop': (CITY_BRICKS[0], CITY_BRICKS[2], CITY_BRICKS[4]),
     'wellston': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[6]),
     'wellsgoodfellow': (CITY_BRICKS[0], CITY_BRICKS[1], CITY_BRICKS[6]),
@@ -3339,6 +3417,7 @@ HOOD_BRICKS = {
 # still gets live sprites at one address in three instead of dropping back to
 # nothing but procedural storefronts.
 HOOD_ATLAS_ALIAS = {
+    'lambert': 'west',
     'wellston': 'north', 'forestpark': 'cwe', 'shaw': 'south',
     'wellsgoodfellow': 'north', 'fairground': 'north', 'collegehill': 'north',
     'riverfront': 'downtown', 'bentonpark': 'soulard', 'lafayette': 'soulard',
@@ -3612,7 +3691,15 @@ def _lm_solid_drivein(lx, ly, lw, lh):
     return ly < max(1, lh - 2)
 
 
+def _lm_solid_airport(lx, ly, lw, lh):
+    """A terminal bar beside an otherwise open apron and runway."""
+    if lx == 2 or ly == 2:
+        return False
+    return 1 <= lx < lw - 1 and ly in (4, 5)
+
+
 _LM_SOLID = {
+    "airport": _lm_solid_airport,
     "arch": _lm_solid_arch,
     "stadium": _lm_solid_stadium,
     "district": _lm_solid_district,
@@ -3729,6 +3816,22 @@ def is_blocked(rect):
                 tile_rect = pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE)
                 if rect.colliderect(tile_rect):
                     return True
+    return False
+
+
+def rect_hits_tag(rect, tag):
+    """True when a collider overlaps a map tile carrying a route tag."""
+    start_col = max(0, rect.left // TILE_SIZE)
+    end_col = min(MAP_TILES_W - 1, rect.right // TILE_SIZE)
+    start_row = max(0, rect.top // TILE_SIZE)
+    end_row = min(MAP_TILES_H - 1, rect.bottom // TILE_SIZE)
+    for row in range(start_row, end_row + 1):
+        for col in range(start_col, end_col + 1):
+            tile = GAME_MAP[row][col]
+            if tile.get(tag) and rect.colliderect(
+                    pygame.Rect(col * TILE_SIZE, row * TILE_SIZE,
+                                TILE_SIZE, TILE_SIZE)):
+                return True
     return False
 
 
@@ -7878,6 +7981,8 @@ def traffic__is_grid_road(col, row):
     if not (traffic__is_road(col, row)
             and (col in traffic__ROAD_LINES or row in traffic__ROAD_LINES)):
         return False
+    if tile.get('chain_of_rocks'):
+        return False
     # Cars may cross MetroLink at a marked grade crossing, but they must not
     # turn onto or spawn along its embedded/reserved alignment. The Loop
     # trolley is explicitly street-running on Delmar, so ordinary traffic is
@@ -8632,6 +8737,7 @@ lm_TILE = 64
 # flagged commercial in _COMMERCIAL_LANDMARKS - which looks better than the
 # old abstract top-down blobs did.
 lm_LANDMARK_ART = {
+    "Lambert Airport": "lambert",
     "Gateway Arch": "arch",
     "Busch Stadium": "stadium",
     "Anheuser-Busch Brewery": "brewery",
@@ -8667,6 +8773,7 @@ lm_FOOTPRINT_TILES = {
 
 #: walkable ground / plaza colour per style
 lm__GROUND = {
+    "lambert": (86, 90, 94),
     "arch": (66, 82, 54),
     "stadium": (96, 92, 88),
     "ted_drewes": (52, 52, 54),
@@ -8687,6 +8794,7 @@ lm__GROUND = {
 
 #: label position as a fraction of the footprint, chosen to sit on calm art
 lm__LABEL_AT = {
+    "lambert": (0.52, 0.92),
     "arch": (0.46, 0.40),
     "stadium": (0.34, 0.93),
     "ted_drewes": (0.50, 0.97),
@@ -11015,7 +11123,42 @@ def lm__bake_botanical(w, h):
     return s
 
 
+def lm__bake_lambert(w, h):
+    """Yamasaki's four arched terminal shells, runway and aircraft apron."""
+    s = pygame.Surface((w, h), pygame.SRCALPHA)
+    s.fill((86, 90, 94))
+    # runway on the north edge and the MetroLink/road spine down the west
+    lm__r(s, (52, 54, 58), 0, int(h * 0.13), w, max(18, int(h * 0.12)))
+    for x in range(10, w - 10, 32):
+        lm__r(s, (222, 214, 164), x, int(h * 0.19), 16, 2)
+    lm__r(s, (64, 66, 70), int(w * 0.18), 0, max(18, int(w * 0.12)), h)
+    # the 1956 terminal: four linked concrete vaults
+    tx, ty = int(w * 0.30), int(h * 0.48)
+    tw, th = int(w * 0.58), int(h * 0.22)
+    lm__r(s, lm_SHADOW, tx + 6, ty + 7, tw, th)
+    lm__r(s, (184, 184, 176), tx, ty, tw, th)
+    vault = max(16, tw // 4)
+    for i in range(4):
+        x0 = tx + i * vault
+        pygame.draw.arc(s, (238, 234, 220),
+                        (x0, ty - th // 2, vault + 3, th + 3), 0, math.pi, 4)
+        lm__r(s, (60, 82, 94), x0 + 5, ty + th // 2, vault - 8, th // 3)
+    pygame.draw.rect(s, lm_OUTLINE, (tx, ty, tw, th), 2)
+    # two tiny aircraft make the apron read instantly from above
+    for ax, ay, flip in ((int(w * 0.48), int(h * 0.34), 1),
+                         (int(w * 0.72), int(h * 0.80), -1)):
+        pygame.draw.line(s, (222, 224, 220), (ax - 18, ay), (ax + 18, ay), 4)
+        pygame.draw.line(s, (222, 224, 220), (ax, ay - 13 * flip),
+                         (ax, ay + 15 * flip), 3)
+        pygame.draw.polygon(s, (222, 224, 220),
+                            ((ax, ay - 17 * flip), (ax - 4, ay - 9 * flip),
+                             (ax + 4, ay - 9 * flip)))
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
+    return s
+
+
 lm__BAKERS = {
+    "lambert": lm__bake_lambert,
     "arch": lm__bake_arch,
     "stadium": lm__bake_stadium,
     "ted_drewes": lm__bake_ted_drewes,
@@ -11682,6 +11825,8 @@ class Job:
     # you would load a BREWERY KEG at Ted Drewes and a CRATE OF PROVEL at the
     # Botanical Garden.
     CARGO_BY_PICKUP = {
+        "Lambert Airport": ("A MISROUTED SUITCASE", "JET ENGINE PARTS",
+                            "A BOX OF TWA POSTERS"),
         "Anheuser-Busch Brewery": ("BREWERY KEG", "A PALLET OF LONGNECKS",
                                    "BEECHWOOD CHIPS", "CLYDESDALE TACK"),
         "Ted Drewes": ("A CONCRETE, UPSIDE DOWN", "FROZEN CUSTARD",
@@ -12185,7 +12330,10 @@ class Car:
 
     def move_forward_check(self, dx, dy):
         temp = self.rect.move(int(dx), int(dy))
-        if is_blocked(temp) or not (0 <= temp.left and temp.right <= MAP_WIDTH
+        bike_gate = (self.variant != 'vespa'
+                     and rect_hits_tag(temp, 'chain_of_rocks')
+                     and not rect_hits_tag(self.rect, 'chain_of_rocks'))
+        if is_blocked(temp) or bike_gate or not (0 <= temp.left and temp.right <= MAP_WIDTH
                                      and 0 <= temp.top and temp.bottom <= MAP_HEIGHT):
             return False
         self.rect.topleft = temp.topleft
@@ -13025,7 +13173,7 @@ class Game:
                           MAP_TILES_W, MAP_TILES_H, ROAD_LINES,
                           self.rail_gate_holds)
         self.cars = []
-        ordinary_parked = PARKED_CAR_COUNT - len(SHOWCASE_VEHICLES)
+        ordinary_parked = PARKED_CAR_COUNT - len(SHOWCASE_VEHICLES) - 1
         bays = parking_parking_spots(max_count=ordinary_parked,
                                      near=(px, py), radius=1400)
         for (sx, sy, sangle, _side) in bays[:ordinary_parked]:
@@ -13051,6 +13199,17 @@ class Game:
             car.parked = True
             car.velocity = 0.0
             self.cars.append(car)
+        self.chain_bike = None
+        airport_spot = free_point_near(
+            *landmark_dropoff_point(by_name["Lambert Airport"]),
+            VEHICLE_TUNING['vespa']['w'], VEHICLE_TUNING['vespa']['h'],
+            max_rings=8)
+        if airport_spot is not None:
+            self.chain_bike = Car(*airport_spot, variant='vespa')
+            self.chain_bike.angle = 0.0
+            self.chain_bike.parked = True
+            self.chain_bike.velocity = 0.0
+            self.cars.append(self.chain_bike)
         for traffic_index in range(MOVING_CAR_COUNT):
             # seeded around the player, not smeared over the whole map, so the
             # first street you see already has traffic on it - and never on top
@@ -13496,7 +13655,8 @@ class Game:
             self.legend_garage = {
                 kind for kind in state.get('legend_garage', []) if kind in LOCAL_LEGENDS
             }
-            valid_mastery = set(LOCAL_LEGENDS) | {'trash_day', 'hill_hydrants'}
+            valid_mastery = (set(LOCAL_LEGENDS)
+                             | {'trash_day', 'hill_hydrants', 'chain_escape'})
             self.legend_mastery = {
                 kind for kind in state.get('legend_mastery', []) if kind in valid_mastery
             }
@@ -15940,6 +16100,9 @@ class Game:
             self.start_local_challenge(best.variant)
         elif best.variant == 'garbage_truck':
             self.start_local_challenge('trash_day')
+        elif best is self.chain_bike:
+            if self.start_local_challenge('chain_escape'):
+                self.wanted_bump(3, 'chain_escape')
         if best.variant == 'trans_am':
             self.radio_index = 0
             self.add_toast("THE RADIO IS STUCK ON K-SHE 95ISH")
@@ -17692,6 +17855,11 @@ class Game:
         elif kind == 'trash_day':
             challenge['points'] = self.tile_route_points(TRASH_DAY_TILES)
             head, sub = "TRASH DAY", "EMPTY 6 ALLEY DUMPSTERS"
+        elif kind == 'chain_escape':
+            if self.driving is not self.chain_bike:
+                return False
+            challenge['points'] = self.tile_route_points(CHAIN_ESCAPE_TILES)
+            head, sub = "CHAIN OF ROCKS RUN", "BIKES FIT WHERE CRUISERS DON'T"
         else:
             points = self.hill_hydrant_positions()
             if first in points:
@@ -17711,6 +17879,13 @@ class Game:
             return
         kind = challenge['kind']
         self.legend_mastery.add(kind)
+        if kind == 'chain_escape':
+            self.wanted_level = 0
+            self.police = []
+            self.foot_police = []
+            self.roadblocks = []
+            self.add_callout("CROSSED THE MISSISSIPPI", hud_HUD_GREEN,
+                             ttl=FPS * 2, scale=1)
         self.cash += LOCAL_CHALLENGE_REWARD
         self.add_score(750, self.active_rect().center, mult=False)
         self.add_callout("LOCAL LEGEND MASTERED", hud_HUD_GOLD, ttl=FPS * 2, scale=2)
@@ -17750,7 +17925,8 @@ class Game:
             text = f"CHECKPOINTS {done}/{total}"
             head = {'grocery_cart': "THE BIG CART SLALOM",
                     'trash_day': "TRASH DAY",
-                    'hill_hydrants': "THE HILL HYDRANTS"}[kind]
+                    'hill_hydrants': "THE HILL HYDRANTS",
+                    'chain_escape': "CHAIN OF ROCKS RUN"}[kind]
         return head, text, challenge['steps_left'], challenge['time_limit']
 
     def update_local_challenge(self):
@@ -17780,7 +17956,8 @@ class Game:
                 self.finish_local_challenge()
             return
 
-        required = {'grocery_cart': 'grocery_cart', 'trash_day': 'garbage_truck'}.get(kind)
+        required = {'grocery_cart': 'grocery_cart', 'trash_day': 'garbage_truck',
+                    'chain_escape': 'vespa'}.get(kind)
         if required is not None and (self.driving is None or self.driving.variant != required):
             return
         if kind == 'hill_hydrants' and self.driving is not None:
@@ -17816,6 +17993,31 @@ class Game:
         tile = GAME_MAP[r][c]
         rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
         t = tile['type']
+
+        if tile.get('des_peres'):
+            pygame.draw.rect(self.screen, (106, 110, 108), rect)
+            pygame.draw.line(self.screen, (70, 74, 76), rect.topleft,
+                             rect.topright, 3)
+            pygame.draw.line(self.screen, (70, 74, 76), rect.bottomleft,
+                             rect.bottomright, 3)
+            pygame.draw.line(self.screen, (54, 82, 88),
+                             (rect.left, rect.centery),
+                             (rect.right, rect.centery), 4)
+            pygame.draw.line(self.screen, (142, 146, 142),
+                             (rect.left, rect.centery - 12),
+                             (rect.right, rect.centery - 12), 1)
+            return
+
+        if tile.get('chain_of_rocks'):
+            pygame.draw.rect(self.screen, (64, 78, 76), rect)
+            pygame.draw.line(self.screen, (198, 184, 142), rect.topleft,
+                             rect.topright, 3)
+            pygame.draw.line(self.screen, (198, 184, 142), rect.bottomleft,
+                             rect.bottomright, 3)
+            pygame.draw.line(self.screen, (230, 202, 98),
+                             (rect.left, rect.centery),
+                             (rect.right, rect.centery), 1)
+            return
 
         if t == TILE_BUILDING:
             return  # roofs + shadows rendered in their own passes
@@ -19865,8 +20067,10 @@ class Game:
             entries.append((f"L {info['name']} {status}", info['color']))
         hydrant_status = "MASTERED" if 'hill_hydrants' in self.legend_mastery else "OPEN"
         trash_status = "MASTERED" if 'trash_day' in self.legend_mastery else "OPEN"
+        chain_status = "MASTERED" if 'chain_escape' in self.legend_mastery else "OPEN"
         entries += [(f"HILL HYDRANTS {hydrant_status}", props_C_HILL_GREEN),
-                    (f"TRASH DAY {trash_status}", cars_CITY_SERVICE_ORANGE)]
+                    (f"TRASH DAY {trash_status}", cars_CITY_SERVICE_ORANGE),
+                    (f"CHAIN OF ROCKS {chain_status}", (116, 190, 206))]
         colw = 104
         for i, (name, col) in enumerate(entries):
             cx = lx0 + (i // rows) * colw
