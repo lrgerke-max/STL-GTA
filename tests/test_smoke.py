@@ -58,6 +58,12 @@ def reset(g):
     g.jobs_failed = 0
     g.job_cooldown = 0
     g.job = M.Job.generate()
+    g.legend_rumors = set()
+    g.legend_discovered = set()
+    g.legend_garage = set()
+    g.legend_mastery = set()
+    g.local_challenge = None
+    g.hill_hint_shown = False
     g.side_mission = None
     g.side_mission_serial = 0
     g.side_mission_cooldown = 0
@@ -79,6 +85,11 @@ def reset(g):
     g.death_kind = None
     g.death_stats = None
     g.cop_dispatch = 0
+    center = g.active_rect().center
+    g.pursuit_agency = M.police_jurisdiction_at(
+        center[0] // M.TILE_SIZE, center[1] // M.TILE_SIZE)
+    g.pending_pursuit_agency = g.pursuit_agency
+    g.jurisdiction_timer = 0
     g.foot_police = []
     g.foot_cop_respawn = 0
     g.crime_pos = None
@@ -180,6 +191,58 @@ def dispatch_cops(g, star, limit=None):
             g.wanted_level = star
     raise AssertionError(
         f"only {len(g.police)}/{want} cruisers arrived for {star} stars")
+
+
+def test_city_county_line_requires_a_stable_crossing_before_handoff():
+    g = game()
+    teleport(g, (15 * M.TILE_SIZE, 20 * M.TILE_SIZE))
+    g.pursuit_agency = 'city'
+    g.pending_pursuit_agency = 'city'
+    g.wanted_level = 3
+    g.heat_timer = 47
+    g.police = [M.Car(15 * M.TILE_SIZE, 20 * M.TILE_SIZE,
+                      color=M.POLICE_COLOR, variant='police')]
+    g.foot_police = [M.FootCop(15 * M.TILE_SIZE, 20 * M.TILE_SIZE)]
+    g.roadblocks = [{'placeholder': True}]
+    teleport(g, (8 * M.TILE_SIZE, 20 * M.TILE_SIZE))
+    for _ in range(M.JURISDICTION_CONFIRM_STEPS - 1):
+        assert not g.update_pursuit_agency()
+        assert g.pursuit_agency == 'city'
+    assert g.update_pursuit_agency()
+    assert g.pursuit_agency == 'county'
+    assert g.wanted_level == 3 and g.heat_timer == 47
+    assert not g.police and not g.foot_police and not g.roadblocks
+
+
+def test_dispatched_cruisers_and_sirens_follow_jurisdiction_not_stars():
+    g = game()
+    teleport(g, (5 * M.TILE_SIZE, 20 * M.TILE_SIZE))
+    g.pursuit_agency = 'county'
+    spot = g.cop_spawn_point('county')
+    assert spot is not None
+    assert M.police_jurisdiction_at(spot[0] // M.TILE_SIZE,
+                                    spot[1] // M.TILE_SIZE) == 'county'
+    # Keep the unit inside the audible radius; cop_spawn_point deliberately
+    # varies and this test is about agency timbre, not dispatch distance.
+    cop = M.Car(6 * M.TILE_SIZE, 20 * M.TILE_SIZE,
+                color=M.POLICE_COLOR, variant='police')
+    cop.police_agency = 'county'
+    cop.driver = 'police'
+    g.police = [cop]
+    g.wanted_level = 5
+    with patch.object(M, 'snd__enabled', True), \
+            patch.object(M, 'snd_loop') as loop, patch.object(M, 'snd_stop'):
+        g.update_audio()
+    sirens = [call.args[1] for call in loop.call_args_list
+              if call.args and call.args[0] == M.snd_CH_SIREN]
+    assert sirens and sirens[-1].startswith('wail')
+    cop.police_agency = 'city'
+    with patch.object(M, 'snd__enabled', True), \
+            patch.object(M, 'snd_loop') as loop, patch.object(M, 'snd_stop'):
+        g.update_audio()
+    sirens = [call.args[1] for call in loop.call_args_list
+              if call.args and call.args[0] == M.snd_CH_SIREN]
+    assert sirens and sirens[-1].startswith('yelp')
 
 
 def test_headless_run_holds_invariants():
@@ -1558,6 +1621,23 @@ def test_each_local_mastery_route_can_be_completed_and_persists():
     assert 'hill_hydrants' in g.legend_mastery
 
 
+def test_local_challenges_exclusively_own_the_objective_slot():
+    g = game()
+    offered = g.job
+    assert offered is not None and not offered.collected
+    assert g.start_local_challenge('hill_hydrants')
+    assert g.job is None
+    g.update_job()
+    assert g.job is None, "dispatcher must stay parked during a local challenge"
+    teleport(g, g.side_mission_contact()[0])
+    assert not g.try_start_side_mission()
+    g.fail_local_challenge("test complete")
+    assert g.job_cooldown >= M.FPS
+
+    g.side_mission = object()
+    assert not g.start_local_challenge('hill_hydrants')
+
+
 def test_fixed_lambert_bike_starts_and_completes_chain_of_rocks_escape():
     g = M.Game(start_fullscreen=False)
     bike = g.chain_bike
@@ -1573,6 +1653,20 @@ def test_fixed_lambert_bike_starts_and_completes_chain_of_rocks_escape():
     assert 'chain_escape' in g.legend_mastery
     assert g.local_challenge is None
     assert g.wanted_level == 0 and not g.police
+
+
+def test_fixed_lambert_bike_is_not_streamed_away_and_respawns_after_destruction():
+    g = M.Game(start_fullscreen=False)
+    bike = g.chain_bike
+    home = bike.rect.center
+    teleport(g, (70 * M.TILE_SIZE, 70 * M.TILE_SIZE))
+    for _ in range(30):
+        g.update_population()
+    assert bike.rect.center == home and bike in g.cars
+    g.explode(bike)
+    assert g.chain_bike is not bike
+    assert g.chain_bike in g.cars and g.chain_bike.parked
+    assert math.dist(g.chain_bike.rect.center, home) <= M.TILE_SIZE * 2
 
 
 def test_chain_of_rocks_bollards_admit_bikes_not_cars():
@@ -1672,6 +1766,39 @@ def test_halloween_event_stages_kids_and_rewards_a_joke():
     assert g.player_hp == M.PLAYER_MAX_HP - 8
 
 
+def test_splattered_halloween_actor_cannot_reward_a_ghost_joke():
+    g = game()
+    g.city_event_key = 'halloween_jokes'
+    g.frame = M.CITY_EVENT_ANNOUNCE_AT
+    g.update_city_event()
+    child = g.halloween_kids[0]
+    g.halloween_kids = [child]
+    teleport(g, child.rect.center)
+    before = g.cash
+    g.splatter_ped(child, pygame.Vector2(), score=False)
+    assert child not in g.pedestrians and child not in g.halloween_kids
+    assert not g.try_halloween_joke()
+    assert g.cash == before
+
+
+def test_loading_clears_old_event_costumes_and_trolley_delay():
+    g = game()
+    actor = g.pedestrians[0]
+    actor.set_kind('cards_fan#0')
+    actor.event_actor = True
+    trolley = next(vehicle for vehicle in g.rail if vehicle.kind == 'trolley')
+    trolley.speed = -0.65
+    g.radio_break_serial = 7
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, 'savegame.json')
+        g.save_game(announce=False, path=path)
+        assert g.load_game(path=path)
+    assert not actor.event_actor and not actor.event_kid
+    assert not actor.kind.startswith('cards_fan#')
+    assert abs(trolley.speed) == M.TROLLEY_SPEED
+    assert g.radio_break_serial == 7
+
+
 def test_named_city_events_stage_their_crowd_and_slow_local_traffic():
     g = game()
     g.city_event_key = 'cherokee_festival'
@@ -1763,6 +1890,21 @@ def test_city_refuse_truck_is_orange_and_spells_city_on_both_sides():
                     for x in range(frames[0].get_width())}
     assert {M.cars_CITY_SERVICE_ORANGE,
             M.cars_CITY_SERVICE_LETTERING} <= frame_colors
+
+
+def test_city_service_fleet_is_orange_black_and_does_not_raise_density():
+    assert M.MOVING_CAR_COUNT == 10
+    for variant in ('street_sweeper', 'forestry_truck'):
+        assert M.CIVILIAN_WEIGHTED.count(variant) == 1
+        assert variant not in M.PARKED_VARIANTS_WEIGHTED
+        assert variant in M.VEHICLE_TUNING
+        assert not M.Car(100, 100, variant=variant).temp_tag
+        grid = M.cars_big_grid(variant)
+        colors = {pixel for row in grid for pixel in row if pixel is not None}
+        assert M.cars_CITY_SERVICE_ORANGE in colors
+        assert M.cars_CITY_SERVICE_LETTERING in colors
+        for color in M.CAR_COLORS:
+            assert (variant, color) in M.CAR_SPRITES
 
 
 def test_the_streets_are_actually_populated():
@@ -3259,9 +3401,11 @@ def test_school_combobox_types_filters_and_selects():
 def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
     g = game()
     old_cwd = os.getcwd()
+    old_save, old_legacy = M.SAVE_PATH, M.LEGACY_SAVE_PATH
     with tempfile.TemporaryDirectory() as td:
         try:
             os.chdir(td)
+            M.SAVE_PATH = M.LEGACY_SAVE_PATH = os.path.join(td, "savegame.json")
             g.character_look = len(M.CHARACTER_LOOKS) - 1
             g.character_school = "Vashon High School"
             g.job_types_done = {'courier', 'hot'}
@@ -3323,15 +3467,18 @@ def test_character_profile_arch_progress_and_arsenal_round_trip_in_v6_save():
             assert (g.side_missions_done, g.side_missions_failed,
                     g.side_mission_serial) == (4, 1, 5)
         finally:
+            M.SAVE_PATH, M.LEGACY_SAVE_PATH = old_save, old_legacy
             os.chdir(old_cwd)
 
 
 def test_legacy_save_is_rejected_without_mutating_the_live_game():
     g = game()
     old_cwd = os.getcwd()
+    old_save, old_legacy = M.SAVE_PATH, M.LEGACY_SAVE_PATH
     with tempfile.TemporaryDirectory() as td:
         try:
             os.chdir(td)
+            M.SAVE_PATH = M.LEGACY_SAVE_PATH = os.path.join(td, "savegame.json")
             with open("savegame.json", "w") as f:
                 json.dump({
                     'version': 2,
@@ -3346,15 +3493,18 @@ def test_legacy_save_is_rejected_without_mutating_the_live_game():
             assert (g.player_rect.center, g.cash, g.banked,
                     g.arch_job_unlocked, g.arch_job_phase) == before
         finally:
+            M.SAVE_PATH, M.LEGACY_SAVE_PATH = old_save, old_legacy
             os.chdir(old_cwd)
 
 
 def test_missing_and_malformed_saves_are_safe_on_the_title_screen():
     g = game()
     old_cwd = os.getcwd()
+    old_save, old_legacy = M.SAVE_PATH, M.LEGACY_SAVE_PATH
     with tempfile.TemporaryDirectory() as td:
         try:
             os.chdir(td)
+            M.SAVE_PATH = M.LEGACY_SAVE_PATH = os.path.join(td, "savegame.json")
             assert g.title_options() == ("NEW GAME", "QUIT")
             before = (g.player_rect.center, g.cash, g.banked, g.state)
             assert not g.load_game()
@@ -3384,6 +3534,28 @@ def test_missing_and_malformed_saves_are_safe_on_the_title_screen():
                 assert not g.load_game()
                 assert (g.player_rect.center, g.cash, g.banked, g.state) == before
         finally:
+            M.SAVE_PATH, M.LEGACY_SAVE_PATH = old_save, old_legacy
+            os.chdir(old_cwd)
+
+
+def test_default_save_path_is_independent_of_launch_directory():
+    g = game()
+    old_cwd = os.getcwd()
+    old_save, old_legacy = M.SAVE_PATH, M.LEGACY_SAVE_PATH
+    with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as launch_dir:
+        try:
+            M.SAVE_PATH = os.path.join(data_dir, "STL-GTA", "savegame.json")
+            M.LEGACY_SAVE_PATH = os.path.join(data_dir, "legacy-savegame.json")
+            os.chdir(launch_dir)
+            g.cash = 4321
+            g.save_game(announce=False)
+            assert os.path.isfile(M.SAVE_PATH)
+            assert not os.path.exists(os.path.join(launch_dir, "savegame.json"))
+            g.cash = 0
+            assert g.load_game()
+            assert g.cash == 4321
+        finally:
+            M.SAVE_PATH, M.LEGACY_SAVE_PATH = old_save, old_legacy
             os.chdir(old_cwd)
 
 

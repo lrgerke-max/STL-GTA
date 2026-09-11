@@ -10,6 +10,16 @@ import random
 import missions as mission_logic
 import throwables as throwable_logic
 
+GAME_DIR = os.path.dirname(os.path.abspath(__file__))
+# Saves belong to the player, not whichever folder happened to be current when
+# a desktop shortcut launched the game. Keep the old repo-adjacent file as a
+# read-only migration source so existing progress is not stranded.
+_user_data_root = (os.environ.get('LOCALAPPDATA')
+                   or os.environ.get('XDG_DATA_HOME')
+                   or os.path.join(os.path.expanduser('~'), '.local', 'share'))
+SAVE_PATH = os.path.join(_user_data_root, 'STL-GTA', 'savegame.json')
+LEGACY_SAVE_PATH = os.path.join(GAME_DIR, 'savegame.json')
+
 # ============================================================
 # STL-GTA: a gritty, top-down, GTA1-style driving sandbox
 # set in a stylized St. Louis. Rendered at a chunky internal
@@ -515,6 +525,8 @@ COP_FOV_BY_STAR = (0.0, 0.95, 1.00, 1.05, 1.10, 1.20)     # radians, half-angle
 # Steps before the *first* unit of a fresh star actually turns up. One star
 # used to conjure a cruiser on top of you inside a second.
 COP_RESPONSE_BY_STAR = (0, FPS * 3, FPS * 2, FPS * 1, FPS // 2, 0)
+JURISDICTION_CONFIRM_STEPS = 30
+CITY_LIMIT_COL = 9
 
 # --- High-heat containment -------------------------------------------------
 # Four stars changes the shape of the pursuit instead of merely adding another
@@ -1983,6 +1995,7 @@ CLYDESDALE_SOUTH = 72
 TROLLEY_ROW = 21
 TROLLEY_COL_MIN = 0
 TROLLEY_COL_MAX = 34
+TROLLEY_SPEED = 1.9
 RAIL_GATE_WARNING_DISTANCE = 360.0
 RAIL_GATE_ARM_RATE = 0.028
 RAIL_GATE_STOP_DISTANCE = 92.0
@@ -2323,12 +2336,14 @@ PARKED_VARIANTS_WEIGHTED = (['sedan'] * 8 + ['coupe'] * 5 + ['van'] * 4
                             + ['pickup'] * 4 + ['taxi'] * 2 + ['trans_am'])
 
 # What ambient traffic / parked cars roll from. The St. Louis service vehicles
-# (a City refuse truck, a box truck, a school bus, a Hill delivery scooter) are
-# in the mix but rare, so the streets still read as mostly ordinary cars.
+# (orange City refuse, sweeping, and forestry trucks, a box truck, a school
+# bus, a Hill delivery scooter) are in the mix but rare, so the streets still
+# read as mostly ordinary cars without increasing the fixed traffic count.
 CIVILIAN_WEIGHTED = (['sedan'] * 6 + ['coupe'] * 4 + ['van'] * 3 + ['pickup'] * 3
                       + ['taxi'] * 2 + ['box_truck'] * 2 + ['vespa'] * 2
                       + ['bus'] * 1 + ['metrobus_70'] * 1
-                      + ['garbage_truck'] * 1 + ['trans_am'] * 1)
+                      + ['garbage_truck'] * 1 + ['street_sweeper'] * 1
+                      + ['forestry_truck'] * 1 + ['trans_am'] * 1)
 
 # Random rarity made the orange truck absent from roughly two games in three,
 # and streaming preserves a car's variant forever. Reserve a real fleet slot so
@@ -2494,6 +2509,8 @@ SKID_MIN_SLIP = 1.6         # ... and before they leave a mark on the road
 # (34x18, max_steer 0.045, speed_factor 1.0). speed_factor scales traffic pace.
 VEHICLE_TUNING = {
     'garbage_truck': dict(w=42, h=18, acceleration=0.15, max_steer=0.034, speed_factor=0.72),
+    'street_sweeper':dict(w=38, h=18, acceleration=0.18, max_steer=0.038, speed_factor=0.76),
+    'forestry_truck':dict(w=40, h=18, acceleration=0.19, max_steer=0.037, speed_factor=0.80),
     'bus':           dict(w=44, h=18, acceleration=0.17, max_steer=0.032, speed_factor=0.78),
     'metrobus_70':   dict(w=44, h=18, acceleration=0.18, max_steer=0.032, speed_factor=0.80),
     'box_truck':     dict(w=38, h=18, acceleration=0.20, max_steer=0.038, speed_factor=0.86),
@@ -2554,8 +2571,9 @@ def bake_car_sprites():
             sets[(variant, c)] = entry
     # St. Louis service vehicles: fixed liveries, so one bake covers every
     # colour slot the spawner might ask for (same trick as the taxi).
-    for variant in ('garbage_truck', 'bus', 'metrobus_70', 'box_truck', 'vespa',
-                    'mudfoot', 'grocery_cart'):
+    for variant in ('garbage_truck', 'street_sweeper', 'forestry_truck',
+                    'bus', 'metrobus_70', 'box_truck', 'vespa', 'mudfoot',
+                    'grocery_cart'):
         frames = _scale_frames(cars_bake_variant(variant), SPRITE_SCALE_CAR)
         entry = (frames, [cars_make_shadow(f) for f in frames])
         for c in CAR_COLORS:
@@ -2975,6 +2993,28 @@ def _stamp_rail_corridors(game_map):
                     'rail_crossing': False, 'rail_embedded': False,
                 }
 
+    # A rail vehicle's body extends behind its centre when it reaches a
+    # bumper. Lambert's new terminal starts only two tiles from the map edge,
+    # so its westbound train used to put the rear third through a solid
+    # terminal tile during the turnaround. Reserve a short straight headshunt
+    # behind the first waypoint; this is track the train physically occupies,
+    # even though its centre never travels over it.
+    (c0, r0), (c1, r1) = METROLINK_ROUTE[:2]
+    dc = 0 if c1 == c0 else (-1 if c1 > c0 else 1)
+    dr = 0 if r1 == r0 else (-1 if r1 > r0 else 1)
+    axis = 'h' if dr == 0 else 'v'
+    for step in (1, 2):
+        c, r = c0 + dc * step, r0 + dr * step
+        if not (0 <= c < MAP_TILES_W and 0 <= r < MAP_TILES_H):
+            continue
+        owner = game_map[r][c].get('landmark')
+        game_map[r][c] = {
+            'type': TILE_RAIL, 'collidable': False,
+            'landmark': owner, 'color': (72, 68, 62),
+            'rail': 'metrolink', 'rail_axis': axis,
+            'rail_crossing': False, 'rail_embedded': False,
+        }
+
     # The Loop trolley is street-running: rails inset into Delmar, no separate
     # right-of-way and no gates. It also stops after two miles, like the real
     # one, instead of crossing the entire city.
@@ -3260,6 +3300,11 @@ def hood_at(col, row):
 
 def hood_name(hood):
     return HOOD_NAMES.get(hood, hood.upper())
+
+
+def police_jurisdiction_at(col, row):
+    """The compressed western city line: Skinker separates city and county."""
+    return 'county' if col < CITY_LIMIT_COL and row < 63 else 'city'
 
 
 HOOD_SIGNS = {
@@ -4736,6 +4781,8 @@ def cars__build_grid(spec, body):
 # --------------------------------------------------------------------------
 cars_BIG_SPECS = {
     'garbage_truck': (48, 22),
+    'street_sweeper':(44, 22),
+    'forestry_truck':(46, 22),
     'bus':           (54, 20),
     'metrobus_70':   (54, 20),
     'box_truck':     (44, 20),
@@ -4817,6 +4864,51 @@ def cars_big_grid(kind):
                         if bit == '#':
                             cars__put(grid, 7 + i * 4 + gx, y0 + gy,
                                       cars_CITY_SERVICE_LETTERING)
+    elif kind == 'street_sweeper':
+        orange = cars_CITY_SERVICE_ORANGE
+        ink = cars_CITY_SERVICE_LETTERING
+        # Short forward cab, low debris hopper, curb brush and water tank.
+        cars__put_r(grid, 3, top + 3, 28, bot - 2, orange)
+        cars__put_r(grid, 29, top, 42, bot, orange)
+        cars__put_r(grid, 39, top + 2, 41, bot - 2, cars_GLASS_FRONT)
+        cars__put_r(grid, 31, top + 3, 34, bot - 3, cars__lighter(orange))
+        cars__put_r(grid, 5, top + 5, 25, top + 7, ink)
+        cars__put_r(grid, 5, bot - 7, 25, bot - 5, ink)
+        # Twin yellow rotary brushes protrude at the kerb edges.
+        brush = (224, 178, 54)
+        for bx in (14, 23):
+            cars__put_r(grid, bx, 0, bx + 5, 3, ink)
+            cars__put_r(grid, bx + 1, 0, bx + 4, 1, brush)
+            cars__put_r(grid, bx, H - 4, bx + 5, H - 1, ink)
+            cars__put_r(grid, bx + 1, H - 2, bx + 4, H - 1, brush)
+        # Black municipal lettering remains readable at normal sprite scale.
+        for y0 in (top + 1, bot - 5):
+            cars__put_r(grid, 8, y0, 10, y0 + 4, ink)
+            cars__put_r(grid, 14, y0, 16, y0 + 4, ink)
+            cars__put_r(grid, 8, y0, 16, y0, ink)
+            cars__put_r(grid, 8, y0 + 4, 16, y0 + 4, ink)
+    elif kind == 'forestry_truck':
+        orange = cars_CITY_SERVICE_ORANGE
+        ink = cars_CITY_SERVICE_LETTERING
+        # Forestry utility pickup with a chip box, ladder rack and beacon.
+        cars__put_r(grid, 3, top + 2, 28, bot - 2, orange)
+        cars__put_r(grid, 29, top, 44, bot, orange)
+        cars__put_r(grid, 41, top + 2, 43, bot - 2, cars_GLASS_FRONT)
+        cars__put_r(grid, 32, top + 3, 36, bot - 3, cars__lighter(orange))
+        cars__put_r(grid, 4, top + 1, 27, top + 2, ink)
+        cars__put_r(grid, 4, bot - 2, 27, bot - 1, ink)
+        for rx in (7, 23):
+            cars__put_r(grid, rx, top, rx + 1, bot, ink)
+        cars__put_r(grid, 7, top, 25, top, ink)
+        cars__put_r(grid, 7, bot, 25, bot, ink)
+        # CITY bars plus a tiny green tree badge distinguish it from refuse.
+        for y0 in (top + 4, bot - 7):
+            cars__put_r(grid, 9, y0, 20, y0 + 1, ink)
+            cars__put_r(grid, 9, y0 + 3, 20, y0 + 4, ink)
+        tree = (58, 104, 54)
+        cars__put_r(grid, 24, top + 5, 27, top + 8, tree)
+        cars__put_r(grid, 25, bot - 8, 27, bot - 5, tree)
+        cars__put_r(grid, 34, 0, 38, 1, cars_METROBUS_ROUTE)
     elif kind == 'bus':
         body = (232, 182, 40)                  # school-bus yellow
         trim = (26, 26, 28)
@@ -12190,6 +12282,7 @@ class Car:
         tag_hash = (int(x) * 31 + int(y) * 17
                     + sum((index + 1) * ord(ch) for index, ch in enumerate(self.variant)))
         self.temp_tag = self.variant in CIVILIAN_VARIANTS and tag_hash % 100 < 8
+        self.police_agency = 'city'
         tune = VEHICLE_TUNING.get(self.variant, {})
         self.width = tune.get('w', VEHICLE_DEFAULT_W)
         self.height = tune.get('h', VEHICLE_DEFAULT_H)
@@ -12247,7 +12340,9 @@ class Car:
         self.stall = 0           # steps stopped in traffic; feeds the jam breaker
         # Damage model. Enough hits and the car catches fire (burn > 0, a fuse
         # counting down) then explodes. Trucks soak more, the scooter is paper.
-        self.max_hp = {'bus': 200.0, 'garbage_truck': 185.0, 'box_truck': 145.0,
+        self.max_hp = {'bus': 200.0, 'garbage_truck': 185.0,
+                       'street_sweeper': 165.0, 'forestry_truck': 155.0,
+                       'box_truck': 145.0,
                        'mudfoot': 190.0, 'grocery_cart': 125.0,
                        'vespa': 32.0}.get(self.variant, 100.0)
         self.hp = self.max_hp
@@ -12616,6 +12711,13 @@ class Car:
         rect = sprite.get_rect(center=(int(screen_pos[0]), int(screen_pos[1])))
         screen.blit(shadow, rect.move(SHADOW_DX, SHADOW_DY))
         screen.blit(sprite, rect)
+        if self.variant == 'police' and self.police_agency == 'county':
+            # County cars are white-belted instead of the city's solid blue.
+            # This tiny overlay stays readable at every baked heading.
+            pygame.draw.rect(screen, (238, 236, 224),
+                             (int(screen_pos[0]) - 7, int(screen_pos[1]) - 2, 14, 4))
+            pygame.draw.rect(screen, (36, 62, 118),
+                             (int(screen_pos[0]) - 2, int(screen_pos[1]) - 2, 4, 4))
         if self.temp_tag:
             # The crooked paper temp tag: tiny, bright, and unmistakably taped
             # to the rear instead of mounted like a plate.
@@ -12881,7 +12983,7 @@ def build_rail_vehicles():
     trains = [
         RailVehicle(ml, west, 3.1, s=600.0, kind='metrolink'),
         RailVehicle(ml, east, -3.1, kind='metrolink'),
-        RailVehicle(tr, trolley_path, 1.9, kind='trolley'),
+        RailVehicle(tr, trolley_path, TROLLEY_SPEED, kind='trolley'),
         RailVehicle(cl, horses, 0.55, s=TILE_SIZE * 6.0, kind='clydesdale'),
     ]
     trains[1].s = trains[1].length - 1300.0
@@ -13200,11 +13302,13 @@ class Game:
             car.velocity = 0.0
             self.cars.append(car)
         self.chain_bike = None
+        self.chain_bike_home = None
         airport_spot = free_point_near(
             *landmark_dropoff_point(by_name["Lambert Airport"]),
             VEHICLE_TUNING['vespa']['w'], VEHICLE_TUNING['vespa']['h'],
             max_rings=8)
         if airport_spot is not None:
+            self.chain_bike_home = (int(airport_spot[0]), int(airport_spot[1]))
             self.chain_bike = Car(*airport_spot, variant='vespa')
             self.chain_bike.angle = 0.0
             self.chain_bike.parked = True
@@ -13309,6 +13413,9 @@ class Game:
         self.hidden = False          # still, in cover, unseen: heat drains fast
         self.hide_timer = 0
         self.cop_dispatch = 0        # steps until the next cruiser is sent
+        self.pursuit_agency = police_jurisdiction_at(px // TILE_SIZE, py // TILE_SIZE)
+        self.pending_pursuit_agency = self.pursuit_agency
+        self.jurisdiction_timer = 0
         self.hurt_cd = 0             # i-frames after a car hits you on foot
         self.foot_police = []        # beat cops; the unit that can arrest you
         self.foot_cop_respawn = 0    # a dropped officer stays gone for a beat
@@ -13495,7 +13602,13 @@ class Game:
 
     # ---------------- persistence ----------------
     @staticmethod
-    def _read_save_state(path="savegame.json"):
+    def _save_read_path(path=None):
+        if path is not None:
+            return os.fspath(path)
+        return SAVE_PATH if os.path.isfile(SAVE_PATH) else LEGACY_SAVE_PATH
+
+    @staticmethod
+    def _read_save_state(path=None):
         """Read and validate a current save before any live state is changed.
 
         The title screen probes this too. A file merely existing is not enough
@@ -13503,7 +13616,8 @@ class Game:
         old schemas all stay on the safe NEW GAME path instead of failing after
         the player has already selected them.
         """
-        with open(path, 'r') as f:
+        path = Game._save_read_path(path)
+        with open(path, 'r', encoding='utf-8') as f:
             state = json.load(f)
         if not isinstance(state, dict):
             raise ValueError("save root is not an object")
@@ -13534,7 +13648,7 @@ class Game:
             value = state.get(key, [])
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError(f"invalid {key} list")
-        for key in ('radio_index', 'city_event_seed'):
+        for key in ('radio_index', 'radio_break_serial', 'city_event_seed'):
             if key in state and (isinstance(state[key], bool) or not isinstance(state[key], int)):
                 raise ValueError(f"invalid {key}")
         arsenal = state['weapons']
@@ -13564,8 +13678,9 @@ class Game:
                 raise ValueError("negative ammunition")
         return state
 
-    def loadable_save_exists(self, path="savegame.json"):
+    def loadable_save_exists(self, path=None):
         """Cheap title-screen probe, reparsing only when the file changes."""
+        path = self._save_read_path(path)
         absolute = os.path.abspath(path)
         try:
             stat = os.stat(path)
@@ -13583,7 +13698,7 @@ class Game:
         self._save_probe_valid = valid
         return valid
 
-    def save_game(self, announce=True):
+    def save_game(self, announce=True, path=None):
         here = self.active_rect().center
         self._store_current_ammo()
         state = {
@@ -13599,6 +13714,7 @@ class Game:
             'legend_garage': sorted(self.legend_garage),
             'legend_mastery': sorted(self.legend_mastery),
             'radio_index': self.radio_index,
+            'radio_break_serial': self.radio_break_serial,
             'city_event_seed': self.city_event_seed,
             'jobs_done': self.jobs_done,
             'jobs_failed': self.jobs_failed,
@@ -13622,7 +13738,10 @@ class Game:
             },
         }
         try:
-            with open("savegame.json", 'w') as f:
+            target = os.fspath(path) if path is not None else SAVE_PATH
+            parent = os.path.dirname(os.path.abspath(target))
+            os.makedirs(parent, exist_ok=True)
+            with open(target, 'w', encoding='utf-8') as f:
                 json.dump(state, f)
             self._save_probe_signature = None
             if announce:
@@ -13630,9 +13749,9 @@ class Game:
         except OSError as e:
             self.add_toast(f"Save failed: {e}")
 
-    def load_game(self):
+    def load_game(self, path=None):
         try:
-            state = self._read_save_state()
+            state = self._read_save_state(path)
             if self.driving:                      # step out before teleporting
                 self.driving.driver = None
                 self.driving.parked = True
@@ -13663,15 +13782,14 @@ class Game:
             self.local_challenge = None
             self.hill_hint_shown = 'hill_hydrants' in self.legend_mastery
             self.radio_index = int(state.get('radio_index', 0)) % len(RADIO_STATIONS)
+            self.radio_break_serial = max(0, int(state.get('radio_break_serial', 0)))
             prior_event_seed = int(state.get('city_event_seed', self.city_event_seed))
             self.city_event_seed = (prior_event_seed * 1103515245 + 12345) & 0x3fffffff
             self.city_event_key = tuple(CITY_EVENT_DEFS)[self.city_event_seed % len(CITY_EVENT_DEFS)]
             self.city_event_announced = False
             self.halloween_kids = []
             self.halloween_jokes_told = 0
-            for ped in self.pedestrians:
-                ped.event_actor = False
-                ped.event_kid = False
+            self.reset_city_event_world()
             self.radio_break_after = self.frame + RADIO_BREAK_FIRST
             self.legend_hint_after = self.frame + LOCAL_LEGEND_HINT_FIRST
             self.jobs_done = state.get('jobs_done', 0)
@@ -13711,6 +13829,11 @@ class Game:
             self.foot_police = []
             self.roadblocks = []
             self.speech_bubbles = []
+            here = self.active_rect().center
+            self.pursuit_agency = police_jurisdiction_at(
+                here[0] // TILE_SIZE, here[1] // TILE_SIZE)
+            self.pending_pursuit_agency = self.pursuit_agency
+            self.jurisdiction_timer = 0
             self.side_mission = None
             self.side_mission_cooldown = FPS * 2
             self.side_target_car = None
@@ -14171,11 +14294,22 @@ class Game:
         self.add_toast(f"{station['name']}: {line}")
         self.play_sound(f'radio{self.radio_index}', vol=0.42, gap=FPS)
 
-    def stage_city_event_people(self):
-        """Retype a visible slice of the crowd so today's event changes streets."""
+    def reset_city_event_world(self):
+        """Undo temporary actors and rail tuning before staging another day."""
         for ped in self.pedestrians:
+            if getattr(ped, 'event_actor', False):
+                ped.set_kind(self._ped_kind_for(*ped.rect.center))
             ped.event_actor = False
             ped.event_kid = False
+            ped.joke_told = False
+        self.halloween_kids = []
+        for vehicle in self.rail:
+            if vehicle.kind == 'trolley':
+                vehicle.speed = math.copysign(TROLLEY_SPEED, vehicle.speed or 1.0)
+
+    def stage_city_event_people(self):
+        """Retype a visible slice of the crowd so today's event changes streets."""
+        self.reset_city_event_world()
         tile = CITY_EVENT_VENUES.get(self.city_event_key)
         center = ((tile[0] * TILE_SIZE + TILE_SIZE // 2,
                    tile[1] * TILE_SIZE + TILE_SIZE // 2)
@@ -14259,7 +14393,8 @@ class Game:
             return False
         center = self.player_rect.center
         candidates = [ped for ped in self.halloween_kids
-                      if not getattr(ped, 'joke_told', False)
+                      if ped in self.pedestrians
+                      and not getattr(ped, 'joke_told', False)
                       and math.dist(center, ped.rect.center) <= 46]
         if not candidates:
             return False
@@ -14288,7 +14423,9 @@ class Game:
                 nearest = min(candidates, key=lambda car: math.dist(center, car.rect.center))
                 self.play_sound(key, nearest.rect.center, vol=volume,
                                 gap=cadence - 10, reach=reach)
-        trucks = [car for car in audible if car.variant == 'garbage_truck']
+        trucks = [car for car in audible
+                  if car.variant in ('garbage_truck', 'street_sweeper',
+                                     'forestry_truck')]
         if trucks:
             nearest = min(trucks, key=lambda car: math.dist(center, car.rect.center))
             if nearest.velocity < -0.15 and self.frame % 55 == 0:
@@ -14425,6 +14562,8 @@ class Game:
         self.kick(2.2)
         if ped in self.pedestrians:
             self.pedestrians.remove(ped)
+            if ped in self.halloween_kids:
+                self.halloween_kids.remove(ped)
             spot = random_pedestrian_point()
             nx, ny = spot
             self.pedestrians.append(Pedestrian(nx, ny, self._ped_kind_for(nx, ny)))
@@ -15073,7 +15212,8 @@ class Game:
             if (car is self.driving or car is self.side_target_car
                     or car.driver is not None or car.burn > 0):
                 continue
-            if car.parked and car.variant in SHOWCASE_VARIANTS:
+            if car.parked and (car.variant in SHOWCASE_VARIANTS
+                               or car is self.chain_bike):
                 continue
             dx, dy = car.rect.centerx - ax, car.rect.centery - ay
             d2 = (dy * dy if car.variant == 'metrobus_70'
@@ -15184,11 +15324,31 @@ class Game:
                     self.roadblock_deploy_after,
                     self.frame + ROADBLOCK_REDEPLOY_BY_STAR[self.wanted_level])
         elif car in self.cars:
+            fixed_variant = (car.variant if car.variant in SHOWCASE_VARIANTS
+                             else 'vespa' if car is self.chain_bike else None)
             self.cars.remove(car)
-            cx, cy = random_open_spawn(road_only=True)
-            fresh = Car(cx, cy)
-            traffic_init_car(fresh)
-            traffic_snap_to_lane(fresh)
+            if fixed_variant is not None:
+                if fixed_variant == 'vespa':
+                    target = self.chain_bike_home
+                else:
+                    venue = LOCAL_LEGENDS[fixed_variant]['venue']
+                    entry = next(item for item in LANDMARKS if item[5] == venue)
+                    target = landmark_dropoff_point(entry)
+                tune = VEHICLE_TUNING[fixed_variant]
+                spot = free_point_near(*target, tune['w'], tune['h'], max_rings=8)
+                if spot is None:
+                    spot = target
+                fresh = Car(*spot, variant=fixed_variant)
+                fresh.angle = 0.0
+                fresh.parked = True
+                fresh.velocity = 0.0
+                if fixed_variant == 'vespa':
+                    self.chain_bike = fresh
+            else:
+                cx, cy = random_open_spawn(road_only=True)
+                fresh = Car(cx, cy)
+                traffic_init_car(fresh)
+                traffic_snap_to_lane(fresh)
             self.cars.append(fresh)
         if is_player:
             self.wasted()
@@ -15262,6 +15422,11 @@ class Game:
         self.heat_timer = 0
         self.wanted_decay_timer = 0
         self.cop_dispatch = 0
+        here = self.active_rect().center
+        self.pursuit_agency = police_jurisdiction_at(
+            here[0] // TILE_SIZE, here[1] // TILE_SIZE)
+        self.pending_pursuit_agency = self.pursuit_agency
+        self.jurisdiction_timer = 0
         self.crime_pos = None
         self.spotted = False
         self.was_spotted = False
@@ -16455,7 +16620,7 @@ class Game:
             if d < best:
                 nearest, best = cop, d
         if nearest is not None and best < 700:
-            county = self.wanted_level <= 2
+            county = nearest.police_agency == 'county'
             closing = -nearest.velocity if nearest.velocity else 0.0
             tag = 'hi' if closing < -3 else ('lo' if closing > 3 else 'mid')
             key = ('wail' if county else 'yelp') + tag
@@ -16523,6 +16688,7 @@ class Game:
     def try_start_side_mission(self):
         """Accept the current contact's job when E is pressed nearby."""
         if (self.driving is not None or self.side_mission is not None
+                or self.local_challenge is not None
                 or self.side_mission_cooldown > 0
                 or self.arch_job_phase in ARCH_ACTIVE_PHASES):
             return False
@@ -16695,7 +16861,7 @@ class Game:
 
     def update_job(self):
         """Advance the courier run: pickup, clock, drop-off, payout."""
-        if self.side_mission is not None:
+        if self.side_mission is not None or self.local_challenge is not None:
             return
         finale_pending = self.arch_job_unlocked and not self.arch_job_completed
         if finale_pending and not (self.arch_job_phase == ARCH_READY and
@@ -17153,7 +17319,40 @@ class Game:
         me.velocity *= max(0.45, 1.0 - 0.06 * mass_ratio)
 
     # ---------------- police ----------------
-    def cop_spawn_point(self):
+    def update_pursuit_agency(self):
+        """Confirm a city-line crossing, then hand the same chase to new units."""
+        center = self.active_rect().center
+        agency = police_jurisdiction_at(center[0] // TILE_SIZE,
+                                        center[1] // TILE_SIZE)
+        if self.wanted_level <= 0:
+            self.pursuit_agency = agency
+            self.pending_pursuit_agency = agency
+            self.jurisdiction_timer = 0
+            return False
+        if agency == self.pursuit_agency:
+            self.pending_pursuit_agency = agency
+            self.jurisdiction_timer = 0
+            return False
+        if agency != self.pending_pursuit_agency:
+            self.pending_pursuit_agency = agency
+            self.jurisdiction_timer = 1
+            return False
+        self.jurisdiction_timer += 1
+        if self.jurisdiction_timer < JURISDICTION_CONFIRM_STEPS:
+            return False
+        self.pursuit_agency = agency
+        self.jurisdiction_timer = 0
+        self.police = []
+        self.foot_police = []
+        self.roadblocks = []
+        self.cop_dispatch = max(self.cop_dispatch, FPS // 2)
+        label = "COUNTY TAKES IT" if agency == 'county' else "CITY HAS IT"
+        self.add_callout(label, hud_HUD_GOLD, ttl=FPS, scale=1,
+                         tag='jurisdiction')
+        self.add_toast("Dispatch: that's yours now. Negative, they crossed back.")
+        return True
+
+    def cop_spawn_point(self, agency=None):
         """A road tile off-screen but within reach, so cops actually arrive.
 
         Every cop used to spawn at the downtown station regardless of where the
@@ -17171,12 +17370,16 @@ class Game:
                 continue
             if tile_type_at(col, row) != TILE_ROAD:
                 continue
+            if agency is not None and police_jurisdiction_at(col, row) != agency:
+                continue
             spot = free_point_near(col * TILE_SIZE + TILE_SIZE // 2,
                                    row * TILE_SIZE + TILE_SIZE // 2,
                                    VEHICLE_DEFAULT_W, VEHICLE_DEFAULT_H, max_rings=1)
             if spot is not None and self.spot_is_free(*spot):
                 return spot
-        return self.police_station if self.spot_is_free(*self.police_station) else None
+        if agency in (None, 'city') and self.spot_is_free(*self.police_station):
+            return self.police_station
+        return None
 
     def cop_can_see(self, cop, target, fov=None):
         """Can this cruiser actually see the player right now?
@@ -17353,6 +17556,8 @@ class Game:
                 tile = GAME_MAP[row][col]
                 if tile['type'] != TILE_ROAD or tile['collidable']:
                     continue
+                if police_jurisdiction_at(col, row) != self.pursuit_agency:
+                    continue
                 horizontal = row in ROAD_LINES and col not in ROAD_LINES
                 vertical = col in ROAD_LINES and row not in ROAD_LINES
                 if not horizontal and not vertical:
@@ -17410,6 +17615,7 @@ class Game:
         units = []
         for ux, uy, angle in specs:
             unit = Car(ux, uy, color=POLICE_COLOR, variant='police')
+            unit.police_agency = self.pursuit_agency
             unit.angle = angle
             unit.velocity = 0.0
             unit.driver = 'roadblock'
@@ -17511,6 +17717,7 @@ class Game:
                     self.play_impact(car.rect.center, speed, gap=12)
 
     def update_police(self):
+        self.update_pursuit_agency()
         star = min(self.wanted_level, WANTED_MAX)
         target_count = COP_COUNT_BY_STAR[star]
         active = self.active_rect()
@@ -17524,7 +17731,7 @@ class Game:
             if self.cop_dispatch > 0:
                 self.cop_dispatch -= 1
             else:
-                spot = self.cop_spawn_point()
+                spot = self.cop_spawn_point(self.pursuit_agency)
                 if spot is None:
                     # Every off-screen approach is occupied this frame. Wait
                     # briefly instead of materialising a cruiser inside a car.
@@ -17532,6 +17739,7 @@ class Game:
                 else:
                     sx, sy = spot
                     cop = Car(sx, sy, color=POLICE_COLOR, variant='police')
+                    cop.police_agency = self.pursuit_agency
                     cop.driver = 'police'
                     # Cops used to spawn with Car.__init__'s random heading *and*
                     # a random civilian body, so a patrol car could arrive as a
@@ -17825,6 +18033,11 @@ class Game:
                 or (self.job is not None and self.job.collected)
                 or self.arch_job_phase in ARCH_ACTIVE_PHASES):
             return False
+        # An unaccepted dispatcher card is only an offer. Park it while the
+        # local activity owns the objective HUD, then deal a fresh one after.
+        if self.job is not None:
+            self.job = None
+            self.job_cooldown = 0
         challenge = {
             'kind': kind,
             'steps_left': LOCAL_CHALLENGE_TIMES[kind],
@@ -17891,6 +18104,8 @@ class Game:
         self.add_callout("LOCAL LEGEND MASTERED", hud_HUD_GOLD, ttl=FPS * 2, scale=2)
         self.add_toast(f"${LOCAL_CHALLENGE_REWARD}  Garage medal earned")
         self.local_challenge = None
+        if self.job is None:
+            self.job_cooldown = max(self.job_cooldown, FPS)
 
     def fail_local_challenge(self, reason):
         if self.local_challenge is None:
@@ -17898,6 +18113,8 @@ class Game:
         self.add_callout("LOCAL CHALLENGE FAILED", hud_HUD_RED, ttl=FPS, scale=1)
         self.add_toast(reason)
         self.local_challenge = None
+        if self.job is None:
+            self.job_cooldown = max(self.job_cooldown, FPS)
 
     def local_challenge_marker(self):
         challenge = self.local_challenge

@@ -29,8 +29,8 @@ pip install -r requirements.txt && python main.py
   **31 named streets**: Kingshighway on Forest Park's east wall, Grand straight through Grand
   Center, Chippewa carrying Ted Drewes, Olive approaching the Eads and Arsenal the Poplar
   Street Bridge. County blocks out west are long, downtown blocks are short. And the three
-  arteries that make driving here what it is — **Gravois**, **Manchester** and **Natural
-  Bridge** — are real diagonals cut across the finished grid after the landmarks are stamped,
+  arteries that make driving here what it is — **Gravois**, **Manchester** and **West
+  Florissant** — are real diagonals cut across the finished grid after the landmarks are stamped,
   so they ignore whatever is in the way, exactly as they do on the ground. Gravois bends down
   the east side of Tower Grove Park and out to the windmill at Morganford, which is why Bevo
   Mill sits in the fork. Ambient traffic still drives the grid; the diagonals are yours, which
@@ -61,14 +61,14 @@ pip install -r requirements.txt && python main.py
   **0.49 -> 0.19**, and mean traffic speed **1.93 -> 2.34** of a 3.25 cap.
   Nothing respawns on a spot another vehicle is already sitting on.
 - **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is a hard-walled bowl with one gate corridor into the field. The **Missouri Botanical Garden** is a garden: it had no layout entry at all, so it fell through to the default district rule and generated a **ring of buildings around a courtyard** — a wall of masonry through the middle of Henry Shaw's garden. It now gets its own composition, and the thing you can pick out from across the map is the **Climatron** — Buckminster Fuller's dome, 1960, the first geodesic structure ever used as a conservatory — drawn as a triangulated net over glass. **Seiwa-en**, the largest Japanese garden in North America, is real water with an island and a drum bridge you have to go round; the **Linnean House** of 1882 and **Tower Grove House** are the only other solid mass, and 44 of the garden's 56 tiles are open ground. All four are separately discoverable. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
-- **Twenty-four neighbourhoods, and the game says which one you are in**: eleven coarse
+- **Twenty-eight neighbourhoods, and the game says which one you are in**: eleven coarse
   regions were still doing violence to the map. Measured, `south` alone was **30.6% of the
   whole map** — Tower Grove and Shaw and Dutchtown and Bevo and Carondelet and St. Louis Hills
   and Lafayette Square, plus the overflow from Forest Park and Union Station, all drawing shop
   signs from one eleven-item bag. It showed: the Botanical Garden came back `grove`, so
   Manchester Ave nightlife signage hung around Shaw's Garden; City Museum came back `south`,
   so a downtown loft block advertised Ted Drewes and Bevo Mill; half of Cherokee Street came
-  back `soulard`, so McGurk's hung on Cherokee. The map is now **24 neighbourhoods**, the
+  back `soulard`, so McGurk's hung on Cherokee. The map is now **28 neighbourhoods**, the
   largest is **9.6%**, **19 of 20 landmarks sit 100% inside one** (the brewery is 94%), and
   unique shop signs went **53 → 116**. Crossing a boundary raises the neighbourhood's real
   name on screen, and the street you are on reads out under the radar — because a player who
@@ -84,7 +84,7 @@ pip install -r requirements.txt && python main.py
   **83–100% of everything you heard anywhere in the city came out of the same fifteen-item
   bag**, `west` had no local lines at all, and selection was a bare `random.choice` with no
   memory, so it repeated back to back. On a 7-second cooldown a five-minute walk drew about
-  forty scenes from a pool of sixteen. It now holds **295 scenes**, **every one of the 24
+  forty scenes from a pool of sixteen. It now holds **335 scenes**, **every one of the 28
   neighbourhoods has ten of its own**, and a shuffled-bag dealer will not repeat a scene until
   the deck runs out — with a short memory across the seam so crossing a boundary does not
   replay what you just heard. Local scenes are weighted 72%, so what you hear in Soulard is
@@ -92,28 +92,30 @@ pip install -r requirements.txt && python main.py
   Underneath the surface tier (provel, t-ravs, 40-vs-64) the city now knows the Great Divorce
   of 1876, the earnings tax, Sumner High and who went there, the Climatron being the first
   geodesic conservatory, Vide Poche, the Hodiamont tracks, the drum bridge at Seiwa-en, and
-  that the sirens go off the **first Monday** at eleven. Plus **68 solo barks**, **28 reaction
+  that the sirens go off the **first Monday** at eleven. Plus **76 solo barks**, **28 reaction
   barks**, **22 cop barks**, and panic lines per neighbourhood instead of five for the whole
   city.
-- **A real soundtrack**: the supplied 25.69-second `music/AUD_HO1036.mid` is arranged into
+- **A real soundtrack and three parody stations**: the supplied 25.69-second `music/AUD_HO1036.mid` is arranged into
   `music/gloria-8bit.wav`, a 195-second pulse/square/triangle/noise chiptune. It loops once
   play begins, pauses with the game, and sits below the procedural engines, sirens, impacts,
   radio, and neighborhood ambience. `F4` toggles it without muting the rest of the city.
-- **Busy streets without the traffic jam**: the viewport sees 0.56% of the map, so population is streamed through a ring just outside the camera instead of smeared across the whole city. The calmer ten-car moving pool now measures **~1.6 moving cars and ~2.6 parked cars on screen** on the irregular network, with overlapping moving-car pairs averaging **0.05**, stalls averaging **0.12**, and traffic averaging **2.27 px/step** against its 3.25 cap. Twenty-two parked cars (including the two local showcase rides) still leave something to steal nearby; the streets breathe instead of becoming a permanent obstacle course.
+  `F6` (or controller `Y` while driving) cycles K-SHE 95ISH heritage rock, K-D-H-X
+  community radio, and K-M-O-X news/baseball breaks; the Trans Am is naturally stuck on K-SHE.
+- **Busy streets without the traffic jam**: the viewport sees 0.56% of the map, so population is streamed through a ring just outside the camera instead of smeared across the whole city. The calmer ten-car moving pool now measures **~1.6 moving cars and ~2.6 parked cars on screen** on the irregular network, with overlapping moving-car pairs averaging **0.02** (worst 1), about **1.07 cars stalled over one second**, and traffic averaging **1.97 px/step** against its 3.25 cap. Twenty-two parked cars (including the two local showcase rides) still leave something to steal nearby; the streets breathe instead of becoming a permanent obstacle course.
 - **Traffic stays on traffic streets**: ambient routing now admits only true cardinal-road
   tiles, excluding diagonal reservations, landmark plazas, and dedicated MetroLink ballast.
   Cars keep a last-known-good road position and recover within the same simulation frame if
   physics carries them over a kerb. Vehicle overlap checks use the rotated body footprint,
   so north/south traffic no longer mistakes two legal lanes for a collision and shoves both
-  cars into Grand Center. A 1,800-frame deterministic run now averages **0.05 real overlaps**,
-  **0.12 cars stalled over one second**, and **2.27 px/step** against the 3.25 cap.
+  cars into Grand Center. A 1,800-frame deterministic run now averages **0.02 real overlaps**
+  (worst 1), **1.07 cars stalled over one second**, and **1.97 px/step** against the 3.25 cap.
 - **Road and rail joins read as joins**: diagonal shoulders are clipped at cardinal street
   mouths while their asphalt continues through. Compact four-bar crosswalks replace the old
   oversized blocks. MetroLink keeps asphalt at embedded and grade-crossing track, sleepers
   stay on dedicated ballast, and the steel railheads follow rounded bends instead of hard
   right-angle elbows.
-- **St. Louis traffic**: ordinary cars and taxis plus a safety-orange City refuse truck with
-  black `CITY` lettering, box truck, school bus,
+- **St. Louis traffic**: ordinary cars and taxis plus safety-orange City refuse, street-sweeper,
+  and forestry trucks with black municipal lettering, a box truck, school bus,
   blue/red **Route 70 MetroBus**, Hill delivery Vespa, and a rare black Trans Am with a gold
   hood bird and the radio permanently stuck on KSHE — each with its own size and handling.
   Moving traffic spawns directly in its proper lane and uses a measured long-look steering
@@ -123,10 +125,11 @@ pip install -r requirements.txt && python main.py
   which put it through the Compton Hill Water Tower's lawn and down in south city, where the
   real MetroLink conspicuously does not go. It is a **polyline** now: in from the north-west
   beside Delmar, east along Forest Park's north edge, past the Central West End and Grand,
-  south around downtown, and over the Mississippi on the **Eads**, with nine named stops and
+  south around downtown, and over the Mississippi on the **Eads**, with thirteen named stops and
   trains that follow the curves. The right-of-way carves where it is dedicated track, keeps
   grade crossings on the streets that cross it, and only insets rails where it rides a road or
-  a landmark's own ground, so nothing hand-drawn gets bulldozed. Active warning lights and
+  a landmark's own ground, so nothing hand-drawn gets bulldozed. The line now runs from Lambert
+  through North Hanley and UMSL to the city. Active warning lights and
   paired arms at every crossing; ambient traffic stops, impatient players can run the gate, and
   the train wins. The **Loop trolley** uses rails embedded in Delmar and goes about two miles
   before turning round, which is both accurate and the entire joke. The
@@ -140,7 +143,28 @@ pip install -r requirements.txt && python main.py
 - **The Hill's hydrants**: six enlarged, guaranteed curbside hydrants ring the neighborhood
   in broad green, white and red bands. They occupy verified walkable sidewalk tiles rather
   than depending on the generic street-clutter lottery, so the detail is legible and actually
-  there every time you visit.
+  there every time you visit. Finding the first starts a timed six-hydrant circuit.
+- **Local Legends with reasons to return**: the St. Louis-built monster truck and giant
+  parade grocery cart now arrive through neighborhood rumors, fuzzy search zones, discovery
+  rewards, persistent map icons, garage unlocks, and vehicle-specific mastery runs. Bigfoot
+  crushes five physical junk cars; the cart runs a no-spill slalom; the guaranteed orange
+  City refuse truck opens a six-stop Trash Day route. Crooked expired temp tags vary the
+  ordinary fleet and occasionally attract one star of paperwork heat.
+- **A different city day each return**: one seeded event changes the session—Cardinals crowds,
+  Soulard or Dogtown parades, Tower Grove market day, Cherokee festival, Grand construction,
+  Blues night, a Loop trolley delay, first-Monday sirens, or St. Louis Halloween. Named events
+  stage crowds and slow traffic in their actual neighborhoods; Halloween kids visibly ask for
+  a joke and pay candy, health, and pocket change. City-day courier work pays a visible 10% bonus.
+- **The region fits inside the same readable map**: a compressed northwest annex adds Lambert's
+  Yamasaki terminal, North Hanley and UMSL MetroLink stops, while Rock Road restores the real
+  station order. Fairground Park and the Bissell Street Water Tower anchor newly distinct
+  Wells-Goodfellow, Fairground, and College Hill neighborhoods. Along the edges, River des
+  Peres is a driveable concrete-channel escape and the bent Old Chain of Rocks Bridge admits
+  the fixed Lambert scooter while cruiser-width cars hit the bollards.
+- **City/county pursuit handoffs**: hold a crossing over the Skinker city line for half a second
+  and the chase transfers without erasing stars or heat. Existing units withdraw, the next
+  agency dispatches from its own jurisdiction, county cars carry a white belt, and county wails
+  replace the City's electronic yelp. The resulting dispatch argument is pure St. Louis.
 - **The $50,000 Arch Job**: bank enough money and a real multi-stage finale opens under the
   Arch: borrow a cutter from City Museum, bring a getaway car, strap 43 pounds of visible
   stainless steel to it, survive a forced five-star run to The Hill, and lose the cops in
@@ -163,7 +187,9 @@ pip install -r requirements.txt && python main.py
   session. **Score** is the chaos counter. Playing carefully and playing recklessly are genuinely different strategies.
 - **Defensive saves**: the title screen only offers Continue for a current, structurally valid
   save. Missing, truncated, malformed, out-of-bounds, and incompatible saves fall back safely
-  to New Game without partially mutating a live run.
+  to New Game without partially mutating a live run. Saves live in the stable per-user
+  `%LOCALAPPDATA%\STL-GTA` folder instead of depending on the shortcut's launch directory;
+  an older repo-adjacent save is still recognized for migration.
 - **Chaos multiplier (x1–x8)**: every reckless act — a hit, a shunt, a wreck — feeds a running multiplier that scales every point of score you earn. Park and it bleeds away; get **busted** or **wasted** and it's gone. The screen shouts each rung.
 - **Kill Frenzy**: a pulsing icon drops on the map. Touch it and a clock starts — `MOW DOWN 14 LOCALS`, `WRECK 8 MOTORS`, or the much hotter `DROP 6 COPS` — for a fat score payout and free multiplier rungs. Pure GTA1 "just one more go".
 - **Rampage streaks**: bowl a line of pedestrians and the per-hit value stacks, scaled by how
@@ -321,6 +347,7 @@ any time.
 | `F2` | Cycle CRT post-effects (off → scanlines → scanlines + vignette) |
 | `F3` | Debug overlay (fps, sim steps, entity counts, heat) |
 | `F4` | Toggle the soundtrack |
+| `F6` | Change radio station while driving |
 | `F5` | Save game |
 | `F9` | Load game |
 | `Q` | Quit — **only while paused** |
@@ -341,7 +368,8 @@ exactly the same with no pad attached.
 | `LB` | Sprint on foot / handbrake in a car |
 | `RB` | Cycle weapons |
 | `X` / `B` | Use the selected weapon |
-| `Y` / `Back` | Full city map |
+| `Y` | Change radio while driving; open the map on foot |
+| `Back` | Full city map |
 | `Start` | Pause (and back out of the map) |
 | D-pad | Navigate title/character/school menus; steer / walk fallback in play |
 
@@ -402,7 +430,6 @@ GTASTL/
 ├── sprites/              # Native-resolution neighborhood building atlas
 ├── .github/workflows/    # CI: byte-compile, tests, headless play-through
 ├── requirements.txt      # Python dependencies
-├── savegame.json         # Auto-generated save file
 └── README.md             # This file
 ```
 

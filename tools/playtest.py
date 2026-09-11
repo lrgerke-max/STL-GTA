@@ -80,6 +80,21 @@ def game():
 
 def put_in_car(g, x, y, angle=0.0, variant='sedan'):
     """Hand the player a fresh car of `variant` at (x, y) facing `angle`."""
+    # A wrecked probe can be detached from g.driving while remaining in the
+    # ambient pool. Remove it before adding its replacement or long probes
+    # quietly measure 11, 12, ... cars instead of the configured ten.
+    for stale in [c for c in g.cars
+                  if getattr(c, '_probe', False) and c is not g.driving]:
+        g.cars.remove(stale)
+    budget = M.PARKED_CAR_COUNT + M.MOVING_CAR_COUNT
+    while len(g.cars) > budget:
+        surplus = next((c for c in g.cars
+                        if c.driver is None and not c.parked
+                        and c.variant not in M.SHOWCASE_VARIANTS
+                        and c is not g.chain_bike), None)
+        if surplus is None:
+            break
+        g.cars.remove(surplus)
     if g.driving is not None:
         g.driving.driver = None
         g.driving.parked = True

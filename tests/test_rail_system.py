@@ -98,8 +98,17 @@ def test_every_metrolink_body_stays_on_non_solid_track_through_turnarounds(game)
         for train in trains:
             train.update()
             assert 0.0 <= train.s <= train.length
-            tile = train_tile(train)
-            assert not tile['collidable'] and tile.get('rail') == 'metrolink'
+            # Sample the centre and both ends of the body. Lambert is close to
+            # the north map edge, so checking only the centre missed a solid
+            # terminal tile underneath the rear of a turning train.
+            for ahead in (-train.w * 0.4, 0.0, train.w * 0.4):
+                col = max(0, min(M.MAP_TILES_W - 1,
+                                 int(train.x + train.dx * ahead) // M.TILE_SIZE))
+                row = max(0, min(M.MAP_TILES_H - 1,
+                                 int(train.y + train.dy * ahead) // M.TILE_SIZE))
+                tile = M.GAME_MAP[row][col]
+                assert not tile['collidable']
+                assert tile.get('rail') == 'metrolink'
             direction = math.copysign(1, train.speed)
             if direction != previous[id(train)]:
                 reversed_direction[id(train)] = True
