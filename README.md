@@ -49,6 +49,9 @@ pip install -r requirements.txt && python main.py
   like walking over the Brew House. Both now come off one mask: brick blocks with
   cobbled yard streets between them, painted centre lines down the lanes, a rail
   spur along the south apron, and the Brew House crenellated on its own block.
+  Grand Center and The Hill now use the same contract: their bespoke art and
+  collision come from one tile-aligned street plan, with Grand, Olive, Market,
+  Arsenal, Magnolia, Kingshighway and Gravois preserved as actual asphalt.
 - **Cars parked where cars can park**: kerb bays were only tested for being
   *blocked*, and grass is not blocked - so every road-line tile the landmark pass
   turned into lawn, park, rail ballast or open water still handed out parking.
@@ -60,7 +63,7 @@ pip install -r requirements.txt && python main.py
   AI-car pairs went **mean 2.08 / worst 9 -> mean 0.38 / worst 3**, stalls
   **0.49 -> 0.19**, and mean traffic speed **1.93 -> 2.34** of a 3.25 cap.
   Nothing respawns on a spot another vehicle is already sitting on.
-- **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is a hard-walled bowl with one gate corridor into the field. The **Missouri Botanical Garden** is a garden: it had no layout entry at all, so it fell through to the default district rule and generated a **ring of buildings around a courtyard** — a wall of masonry through the middle of Henry Shaw's garden. It now gets its own composition, and the thing you can pick out from across the map is the **Climatron** — Buckminster Fuller's dome, 1960, the first geodesic structure ever used as a conservatory — drawn as a triangulated net over glass. **Seiwa-en**, the largest Japanese garden in North America, is real water with an island and a drum bridge you have to go round; the **Linnean House** of 1882 and **Tower Grove House** are the only other solid mass, and 44 of the garden's 56 tiles are open ground. All four are separately discoverable. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
+- **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is an angular, east-facing baseball bowl rather than an oval, with one visible west gate into the field and the same seating mask for art and collision. The **Missouri Botanical Garden** is a garden: it had no layout entry at all, so it fell through to the default district rule and generated a **ring of buildings around a courtyard** — a wall of masonry through the middle of Henry Shaw's garden. It now gets its own composition, and the thing you can pick out from across the map is the **Climatron** — Buckminster Fuller's dome, 1960, the first geodesic structure ever used as a conservatory — drawn as a triangulated net over glass. **Seiwa-en**, the largest Japanese garden in North America, is real water with an island and a drum bridge you have to go round; the **Linnean House** of 1882 and **Tower Grove House** are the only other solid mass, and 44 of the garden's 56 tiles are open ground. All four are separately discoverable. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
 - **Twenty-eight neighbourhoods, and the game says which one you are in**: eleven coarse
   regions were still doing violence to the map. Measured, `south` alone was **30.6% of the
   whole map** — Tower Grove and Shaw and Dutchtown and Bevo and Carondelet and St. Louis Hills
@@ -78,7 +81,7 @@ pip install -r requirements.txt && python main.py
   dark top-down roofs with a lit south **facade**. Native sprites appear at one address in
   three and deterministic procedural storefronts/houses fill the rest, so a block has a family
   resemblance without repeating one stamp. Parks, surface lots and tree-lined sidewalks fill the rest.
-- **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts, foam-finger crowds around Busch, and South City hoosiers with mullets and tallboys. Street bodies used to be three special-cased landmarks and one 5% hoosier roll in a single giant `south` region; every neighbourhood now names who it puts on the pavement. The streamed population retypes itself by neighborhood as you travel instead of carrying downtown commuters into every district forever.
+- **A St. Louis cast on foot**: commuters, dog walkers (with dogs), shoppers, elders with canes, hi-vis road crews, joggers, plus a jazz **sax busker** in the arts districts, foam-finger crowds around Busch, gay Grove regulars with subtle pride pins and their own nightlife conversations, and South City hoosiers with mullets and tallboys. Street bodies used to be three special-cased landmarks and one 5% hoosier roll in a single giant `south` region; every neighbourhood now names who it puts on the pavement. The streamed population retypes itself by neighborhood as you travel instead of carrying downtown commuters into every district forever.
 - **Locals who actually talk, and do not repeat themselves**: the conversation table held
   **29 scenes** — 15 citywide, 14 tagged — spread over 11 neighbourhoods. Measured, that meant
   **83–100% of everything you heard anywhere in the city came out of the same fifteen-item
@@ -138,7 +141,8 @@ pip install -r requirements.txt && python main.py
   map on row 57, which walked the eight-horse hitch through the Farmers Market
   sheds and then straight out across the Mississippi. Two one-off, stealable local spectacles
   wait at destinations instead of clogging traffic: a St. Louis-built monster-truck homage
-  inside Busch and the enormous red grocery cart from childhood parades at Soulard Market.
+  by the old Hazelwood shop in the Lambert/North County annex and the enormous red grocery
+  cart from childhood parades at Soulard Market.
   The monster truck shrugs off potholes; the cart handles exactly like a giant shopping cart should.
 - **The Hill's hydrants**: six enlarged, guaranteed curbside hydrants ring the neighborhood
   in broad green, white and red bands. They occupy verified walkable sidewalk tiles rather

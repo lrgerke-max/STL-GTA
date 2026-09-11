@@ -1466,7 +1466,7 @@ def test_population_retypes_to_the_neighborhood_it_streams_into():
         g.pedestrians = old_pedestrians
 
 
-def test_busch_fans_and_south_city_hoosiers_are_local_flavor():
+def test_busch_grove_and_south_city_people_are_local_flavor():
     assert all(lm[5] != "Downtown & Busch Stadium" for lm in M.LANDMARKS)
     busch = next(lm for lm in M.LANDMARKS if lm[5] == "Busch Stadium")
     bx = (busch[0] + busch[2] // 2) * M.TILE_SIZE
@@ -1476,6 +1476,10 @@ def test_busch_fans_and_south_city_hoosiers_are_local_flavor():
         assert M.Game._ped_kind_for(bx, by) == "cards_fan#2"
         # St. Louis Hills puts south siders on the street
         assert M.Game._ped_kind_for(10 * M.TILE_SIZE, 90 * M.TILE_SIZE) == "hoosier#2"
+        # The Grove's queer nightlife should put gay regulars on Manchester,
+        # represented like people rather than as a costume or caricature.
+        assert M.Game._ped_kind_for(41 * M.TILE_SIZE, 44 * M.TILE_SIZE) == \
+            "grove_regular#2"
         # ... and a neighbourhood with no bias entry still gets the generic mix
         plain = next(c for c, r in ((34, 30), (12, 5), (2, 50))
                      if M.hood_at(c, r) not in M.Game.HOOD_PED_BIAS)
@@ -1488,7 +1492,9 @@ def test_busch_fans_and_south_city_hoosiers_are_local_flavor():
             assert 0.0 < chance <= 1.0
     assert M.peds_ARCHETYPES["cards_fan"]["w"] == 0
     assert M.peds_ARCHETYPES["hoosier"]["w"] == 0
+    assert M.peds_ARCHETYPES["grove_regular"]["w"] == 0
     assert "mullet" in M.peds__resolve("hoosier#0")["acc"]
+    assert "pride_pin" in M.peds__resolve("grove_regular#0")["acc"]
 
 
 def test_the_rare_black_trans_am_has_its_own_art_and_handling():
@@ -1526,6 +1532,10 @@ def test_local_showcase_vehicles_are_unique_stealable_destinations():
             assert (variant, color) in M.CAR_SPRITES
     assert M.VEHICLE_TUNING['mudfoot']['speed_factor'] > 1.0
     assert M.VEHICLE_TUNING['grocery_cart']['speed_factor'] < 0.8
+    mudfoot = g.local_legend_car('mudfoot')
+    assert M.hood_at(mudfoot.rect.centerx // M.TILE_SIZE,
+                     mudfoot.rect.centery // M.TILE_SIZE) == 'lambert'
+    assert mudfoot.rect.center == M.LOCAL_LEGENDS['mudfoot']['spawn']
 
 
 def test_city_service_and_route_70_are_guaranteed_near_the_player():
@@ -2249,17 +2259,35 @@ def test_the_river_is_a_river_and_you_can_cross_it():
 
 
 def test_the_stadium_has_exactly_one_way_in():
-    """Solid bowl, open field, a single gate - not a maze and not a plaza."""
+    """Angular baseball bowl, open field, and one west gate."""
     entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
     lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
-    cx, cy = int(round(0.355 * lw)), int(round(0.50 * lh))
-    field = (lx + cx, ly + cy)
+    expected = {
+        (1, 0), (2, 0), (3, 0),
+        (0, 1), (4, 1), (0, 2), (4, 2), (4, 3),
+        (0, 4), (1, 4), (2, 4), (3, 4), (4, 4),
+    }
+    actual = {(x, y) for y in range(lh) for x in range(lw)
+              if M._lm_solid_stadium(x, y, lw, lh)}
+    assert actual == expected
+    field = (lx + 2, ly + 2)
     assert not M.GAME_MAP[field[1]][field[0]]['collidable'], "field must be open"
     assert M.WALK_REACHABLE[field[1]][field[0]], "field must be reachable"
-    # the ring is real: walking due north from the centre hits a wall
-    hit_wall = any(M.GAME_MAP[ly + cy - k][lx + cx]['collidable']
-                   for k in range(1, cy + 1))
-    assert hit_wall, "the bowl should be a hard wall to the north"
+    # Flood only inside the footprint: the field reaches exactly one boundary
+    # tile, the visible west gate at local (0, 3).
+    todo, seen = [(2, 2)], set()
+    while todo:
+        p = todo.pop()
+        if p in seen or p in actual:
+            continue
+        x, y = p
+        if not (0 <= x < lw and 0 <= y < lh):
+            continue
+        seen.add(p)
+        todo.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
+    boundary = {p for p in seen
+                if p[0] in (0, lw - 1) or p[1] in (0, lh - 1)}
+    assert boundary == {(0, 3)}
 
 
 # ---------------------------------------------------------------------------

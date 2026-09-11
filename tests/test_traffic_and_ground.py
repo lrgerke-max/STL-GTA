@@ -229,6 +229,29 @@ def test_the_brewery_yard_is_ground_and_its_blocks_are_buildings():
     assert open_tiles >= lw * lh // 3, "the yard streets are too narrow to drive"
 
 
+def test_stadium_art_uses_the_same_angular_mask_as_collision():
+    entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
+    _x, _y, lw, lh = entry[:4]
+    art = M.lm__bake_stadium_angular(lw * M.TILE_SIZE, lh * M.TILE_SIZE)
+    seat_colors = {M.lm_SEAT_RED, M.lm_SEAT_RED_DK}
+    for ly in range(lh):
+        for lx in range(lw):
+            pixel = art.get_at((lx * M.TILE_SIZE + 11,
+                                ly * M.TILE_SIZE + 11))[:3]
+            if M._lm_solid_stadium(lx, ly, lw, lh):
+                assert pixel in seat_colors, (lx, ly, pixel)
+    field_pixel = art.get_at((2 * M.TILE_SIZE + M.TILE_SIZE // 2,
+                              2 * M.TILE_SIZE + M.TILE_SIZE // 2))[:3]
+    assert field_pixel not in seat_colors
+
+
+def test_grand_and_hill_art_bakers_share_the_collision_predicates():
+    assert M.LANDMARK_LAYOUT["Grand Center Arts District"] == "grand_blocks"
+    assert M.LANDMARK_LAYOUT["The Hill"] == "hill_blocks"
+    assert M.lm__BAKERS["grand_center"] is M.lm__bake_grand_center_aligned
+    assert M.lm__BAKERS["the_hill"] is M.lm__bake_the_hill_aligned
+
+
 # ----------------------------------------------------------- spawn rules --
 def test_nothing_respawns_on_top_of_a_car_that_is_already_there():
     """Kerb bays came off a shuffled queue rebuilt from scratch every time it

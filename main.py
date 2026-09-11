@@ -821,14 +821,15 @@ STL_CONVERSATIONS = (
     (("grove",), "THE SIGN OVER THE STREET.",
      "THAT'S HOW YOU KNOW YOU'RE IN IT."),
     (("grove",), "URBAN CHESTNUT?", "THE BIERGARTEN'S ROUND BACK."),
-    (("grove",), "PRIDE ON MANCHESTER.", "THE WHOLE STREET.", "ALL DAY."),
+    (("grove",), "MY BOYFRIEND'S SAVING A TABLE.",
+     "THAT'S WHAT HE SAID LAST TIME."),
     (("grove",), "FOREST PARK SOUTHEAST.", "NOBODY SAYS THAT.",
      "THE MAP DOES."),
     (("grove",), "PARKING BEHIND THE BAR?", "THAT'S SOMEBODY'S ALLEY."),
-    (("grove",), "THE HOSPITAL'S EATING THE BLOCK.", "SLOWLY.", "STEADILY."),
+    (("grove",), "MY HUSBAND'S AT KARAOKE.", "THEN WE HAVE TIME FOR ONE."),
     (("grove",), "TAQUERIA AFTER MIDNIGHT?", "THAT'S THE WHOLE PLAN."),
-    (("grove",), "THAT USED TO BE A TIRE SHOP.",
-     "EVERYTHING USED TO BE A TIRE SHOP."),
+    (("grove",), "DRAG SHOW STARTED AT NINE.",
+     "IN ST. LOUIS THAT MEANS TEN."),
 
     # ------------------------------------------------------------------- shaw
     (("shaw",), "SHAW'S GARDEN.", "IT'S THE BOTANICAL GARDEN.",
@@ -2101,7 +2102,7 @@ CAR_COLORS = [
 LANDMARK_LAYOUT = {
     "Lambert Airport": "airport",
     "Gateway Arch": "arch",              # two leg footings; walk under the span
-    "Busch Stadium": "stadium",          # solid bowl, one gate to the field
+    "Busch Stadium": "stadium",          # angular baseball bowl, one west gate
     "Ted Drewes": "drivein",             # stand at the back, queue in the lot
     "Ted Drewes on Grand": "drivein",
     "Soulard Farmers Market": "market",  # open sheds you walk the aisles of
@@ -2120,9 +2121,9 @@ LANDMARK_LAYOUT = {
     "Anheuser-Busch Brewery": "brewery",
     # The four districts whose own art draws its own street grid.
     "Central West End": "blocks",
-    "The Hill": "blocks",
+    "The Hill": "hill_blocks",
     "Delmar Loop": "blocks",
-    "Grand Center Arts District": "blocks",
+    "Grand Center Arts District": "grand_blocks",
 }
 LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyard
 
@@ -2138,7 +2139,11 @@ LANDMARK_THROUGH_ROADS = {
     },
     "Grand Center Arts District": {
         'cols': frozenset((57,)),
-        'rows': frozenset(),
+        'rows': frozenset((32, 37)),
+    },
+    "The Hill": {
+        'cols': frozenset((27, 32)),
+        'rows': frozenset((57, 63)),
     },
 }
 
@@ -2355,17 +2360,21 @@ ROUTE_70_COL = 57
 # pool. There is exactly one of each, parked where a player can deliberately
 # go find and steal it.
 SHOWCASE_VEHICLES = (
-    ('mudfoot', "Busch Stadium"),
+    ('mudfoot', "Lambert Airport"),
     ('grocery_cart', "Soulard Farmers Market"),
 )
 SHOWCASE_VARIANTS = frozenset(v for v, _name in SHOWCASE_VEHICLES)
 LOCAL_LEGENDS = {
     'mudfoot': {
         'name': "THE ORIGINAL",
-        'venue': "Busch Stadium",
-        'rumor': "A monster truck is crushing scrap near Busch Stadium.",
+        'venue': "Lambert Airport",
+        'rumor': "A monster truck is crushing scrap by the old Hazelwood shop.",
         'color': (96, 156, 244),
-        'offset': (-TILE_SIZE * 0.8, TILE_SIZE * 0.6),
+        'offset': (TILE_SIZE * 3.0, TILE_SIZE * 1.0),
+        # North County's compact Lambert annex doubles as Hazelwood. Keep the
+        # truck by the old shop edge, rather than parked at an airport terminal.
+        'spawn': (7 * TILE_SIZE + TILE_SIZE // 2,
+                  4 * TILE_SIZE + TILE_SIZE // 2),
     },
     'grocery_cart': {
         'name': "THE BIG CART",
@@ -3544,20 +3553,24 @@ def _lm_solid_arch(lx, ly, lw, lh):
 
 
 def _lm_solid_stadium(lx, ly, lw, lh):
-    """Busch Stadium as a real bowl: the seating ring is a hard wall, the field
-    inside is open, and a single gate corridor due south is the only way in.
-    Ellipse centre/radii match lm__bake_stadium()'s art."""
-    cx, cy = 0.355 * lw, 0.50 * lh
-    rx, ry = max(1.0, 0.335 * lw), max(1.0, 0.465 * lh)
-    dx = (lx + 0.5 - cx) / rx
-    dy = (ly + 0.5 - cy) / ry
-    v = dx * dx + dy * dy
-    if v > 1.0 or v < 0.40:
-        return False                      # outside the bowl, or on the field
-    # the one gate: a 3-tile corridor running south from the field to the street
-    if abs(lx - int(round(cx))) <= 1 and (ly + 0.5) >= cy:
-        return False
-    return True
+    """Busch's angular, east-facing baseball bowl.
+
+    The old ellipse was both the wrong silhouette and unrelated to the seven
+    collision tiles beneath it. This exact mask is also what the baker paints:
+    a squared-off horseshoe with one west gate and an open central field.
+    """
+    if (lw, lh) == (5, 6):
+        return (lx, ly) in {
+            (1, 0), (2, 0), (3, 0),
+            (0, 1), (4, 1), (0, 2), (4, 2),
+            (4, 3),                         # west gate is open at (0, 3)
+            (0, 4), (1, 4), (2, 4), (3, 4), (4, 4),
+        }
+    gate_row = max(1, lh * 3 // 5)
+    return ((ly == 0 and 0 < lx < lw - 1)
+            or (lx in (0, lw - 1) and 0 < ly < lh - 1
+                and not (lx == 0 and ly == gate_row))
+            or (ly == lh - 2 and lx != lw // 2))
 
 
 def _lm_solid_district(lx, ly, lw, lh):
@@ -3607,6 +3620,27 @@ def _lm_solid_blocks(lx, ly, lw, lh):
         return False                      # the street between the rows
     if lx % 3 == 0:
         return False                      # cross streets
+    return True
+
+
+def _lm_solid_hill_blocks(lx, ly, lw, lh):
+    """Tile-aligned Hill blocks with broad streets and delivery alleys."""
+    if lx in (0, lw - 1) or ly in (0, lh - 1):
+        return False
+    if lx in (4, 7) or ly in (2, 5):
+        return False
+    return True
+
+
+def _lm_solid_grand_blocks(lx, ly, lw, lh):
+    """Grand Center's theatres as four masses around real through streets."""
+    if lx in (0, lw - 1) or ly in (0, lh - 1):
+        return False
+    if lx == 4 or ly in (1, 6):
+        return False
+    # The southeast sculpture court is paving, not an invisible theatre wall.
+    if lx >= 6 and ly >= 5:
+        return False
     return True
 
 
@@ -3755,6 +3789,8 @@ _LM_SOLID = {
     "trainshed": _lm_solid_trainshed,
     "garden": _lm_solid_garden,
     "blocks": _lm_solid_blocks,
+    "hill_blocks": _lm_solid_hill_blocks,
+    "grand_blocks": _lm_solid_grand_blocks,
     "brewery": _lm_solid_brewery,
 }
 
@@ -5427,6 +5463,9 @@ peds_ARCHETYPES = {
     # the entire metro area like a theme-park costume.
     'cards_fan':  dict(w=0, gait=0.92, acc=('cap', 'foam_finger'), cap=(176, 42, 44),
                        sh=(_MAROON, _CARDS, _BRICKY),   pa=(_PA_DENIM, _PA_KHAKI, _PA_CARDS)),
+    'grove_regular': dict(w=0, gait=1.02, acc=('pride_pin',),
+                          sh=(_PURPLE, _ROSE, _TEAL),
+                          pa=(_PA_BLACK, _PA_DENIM, _PA_NAVY)),
     'hoosier':    dict(w=0, gait=0.88, acc=('mullet', 'tallboy'), hair='brown',
                        sh=(_OFFWHT, _GREYBLUE, _MAROON), pa=(_PA_DENIM, _PA_DENIM, _PA_BLACK)),
     'trick_or_treater': dict(w=0, gait=0.82, acc=('hood',),
@@ -5475,6 +5514,8 @@ def peds__resolve(key):
         accent_d = peds__dk(accent)
     elif arch == 'cards_fan':
         accent, accent_d = (190, 42, 46), (112, 28, 30)
+    elif arch == 'grove_regular':
+        accent, accent_d = ((220, 72, 96), (244, 154, 54))
     elif 'bat' in acc:
         accent, accent_d = _BAT, peds__dk(_BAT)
     elif 'jacket' in acc:
@@ -5679,6 +5720,11 @@ def peds__acc(g, view, spec, s):
         peds__r(g, 12, 7 + o, 14, 12 + o, M_ACC)
         peds__r(g, 13, 4 + o, 14, 7 + o, M_ACC)
         peds__p(g, 12, 5 + o, M_ACC)
+    if 'pride_pin' in acc:
+        # A tiny two-colour pin, visible without turning a person into a prop.
+        px = 7 if view != 'side' else 9
+        peds__p(g, px, 10 + o, M_ACC)
+        peds__p(g, px + 1, 10 + o, M_ACC_D)
     if 'tallboy' in acc and view != 'back':
         peds__r(g, 1, 13 + o, 3, 18 + o, M_LT)
         peds__r(g, 1, 15 + o, 3, 16 + o, M_ACC)
@@ -11249,18 +11295,156 @@ def lm__bake_lambert(w, h):
     return s
 
 
+def lm__bake_aligned_district(w, h, solid_fn, road_cols, road_rows,
+                              roofs, salt, identity):
+    """Paint directly from a district collision mask.
+
+    Grand Center and The Hill previously had freehand roads over a different
+    tile maze. Drawing each 64px role from the same predicate makes an
+    invisible wall structurally impossible.
+    """
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    salt, 7, 5)
+    lw, lh = int(w) // TILE_SIZE, int(h) // TILE_SIZE
+    for col in sorted(set(road_cols)):
+        if 0 <= col < lw:
+            lm__road(s, col * TILE_SIZE, 0, TILE_SIZE, h, False,
+                     salt + col, True, 5)
+    for row in sorted(set(road_rows)):
+        if 0 <= row < lh:
+            lm__road(s, 0, row * TILE_SIZE, w, TILE_SIZE, True,
+                     salt + 20 + row, True, 5)
+
+    solids = []
+    for ly in range(lh):
+        for lx in range(lw):
+            if not solid_fn(lx, ly, lw, lh):
+                continue
+            solids.append((lx, ly))
+            x, y = lx * TILE_SIZE, ly * TILE_SIZE
+            roof = roofs[_hash2(lx, ly, salt) % len(roofs)]
+            # Collision owns the whole tile, so the roof owns the whole tile.
+            # A fake 6px pavement margin here was just another invisible wall.
+            lm__r(s, roof, x, y, TILE_SIZE, TILE_SIZE)
+            pygame.draw.rect(s, lm_OUTLINE, (x, y, TILE_SIZE, TILE_SIZE), 2)
+            rf = pygame.Rect(x + 3, y + 3, TILE_SIZE - 6, TILE_SIZE - 6)
+            lm__r(s, lm__shade(roof, 1.18), rf.x + 4, rf.y + 4, rf.w - 8, 3)
+            lm__roof_clutter(s, rf, salt + lx * 13 + ly * 29, 2, roof)
+
+    if identity == 'hill':
+        # St. Ambrose occupies one real building tile; the terracotta cross
+        # never spills over the broad walkable lanes around it.
+        x, y = 5 * TILE_SIZE + 8, 3 * TILE_SIZE + 8
+        lm__r(s, lm_TERRACOTTA, x + 16, y, 20, 48)
+        lm__r(s, lm_TERRACOTTA, x, y + 15, 52, 18)
+        pygame.draw.rect(s, lm_OUTLINE, (x, y, 52, 48), 2)
+        hud_text(s, "ST AMBROSE", 5 * TILE_SIZE + 2, 3 * TILE_SIZE + 50,
+                 lm_MARQUEE, False, 1)
+        # Bocce court on the open southwest apron.
+        lm__r(s, (150, 132, 96), 10, h - 48, 104, 24)
+        pygame.draw.rect(s, (86, 66, 48), (10, int(h) - 48, 104, 24), 2)
+    else:
+        # Marquees make the tile-aligned masses unmistakably Grand Center.
+        for text_label, lx, ly, color in (
+                ("FOX", 3, 3, lm_NEON_RED),
+                ("POWELL", 5, 2, (86, 74, 108)),
+                ("SHELDON", 2, 7, (86, 60, 96))):
+            if (lx, ly) not in solids:
+                continue
+            x, y = lx * TILE_SIZE + 5, ly * TILE_SIZE + 25
+            lm__r(s, color, x, y, TILE_SIZE - 10, 18)
+            pygame.draw.rect(s, lm_OUTLINE, (x, y, TILE_SIZE - 10, 18), 1)
+            hud_text(s, text_label, x + 3, y + 5, lm_MARQUEE, False, 1)
+        # The southeast tiles are explicitly a sculpture plaza.
+        pc = (7 * TILE_SIZE + TILE_SIZE // 2,
+              7 * TILE_SIZE + TILE_SIZE // 2)
+        pygame.draw.circle(s, lm_CONCRETE_DK, pc, 23)
+        pygame.draw.circle(s, lm_CONCRETE_LT, pc, 17)
+        lm__r(s, (146, 108, 62), pc[0] - 5, pc[1] - 5, 10, 10)
+
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, int(w), int(h)), 1)
+    return s
+
+
+def lm__bake_the_hill_aligned(w, h):
+    return lm__bake_aligned_district(
+        w, h, _lm_solid_hill_blocks, (4, 7, 9), (2, 5, 8),
+        lm_HILL_ROOFS, 651, 'hill')
+
+
+def lm__bake_grand_center_aligned(w, h):
+    return lm__bake_aligned_district(
+        w, h, _lm_solid_grand_blocks, (4,), (1, 6),
+        ((58, 56, 62), (104, 72, 62), (98, 92, 84), (84, 80, 88)),
+        661, 'grand')
+
+
+def lm__bake_stadium_angular(w, h):
+    """Busch as a compact angular baseball bowl aimed toward the Arch."""
+    s = lm__new(w, h)
+    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    671, 7, 5)
+    # Home plate sits at the west gate; center field points east/northeast.
+    home = (42, int(h * 0.58))
+    field = (home, (int(w * 0.64), 42), (int(w) - 18, int(h * 0.43)),
+             (int(w * 0.72), 4 * TILE_SIZE - 10))
+    lm__poly(s, lm_DIRT, field)
+    inner = ((home[0] + 8, home[1]), (int(w * 0.62), 58),
+             (int(w) - 33, int(h * 0.43)), (int(w * 0.69), 4 * TILE_SIZE - 24))
+    lm__poly(s, lm_TURF, inner)
+    for x in range(home[0] + 24, int(w) - 36, 32):
+        lm__line(s, lm_TURF_LT, (x, int(h * 0.28)),
+                 (x + 28, int(h * 0.72)), 5)
+
+    lw, lh = int(w) // TILE_SIZE, int(h) // TILE_SIZE
+    for ly in range(lh):
+        for lx in range(lw):
+            if not _lm_solid_stadium(lx, ly, lw, lh):
+                continue
+            x, y = lx * TILE_SIZE, ly * TILE_SIZE
+            lm__r(s, lm_SEAT_RED_DK, x, y, TILE_SIZE, TILE_SIZE)
+            lm__r(s, lm_SEAT_RED, x + 5, y + 5, TILE_SIZE - 10, TILE_SIZE - 10)
+            for aisle in range(14, TILE_SIZE - 12, 14):
+                lm__line(s, lm_CONCRETE_DK, (x + aisle, y + 8),
+                         (x + aisle, y + TILE_SIZE - 10))
+            pygame.draw.rect(s, lm_OUTLINE, (x, y, TILE_SIZE, TILE_SIZE), 2)
+
+    # East-facing infield diamond and chalk lines.
+    d = 30
+    first = (home[0] + d, home[1] + d)
+    second = (home[0] + d * 2, home[1])
+    third = (home[0] + d, home[1] - d)
+    lm__poly(s, lm_DIRT, (home, first, second, third))
+    inner_diamond = tuple((int(home[0] + (px - home[0]) * .72),
+                           int(home[1] + (py - home[1]) * .72))
+                          for px, py in (home, first, second, third))
+    lm__poly(s, lm_TURF, inner_diamond)
+    for base in (first, second, third):
+        lm__r(s, lm_CHALK, base[0] - 3, base[1] - 3, 6, 6)
+    lm__line(s, lm_CHALK, home, (int(w * 0.64), 42), 2)
+    lm__line(s, lm_CHALK, home, (int(w * 0.72), 4 * TILE_SIZE - 10), 2)
+    # The only gate is visibly cut through the west/southwest grandstand.
+    lm__r(s, lm_ASPHALT, 0, 3 * TILE_SIZE + 18, 58, 30)
+    lm__line(s, lm_LINE_Y, (3, 3 * TILE_SIZE + 33),
+             (55, 3 * TILE_SIZE + 33), 2)
+    hud_text(s, "BUSCH", int(w) - 61, int(h * .46), lm_MARQUEE, False, 1)
+    pygame.draw.rect(s, lm_OUTLINE, (0, 0, int(w), int(h)), 1)
+    return s
+
+
 lm__BAKERS = {
     "lambert": lm__bake_lambert,
     "arch": lm__bake_arch,
-    "stadium": lm__bake_stadium,
+    "stadium": lm__bake_stadium_angular,
     "ted_drewes": lm__bake_ted_drewes,
     "brewery": lm__bake_brewery,
     "forest_park": lm__bake_forest_park,
     "central_west_end": lm__bake_cwe,
-    "the_hill": lm__bake_the_hill,
+    "the_hill": lm__bake_the_hill_aligned,
     "delmar_loop": lm__bake_delmar_loop,
     "tower_grove": lm__bake_tower_grove,
-    "grand_center": lm__bake_grand_center,
+    "grand_center": lm__bake_grand_center_aligned,
     "water_tower": lm__bake_water_tower,
     "bevo": lm__bake_bevo,
     "courthouse": lm__bake_courthouse,
@@ -13291,7 +13475,8 @@ class Game:
         by_name = {entry[5]: entry for entry in LANDMARKS}
         for variant, venue in SHOWCASE_VEHICLES:
             tune = VEHICLE_TUNING[variant]
-            target = landmark_dropoff_point(by_name[venue])
+            target = LOCAL_LEGENDS[variant].get(
+                'spawn', landmark_dropoff_point(by_name[venue]))
             spot = free_point_near(target[0], target[1], tune['w'], tune['h'],
                                    max_rings=8)
             if spot is None:
@@ -15701,7 +15886,7 @@ class Game:
         'hill': (('hoosier', 0.05),),
         'loop': (('busker_sax', 0.18),),
         'grand': (('busker_sax', 0.18),),
-        'grove': (('busker_sax', 0.08),),
+        'grove': (('grove_regular', 0.26), ('busker_sax', 0.08)),
         'downtown': (('cards_fan', 0.10),),
         'riverfront': (('cards_fan', 0.08),),
         'soulard': (('cards_fan', 0.06),),

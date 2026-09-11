@@ -69,6 +69,49 @@ def test_grand_boulevard_stays_open_through_grand_center():
         assert M.WALK_REACHABLE[row][grand], (grand, row)
 
 
+def test_grand_center_and_the_hill_preserve_their_real_street_grid():
+    """Custom landmark art may not replace city streets with plaza or walls."""
+    M.Game(start_fullscreen=False)  # installs the live traffic map hooks
+    expected = {
+        "Grand Center Arts District": ({57}, {32, 37}),
+        "The Hill": ({27, 32}, {57, 63}),
+    }
+    for name, (cols, rows) in expected.items():
+        entry = next(e for e in M.LANDMARKS if e[5] == name)
+        lx, ly, lw, lh = entry[:4]
+        for row in range(ly, ly + lh):
+            for col in range(lx, lx + lw):
+                if col not in cols and row not in rows:
+                    continue
+                tile = M.GAME_MAP[row][col]
+                assert tile['type'] == M.TILE_ROAD, (name, col, row, tile)
+                assert not tile['collidable']
+                if not tile.get('rail_embedded'):
+                    assert M.traffic__is_grid_road(col, row)
+
+
+def test_grand_center_and_hill_through_streets_clear_the_largest_car():
+    """A 48px local ride can traverse every advertised arterial."""
+    cases = {
+        "Grand Center Arts District": ({57}, {32, 37}),
+        "The Hill": ({27, 32}, {57, 63}),
+    }
+    for name, (cols, rows) in cases.items():
+        lx, ly, lw, lh = next(e[:4] for e in M.LANDMARKS if e[5] == name)
+        for col in cols:
+            for py in range(ly * M.TILE_SIZE + 24,
+                            (ly + lh) * M.TILE_SIZE - 23, 8):
+                rect = M.pygame.Rect(0, 0, 24, 48)
+                rect.center = (col * M.TILE_SIZE + M.TILE_SIZE // 2, py)
+                assert not M.is_blocked(rect), (name, col, py)
+        for row in rows:
+            for px in range(lx * M.TILE_SIZE + 24,
+                            (lx + lw) * M.TILE_SIZE - 23, 8):
+                rect = M.pygame.Rect(0, 0, 48, 24)
+                rect.center = (px, row * M.TILE_SIZE + M.TILE_SIZE // 2)
+                assert not M.is_blocked(rect), (name, px, row)
+
+
 def test_the_diagonals_exist_and_are_drivable_end_to_end():
     """Gravois does not run at a right angle to anything. That is the point."""
     assert {"GRAVOIS AVE", "MANCHESTER AVE", "WEST FLORISSANT AVE"} <= {
@@ -343,9 +386,14 @@ def test_no_authored_landmark_art_is_unreachable():
 def test_a_district_with_its_own_art_has_collision_that_matches_it():
     """The four district bakers draw their own street grid; under the old
     'district' layout the picture and the walls disagreed completely."""
-    for name in ("Central West End", "The Hill", "Delmar Loop",
-                 "Grand Center Arts District"):
-        assert M.LANDMARK_LAYOUT[name] == "blocks"
+    layouts = {
+        "Central West End": "blocks",
+        "The Hill": "hill_blocks",
+        "Delmar Loop": "blocks",
+        "Grand Center Arts District": "grand_blocks",
+    }
+    for name, layout in layouts.items():
+        assert M.LANDMARK_LAYOUT[name] == layout
         entry = next(e for e in M.LANDMARKS if e[5] == name)
         lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
         for r in range(ly, ly + lh):
