@@ -18845,37 +18845,50 @@ class Game:
                                      (wx, wy, 4, 6))
             x += w + 3
 
-        # The Arch is a bright, blunt silhouette that reads behind the logo.
+        # Riverfront geography, in the right order: dry Arch lawn, stone
+        # levee, then Mississippi. The old freeway polygon was literally
+        # painted on top of the water and the water covered both Arch feet.
+        pygame.draw.rect(self.screen, (55, 72, 48), (0, 268, SCREEN_WIDTH, 39))
+        pygame.draw.rect(self.screen, (92, 94, 88), (0, 307, SCREEN_WIDTH, 17))
+        pygame.draw.line(self.screen, (154, 150, 136), (0, 307),
+                         (SCREEN_WIDTH, 307), 2)
+        for xx in range(-8, SCREEN_WIDTH, 25):
+            pygame.draw.line(self.screen, (62, 64, 62), (xx, 314),
+                             (xx + 13, 314), 1)
+        pygame.draw.rect(self.screen, (28, 72, 104), (0, 324, SCREEN_WIDTH, 36))
+        for yy in (333, 349):
+            for xx in range((yy * 7) % 31, SCREEN_WIDTH, 43):
+                pygame.draw.rect(self.screen, (58, 112, 140), (xx, yy, 22, 2))
+
+        # The Arch lands visibly on the lawn. Drawing it after the shoreline
+        # prevents any foreground layer from sawing the feet off again.
         points = []
         for i in range(33):
             t = math.pi * i / 32.0
             points.append((int(320 + 108 * math.cos(t)),
-                           int(261 - 174 * math.sin(t))))
+                           int(285 - 178 * math.sin(t))))
         pygame.draw.lines(self.screen, (24, 28, 38), False,
                           [(x + 5, y + 6) for x, y in points], 15)
         pygame.draw.lines(self.screen, (164, 174, 180), False, points, 12)
         pygame.draw.lines(self.screen, (224, 226, 218), False,
                           [(x - 2, y - 1) for x, y in points], 3)
+        for foot_x in (212, 428):
+            pygame.draw.rect(self.screen, (30, 32, 36), (foot_x - 12, 287, 24, 6))
+            pygame.draw.rect(self.screen, (150, 154, 152), (foot_x - 10, 285, 20, 5))
 
-        # River and freeway ribbon at the bottom.
-        pygame.draw.rect(self.screen, (28, 72, 104), (0, 270, SCREEN_WIDTH, 90))
-        for yy in (279, 293, 337, 350):
-            for xx in range((yy * 7) % 31, SCREEN_WIDTH, 43):
-                pygame.draw.rect(self.screen, (58, 112, 140), (xx, yy, 22, 2))
-        pygame.draw.polygon(self.screen, (37, 38, 44),
-                            [(0, 305), (640, 274), (640, 330), (0, 352)])
-        pygame.draw.lines(self.screen, (198, 170, 80), False,
-                          [(0, 328), (640, 299)], 2)
-        for xx in range(-30, 680, 56):
-            pygame.draw.line(self.screen, (104, 104, 106),
-                             (xx, 339 - xx * 29 // 640),
-                             (xx + 28, 337 - (xx + 28) * 29 // 640), 2)
-
-        entry = CAR_SPRITES.get(('sedan', CAR_COLORS[0]))
+        # A diagonal view of the black-and-gold local Trans Am reads as a car,
+        # unlike the doubled side-on sedan that looked like a red shoebox.
+        entry = CAR_SPRITES.get(('trans_am', cars_TRANS_AM_BODY))
         if entry:
-            car = entry[0][0]
-            car = pygame.transform.scale(car, (car.get_width() * 2, car.get_height() * 2))
-            self.screen.blit(car, (454, 297))
+            angle = 2
+            car = entry[0][angle]
+            shadow = entry[1][angle]
+            size = (int(car.get_width() * 1.45), int(car.get_height() * 1.45))
+            car = pygame.transform.scale(car, size)
+            shadow = pygame.transform.scale(shadow, size)
+            rect = car.get_rect(center=(538, 286))
+            self.screen.blit(shadow, rect.move(4, 4))
+            self.screen.blit(car, rect)
 
     def draw_title_screen(self):
         self._draw_title_city()

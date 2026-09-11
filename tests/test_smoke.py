@@ -3581,6 +3581,21 @@ def test_title_character_and_picker_render_without_assets():
         g.state = original_state
 
 
+def test_title_arch_stands_on_land_and_no_road_crosses_the_river():
+    g = game()
+    g._draw_title_city()
+    river_colors = {(28, 72, 104), (58, 112, 140)}
+    assert all(g.screen.get_at((x, y))[:3] in river_colors
+               for y in range(330, M.SCREEN_HEIGHT)
+               for x in range(M.SCREEN_WIDTH))
+    assert g.screen.get_at((212, 286))[:3] != (28, 72, 104)
+    assert g.screen.get_at((428, 286))[:3] != (28, 72, 104)
+    colors = {g.screen.get_at((x, y))[:3]
+              for y in range(M.SCREEN_HEIGHT)
+              for x in range(M.SCREEN_WIDTH)}
+    assert M.cars_TRANS_AM_GOLD in colors
+
+
 def test_every_character_look_is_a_distinct_baked_sprite():
     M.bake_ped_sprites()
     pixels = []
