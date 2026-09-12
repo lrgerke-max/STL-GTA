@@ -2243,9 +2243,16 @@ def test_ted_drewes_is_south_where_chippewa_is():
 
 def test_the_river_is_a_river_and_you_can_cross_it():
     """It used to be three tiles of dead-straight water at the map edge."""
+    # Every row that carries a deck is excluded, not just the two grid
+    # bridges: a bridge replaces the water it crosses, which is what a
+    # bridge is. The Chain of Rocks rows were previously exempt only by
+    # accident, because this loop happened to start below them - so widening
+    # the bridge to match the asphalt actually drawn on it read as the river
+    # narrowing. Ask the map which rows have a deck instead of hard-coding.
+    decked = set(M.RIVER_BRIDGES) | {row for _col, row in M.CHAIN_OF_ROCKS_TILES}
     widths = []
     for row in range(4, M.MAP_TILES_H - 4):
-        if row in M.RIVER_BRIDGES:
+        if row in decked:
             continue
         w = sum(1 for c in range(M.MAP_TILES_W)
                 if M.GAME_MAP[row][c]['type'] == M.TILE_WATER)

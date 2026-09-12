@@ -284,48 +284,161 @@ DIAGONAL_STREETS = (
     ("GRAVOIS AVE", ((71, 51), (52, 73), (50, 77), (39, 83),
                      (36, 88), (24, 96)), 1),
     ("MANCHESTER AVE", ((58, 40), (2, 47)), 1),
-    ("WEST FLORISSANT AVE", ((66, 30), (8, 4)), 1),
+    # The south-east end used to stop at (66, 30) - a tile in the middle of a
+    # block, walled on three sides, so the arterial's last move was into a
+    # brick wall. It now runs out to 14TH ST, which is a junction you can
+    # actually turn at.
+    ("WEST FLORISSANT AVE", ((68, 31), (8, 4)), 1),
 )
 
 
-def _diagonal_run(points, width):
-    """Every tile of a multi-leg diagonal, in order, de-duplicated."""
-    out, seen = [], set()
+# The kerb-to-kerb envelope of a diagonal street, in pixels. The tile
+# reservation below and the renderer both measure from these, which is the
+# whole point: a diagonal is DRAWN as one continuous polyline of asphalt, so
+# the tiles it reserves have to be the tiles that polyline actually covers.
+# When the two were derived separately - a 4-connected staircase for collision,
+# a straight line for the paint - they disagreed on 53 tiles across the three
+# diagonals, and every one of those was a building standing in the middle of
+# the road: you could see asphalt under a brick facade, and drive into it.
+DIAG_ROAD_WIDTH = 50          # asphalt between the kerbs
+DIAG_KERB_WIDTH = 62          # including both kerbs; just under one 64px tile
+# A tile joins the street once this much of its area is inside the envelope.
+# 0.20 is not arbitrary: below it the band starts claiming tiles the paint only
+# grazes (a 62px road cannot need a third tile of right-of-way), and above it
+# the claimed set stops being 4-connected on the shallow legs.
+DIAG_TILE_COVER = 0.20
+
+
+def _point_seg_distance(px, py, x0, y0, x1, y1):
+    """Shortest distance from a point to a line SEGMENT (not its extension)."""
+    dx, dy = x1 - x0, y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 0.0:
+        return math.hypot(px - x0, py - y0)
+    t = ((px - x0) * dx + (py - y0) * dy) / length_sq
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    return math.hypot(px - (x0 + dx * t), py - (y0 + dy * t))
+
+
+def _polyline_segments(points):
+    """The polyline through tile CENTRES, in world pixels."""
+    return [(a[0] * TILE_SIZE + TILE_SIZE * 0.5, a[1] * TILE_SIZE + TILE_SIZE * 0.5,
+             b[0] * TILE_SIZE + TILE_SIZE * 0.5, b[1] * TILE_SIZE + TILE_SIZE * 0.5)
+            for a, b in zip(points, points[1:])]
+
+
+def _band_tiles(points, half_width, min_cover=DIAG_TILE_COVER, samples=8):
+    """Every tile at least `min_cover` of whose area the drawn band covers.
+
+    Sampled on an 8x8 grid per candidate tile rather than solved analytically:
+    this runs once at import, the polylines are a few hundred tiles long, and a
+    closed form for "area of a rectangle inside a capsule union" is a great
+    deal of code to maintain for a number that only has to be right to a
+    sixty-fourth of a tile.
+    """
+    segments = _polyline_segments(points)
+    if not segments:
+        return ()
+    reach = int(half_width // TILE_SIZE) + 2
+    candidates = set()
+    for x0, y0, x1, y1 in segments:
+        steps = int(math.hypot(x1 - x0, y1 - y0) / 8.0) + 1
+        for i in range(steps + 1):
+            t = i / steps
+            bc = int((x0 + (x1 - x0) * t) // TILE_SIZE)
+            br = int((y0 + (y1 - y0) * t) // TILE_SIZE)
+            for dc in range(-reach, reach + 1):
+                for dr in range(-reach, reach + 1):
+                    candidates.add((bc + dc, br + dr))
+    step = TILE_SIZE / samples
+    need = min_cover * samples * samples
+    out = set()
+    for (col, row) in candidates:
+        if not (0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H):
+            continue
+        inside = 0
+        for i in range(samples):
+            px = col * TILE_SIZE + (i + 0.5) * step
+            for j in range(samples):
+                py = row * TILE_SIZE + (j + 0.5) * step
+                if min(_point_seg_distance(px, py, *s) for s in segments) <= half_width:
+                    inside += 1
+        if inside >= need:
+            out.add((col, row))
+    return out
+
+
+def _route_run(points, half_width, min_cover=DIAG_TILE_COVER):
+    """Every tile a route claims: the drawn band, plus its centreline spine.
+
+    The spine is unioned in for one reason - it is 4-connected by
+    construction, and every reachability check and vehicle collider in this
+    file is 4-connected too. A band on its own is contiguous at the widths
+    used here, but it is contiguous as a matter of arithmetic rather than as a
+    matter of guarantee, and a future waypoint nudge must not be able to open
+    a corner-touch gap in an arterial.
+    """
+    spine, seen = [], set()
     for a, b in zip(points, points[1:]):
-        for t in _diagonal_tiles(a, b, width):
+        for t in _diagonal_tiles(a, b, 1):
             if t not in seen:
                 seen.add(t)
-                out.append(t)
-    return tuple(out)
+                spine.append(t)
+    band = _band_tiles(points, half_width, min_cover)
+    ordered = list(spine)
+    extra = sorted(band - seen)
+    ordered.extend(extra)
+    return tuple(ordered)
 
 
-def _diagonal_headings(points, width):
-    """tile -> the unit vector the street is actually travelling there.
+def _diagonal_run(points, width):
+    """Every tile of a multi-leg diagonal: the road as drawn, not as stepped."""
+    return _route_run(points, DIAG_KERB_WIDTH * width * 0.5)
 
-    The tiles are a 4-connected staircase because collision and reachability
-    are 4-connected, but the *street* is not a staircase: it runs at about 40
-    degrees. Renderers need the real heading, or every tile gets boxed in
-    square kerbs and the road reads as a flight of stairs, which is exactly
-    what it looked like.
+
+def _route_headings(points, half_width):
+    """tile -> the unit vector the route is actually travelling there.
+
+    The *street* is not a staircase: it runs at about 40 degrees. Renderers
+    need the real heading, or every tile gets boxed in square kerbs and the
+    road reads as a flight of stairs, which is exactly what it looked like.
+    A tile takes the heading of whichever leg passes closest to it, so the
+    tiles either side of a bend follow the leg they actually belong to.
     """
-    out = {}
+    segments = _polyline_segments(points)
+    units = []
     for a, b in zip(points, points[1:]):
         dc, dr = b[0] - a[0], b[1] - a[1]
         mag = math.hypot(dc, dr) or 1.0
-        unit = (dc / mag, dr / mag)
-        for t in _diagonal_tiles(a, b, width):
-            out.setdefault(t, unit)
+        units.append((dc / mag, dr / mag))
+    out = {}
+    for (col, row) in _route_run(points, half_width):
+        px = col * TILE_SIZE + TILE_SIZE * 0.5
+        py = row * TILE_SIZE + TILE_SIZE * 0.5
+        best = min(range(len(segments)),
+                   key=lambda i: _point_seg_distance(px, py, *segments[i]))
+        out[(col, row)] = units[best]
     return out
+
+
+def _diagonal_headings(points, width):
+    """_route_headings for a named diagonal street."""
+    return _route_headings(points, DIAG_KERB_WIDTH * width * 0.5)
 
 
 def _diagonal_tiles(start, end, width):
     """A 4-connected staircase between two points, `width` tiles thick.
 
-    Deliberately NOT a raw Bresenham line. Bresenham steps diagonally, which
-    leaves consecutive tiles touching only at a corner - and every reachability
-    check in this file (and every car collider) is 4-connected, so a corner
-    touch is a wall. Stepping one axis at a time costs nothing visually at
-    64px per tile and gives a road you can actually drive down.
+    This is no longer what a diagonal reserves - `_route_run` does that, from
+    the band actually painted. What the staircase is still for is the SPINE
+    `_route_run` unions in: it is 4-connected by construction, and every
+    reachability check in this file (and every car collider) is 4-connected
+    too, so it is the guarantee that an arterial can never be opened into two
+    corner-touching halves by a waypoint nudge.
+
+    Deliberately NOT a raw Bresenham line, for that same reason: Bresenham
+    steps diagonally, leaving consecutive tiles touching only at a corner,
+    and a corner touch is a wall.
     """
     (c0, r0), (c1, r1) = start, end
     dc, dr = c1 - c0, r1 - r0
@@ -2132,20 +2245,34 @@ LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyar
 # landmark's coarse tile mask turn the painted carriageway into a wall. Grand
 # Boulevard is drawn north/south through the middle of Grand Center at column
 # 57; it must remain continuous between the grid roads above and below.
-LANDMARK_THROUGH_ROADS = {
-    "Lambert Airport": {
-        'cols': frozenset((2,)),
-        'rows': frozenset((2,)),
-    },
-    "Grand Center Arts District": {
-        'cols': frozenset((57,)),
-        'rows': frozenset((32, 37)),
-    },
-    "The Hill": {
-        'cols': frozenset((27, 32)),
-        'rows': frozenset((57, 63)),
-    },
-}
+#: Building landmarks a named street must NOT be carried through. Empty, and
+#: that is the point: add a name here only when a street through a place would
+#: be actively wrong, and say why.
+#:
+#: This replaced an opt-IN table that named the three landmarks whose streets
+#: somebody had noticed and fixed by hand - which is exactly why nine others
+#: were quietly walling a street off. An opt-in list of the places that work
+#: is a list of the places somebody got to. An opt-out list of the places that
+#: are deliberately different is a decision you can read, check and test.
+LANDMARK_STREETS_EXEMPT = frozenset()
+
+
+def landmark_street_crosses(kind, name, col, row):
+    """True when a named grid street should be carried across this tile.
+
+    A street with a name, a sign and two lanes has to go where it says it
+    goes. Measured before this rule existed: 39 tiles of named street were
+    solid brick - Broadway and Tucker stopping dead inside Downtown, Cherokee
+    and Meramec inside the brewery, Vandeventer inside the Central West End.
+
+    Parks are the standing exception, by kind rather than by name: Forest Park
+    and Tower Grove Park have no through streets, which is the single most
+    obvious thing about driving round them. Their grid lanes stay as park
+    ground you can cross, not asphalt.
+    """
+    if kind == "park" or name in LANDMARK_STREETS_EXEMPT:
+        return False
+    return col in ROAD_LINES or row in ROAD_LINES
 
 # Positions trace the real St. Louis map (north = up, Mississippi on the east
 # edge): the Arch on the riverfront with downtown and the ballpark just inland,
@@ -2190,7 +2317,10 @@ LANDMARKS = [
     # lot, with the queue that never goes away. It was at (37,53) - NORTH of
     # both The Hill and Tower Grove Park, about three miles from where it
     # belongs. Nobody in this city has ever driven north to get custard.
-    (5, 77, 6, 4, "building", "Ted Drewes", (226, 222, 212)),
+    # Four tiles wide, not six: at six it straddled SKINKER BLVD (col 9) and
+    # the stand got a street through its middle. It still fronts CHIPPEWA ST
+    # (row 79), which is the part that matters.
+    (5, 77, 4, 4, "building", "Ted Drewes", (226, 222, 212)),
     # And the other one, on Grand. There are two. This is a fact people will
     # correct you about.
     (45, 74, 5, 3, "building", "Ted Drewes on Grand", (226, 222, 212)),
@@ -2210,7 +2340,12 @@ LANDMARKS = [
     # --- South city ---
     # Compton Hill Water Tower: one of three still standing, which is more
     # than any other city in the country has, and locals will tell you.
-    (48, 52, 5, 5, "building", "Compton Hill Water Tower", (196, 180, 150)),
+    # Cols 48-52 straddled COMPTON AVE (col 50), so keeping Compton drivable
+    # meant punching a two-lane street through the middle of a standpipe.
+    # Cols 46-49 / rows 51-55 is one whole block between Morganford and
+    # Compton, entirely inside Compton Heights, with no named line crossing
+    # it - so the lawn stays a lawn and the tower can never stand in a road.
+    (46, 51, 4, 5, "building", "Compton Hill Water Tower", (196, 180, 150)),
     # Henry Shaw's garden, half a mile from Henry Shaw's park.
     (30, 46, 8, 7, "building", "Missouri Botanical Garden", (96, 128, 84)),
     # Meet me by the windmill.
@@ -2301,11 +2436,39 @@ RIVER_BRIDGES = (32, 50)
 # connection to the street flood fill and read as accidental concrete islands.
 RIVER_POCKET_TILES = ((89, 12), (90, 12), (82, 18), (83, 18),
                       (89, 60), (90, 60))
+# The Old Chain of Rocks bridge and its famous 22-degree kink. The bend is
+# the whole reason anybody outside St. Louis has heard of this bridge, and it
+# is a BEND: the deck turns once, mid-river, and runs straight either side of
+# it. Drawn per-tile it came out as a flight of four stairs, because each
+# 64px tile got its own pair of horizontal deck rails. It is now one
+# continuous polyline (draw_bridge_and_channel), so the kink is a kink.
 CHAIN_OF_ROCKS_WAYPOINTS = ((91, 2), (94, 2), (99, 4))
+CHAIN_OF_ROCKS_WIDTH = 58          # px: a two-lane deck between its railings
 RIVER_DES_PERES_WAYPOINTS = ((0, 96), (24, 96), (40, 94),
                              (68, 96), (91, 96))
-CHAIN_OF_ROCKS_TILES = frozenset(_diagonal_run(CHAIN_OF_ROCKS_WAYPOINTS, 1))
-RIVER_DES_PERES_TILES = frozenset(_diagonal_run(RIVER_DES_PERES_WAYPOINTS, 1))
+DES_PERES_WIDTH = 60               # px: the concrete channel, kerb to kerb
+CHAIN_OF_ROCKS_TILES = frozenset(
+    _route_run(CHAIN_OF_ROCKS_WAYPOINTS, CHAIN_OF_ROCKS_WIDTH * 0.5))
+RIVER_DES_PERES_TILES = frozenset(
+    _route_run(RIVER_DES_PERES_WAYPOINTS, DES_PERES_WIDTH * 0.5))
+#: (col,row) -> unit heading, for the two off-grid routes. Same reason the
+#: diagonals need it: a renderer that does not know which way the deck runs
+#: can only draw square tiles, and square tiles are the staircase.
+CHAIN_OF_ROCKS_DIR = _route_headings(CHAIN_OF_ROCKS_WAYPOINTS,
+                                     CHAIN_OF_ROCKS_WIDTH * 0.5)
+DES_PERES_DIR = _route_headings(RIVER_DES_PERES_WAYPOINTS,
+                                DES_PERES_WIDTH * 0.5)
+#: The named north-south streets the Des Peres channel passes under, as
+#: col -> (first row, last row) of channel tile in that column. The channel is
+#: below grade and the city carries on south of it, so a street that crosses
+#: it bridges it. Painting the channel straight over the top made sixteen
+#: named streets vanish for three tiles and reappear on the far side.
+DES_PERES_CROSSINGS = {}
+for _ccol in sorted(ROAD_LINES):
+    _crows = sorted(row for col, row in RIVER_DES_PERES_TILES if col == _ccol)
+    if _crows:
+        DES_PERES_CROSSINGS[_ccol] = (_crows[0], _crows[-1])
+del _ccol, _crows
 
 # --- Features inside a landmark -------------------------------------------
 # Forest Park is one landmark, but it contains four or five places a St.
@@ -2318,6 +2481,13 @@ RIVER_DES_PERES_TILES = frozenset(_diagonal_run(RIVER_DES_PERES_WAYPOINTS, 1))
 # rather than being hand-copied tile numbers that silently drift apart.
 # (parent, name, fx, fy, fw, fh, solid)
 LANDMARK_FEATURES = (
+    # These fractions are not free: lm__bake_forest_park paints the basin at
+    # w*0.42 +/- w*0.185, h*0.565 +/- h*0.050, which is exactly cols 16-23 /
+    # rows 35-36. Narrowing the collision rect to clear MACKLIND AVE left the
+    # art still painting water over cols 21-23 - open park you could drive
+    # across a lake on. Forest Park has no through streets, which is the
+    # documented intent, so Macklind simply stops at the basin like every
+    # other street that meets this park.
     ("Forest Park", "The Grand Basin", 0.235, 0.515, 0.375, 0.105, True),
     ("Forest Park", "Art Hill", 0.250, 0.300, 0.345, 0.200, False),
     ("Forest Park", "Saint Louis Art Museum", 0.330, 0.190, 0.190, 0.105, False),
@@ -2329,7 +2499,7 @@ LANDMARK_FEATURES = (
     # way the Grand Basin is; Seiwa-en is real water you have to go round.
     ("Missouri Botanical Garden", "The Climatron", 0.230, 0.130, 0.260, 0.300, False),
     ("Missouri Botanical Garden", "Seiwa-en", 0.620, 0.280, 0.260, 0.300, True),
-    ("Missouri Botanical Garden", "The Linnean House", 0.120, 0.700, 0.380, 0.140, False),
+    ("Missouri Botanical Garden", "The Linnean House", 0.380, 0.700, 0.340, 0.140, False),
     ("Missouri Botanical Garden", "Tower Grove House", 0.740, 0.700, 0.140, 0.140, False),
 )
 
@@ -2714,6 +2884,13 @@ def _fill_city_blocks(game_map):
                     # Sidewalk only on the north & west faces; the south & east
                     # faces borrow the neighbouring road's own apron.
                     walk = i == 0 or j == 0 or i == alley_col or j == alley_row
+                    # A courtyard with no gate is a sealed pocket: open ground
+                    # the street network cannot reach, which is exactly where a
+                    # drop marker or a spawn must never land. The throat at
+                    # (2, 1) always adjoins both the courtyard's north-west
+                    # interior tile and the block's own j == 0 sidewalk, since a
+                    # courtyard only exists at bw, bh >= 5.
+                    walk = walk or (courtyard and i == 2 and j == 1)
                     if kind == BLOCK_PARK:
                         game_map[y][x] = {'type': TILE_PARK, 'collidable': False,
                                           'landmark': None, 'color': COLOR_PARK}
@@ -2766,9 +2943,7 @@ def build_map():
     for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
         for y in range(ly, min(ly + lh, MAP_TILES_H)):
             for x in range(lx, min(lx + lw, MAP_TILES_W)):
-                through = LANDMARK_THROUGH_ROADS.get(name)
-                if (through is not None
-                        and (x in through['cols'] or y in through['rows'])):
+                if landmark_street_crosses(kind, name, x, y):
                     game_map[y][x] = {
                         'type': TILE_ROAD, 'collidable': False,
                         'landmark': name, 'color': COLOR_ROAD,
@@ -2786,7 +2961,44 @@ def build_map():
     _stamp_river(game_map)
     _stamp_special_routes(game_map)
     _stamp_rail_corridors(game_map)
+    _open_street_lines(game_map)
     return game_map
+
+
+def _open_street_lines(game_map):
+    """No named street may dead-end into a landmark. Runs last, over everything.
+
+    LANDMARK_THROUGH_ROADS declares this by hand, landmark by landmark, and
+    hand-maintained is the problem: it listed three landmarks, and nine more
+    were quietly walling a street off. Measured before this pass existed, 39
+    tiles of named, signposted, two-lane street were solid brick - Broadway
+    and Tucker stopping dead inside Downtown, Cherokee and Meramec stopping
+    inside the brewery, Vandeventer inside the Central West End. You drove at
+    a street with a name on it and hit a wall, which is the single worst thing
+    a driving sandbox can do.
+
+    So it is an invariant rather than a table: if a tile is on a named grid
+    line and it is solid, it becomes road. Two exceptions, both deliberate:
+
+      * water - the Mississippi is SUPPOSED to interrupt the grid, and it
+        does so at exactly the two crossings in RIVER_BRIDGES. Punching every
+        street across it would put a dozen invisible bridges back.
+      * the landmark's own name is kept on the tile, so the place stays
+        discoverable and its art still knows the tile belongs to it. Only the
+        collision and the surface change.
+    """
+    for row in range(MAP_TILES_H):
+        row_is_street = row in ROAD_LINES
+        for col in range(MAP_TILES_W):
+            if not (row_is_street or col in ROAD_LINES):
+                continue
+            tile = game_map[row][col]
+            if not tile['collidable'] or tile['type'] == TILE_WATER:
+                continue
+            tile['type'] = TILE_ROAD
+            tile['collidable'] = False
+            tile['color'] = COLOR_ROAD
+            tile['street'] = street_name(col, row)
 
 
 #: Landmarks a diagonal is allowed to cut through. These are neighbourhoods
@@ -3064,11 +3276,17 @@ def _stamp_river(game_map):
 
 def _stamp_special_routes(game_map):
     """Restore the two non-grid escape routes after the river owns its banks."""
+    # 'under' is what the route was laid on top of. The deck and the channel
+    # are drawn as whole polylines, so the per-tile pass only paints the
+    # GROUND beneath them - and it has to know whether that ground is river,
+    # levee or city, or the bridge ends up with a lawn under the middle of
+    # the Mississippi.
     for col, row in RIVER_DES_PERES_TILES:
         if 0 <= col < MAP_TILES_W and 0 <= row < MAP_TILES_H:
             game_map[row][col] = {
                 'type': TILE_PLAZA, 'collidable': False, 'landmark': None,
                 'color': (104, 108, 106), 'des_peres': True,
+                'under': game_map[row][col]['type'],
                 'street': "RIVER DES PERES CHANNEL",
             }
     for col, row in CHAIN_OF_ROCKS_TILES:
@@ -3076,6 +3294,7 @@ def _stamp_special_routes(game_map):
             game_map[row][col] = {
                 'type': TILE_ROAD, 'collidable': False, 'landmark': None,
                 'color': (92, 94, 92), 'chain_of_rocks': True,
+                'under': game_map[row][col]['type'],
                 'street': "OLD CHAIN OF ROCKS BRIDGE",
             }
 
@@ -3709,8 +3928,11 @@ def _lm_solid_garden(lx, ly, lw, lh):
     if abs(lx + 0.5 - cx) <= 1.0 and abs(ly + 0.5 - cy) <= 1.0:
         return True
     house_row = int(lh * 0.72)
-    # The Linnean House: a long, low glass barrel along the south walk.
-    if ly == house_row and 1 <= lx <= max(1, int(lw * 0.38)):
+    # The Linnean House: a long, low glass barrel along the south walk. The
+    # bounds are the same 0.38w..0.72w fractions lm__bake_botanical paints it
+    # at, so the glass you can see and the glass you cannot walk through are
+    # one decision. It sits east of KINGSHIGHWAY rather than astride it.
+    if ly == house_row and int(lw * 0.38) <= lx <= max(1, int(lw * 0.72)):
         return True
     # Tower Grove House, Shaw's own place, off at the east end.
     if lx == lw - 2 and ly == house_row:
@@ -11171,8 +11393,14 @@ def lm__bake_botanical(w, h):
         lm__r(s, lm_LIMESTONE_DK, px - 1, py - 2, 7, 3)
 
     # ---- THE LINNEAN HOUSE: 1882, a long glass barrel ---------------------
-    lh_x, lh_y = int(w * 0.10), int(h * 0.755)
-    lh_w, lh_h = int(w * 0.38), int(h * 0.105)
+    # 0.10w put the glasshouse across KINGSHIGHWAY (col 32): the garden spans
+    # a superblock, so the street crosses it, and it was crossing the middle
+    # of a 195px-long greenhouse. 0.38w starts it at local col 3, clear of the
+    # street; 0.34w keeps its east end clear of Tower Grove House at 0.745w.
+    # _lm_solid_garden's mask and the LANDMARK_FEATURES rect are derived from
+    # these two fractions and have to move with them.
+    lh_x, lh_y = int(w * 0.38), int(h * 0.755)
+    lh_w, lh_h = int(w * 0.34), int(h * 0.105)
     lm__r(s, lm_SHADOW, lh_x + 4, lh_y + 4, lh_w, lh_h)
     lm__r(s, lm_LIMESTONE_DK, lh_x, lh_y, lh_w, lh_h)
     lm__r(s, GLASS, lh_x + 3, lh_y + 3, lh_w - 6, lh_h - 6)
@@ -18396,29 +18624,24 @@ class Game:
         rect = self.camera.apply(pygame.Rect(c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
         t = tile['type']
 
-        if tile.get('des_peres'):
-            pygame.draw.rect(self.screen, (106, 110, 108), rect)
-            pygame.draw.line(self.screen, (70, 74, 76), rect.topleft,
-                             rect.topright, 3)
-            pygame.draw.line(self.screen, (70, 74, 76), rect.bottomleft,
-                             rect.bottomright, 3)
-            pygame.draw.line(self.screen, (54, 82, 88),
-                             (rect.left, rect.centery),
-                             (rect.right, rect.centery), 4)
-            pygame.draw.line(self.screen, (142, 146, 142),
-                             (rect.left, rect.centery - 12),
-                             (rect.right, rect.centery - 12), 1)
-            return
-
-        if tile.get('chain_of_rocks'):
-            pygame.draw.rect(self.screen, (64, 78, 76), rect)
-            pygame.draw.line(self.screen, (198, 184, 142), rect.topleft,
-                             rect.topright, 3)
-            pygame.draw.line(self.screen, (198, 184, 142), rect.bottomleft,
-                             rect.bottomright, 3)
-            pygame.draw.line(self.screen, (230, 202, 98),
-                             (rect.left, rect.centery),
-                             (rect.right, rect.centery), 1)
+        # The bridge deck and the channel floor are laid as whole polylines in
+        # draw_bridge_and_channel(), for the same reason the diagonals are:
+        # drawing a 64px square with a horizontal rail along its top and
+        # bottom edge turns a 22-degree bend into a flight of four stairs.
+        # Only the ground UNDER them is per-tile.
+        if tile.get('des_peres') or tile.get('chain_of_rocks'):
+            under = tile.get('under', TILE_GRASS)
+            if under == TILE_WATER:
+                pygame.draw.rect(self.screen, COLOR_WATER, rect)
+                pygame.draw.line(self.screen, COLOR_WATER_LINE,
+                                 (rect.left, rect.centery),
+                                 (rect.right, rect.centery), 1)
+            elif under == TILE_ROAD:
+                pygame.draw.rect(self.screen, COLOR_ROAD, rect)
+            elif under in (TILE_PLAZA, TILE_BUILDING):
+                pygame.draw.rect(self.screen, COLOR_SIDEWALK, rect)
+            else:
+                pygame.draw.rect(self.screen, COLOR_GRASS, rect)
             return
 
         if t == TILE_BUILDING:
@@ -18563,8 +18786,11 @@ class Game:
             for x in range(rect.left + 4, rect.right - 8, 14):
                 pygame.draw.rect(self.screen, COLOR_ROAD_LINE, (x, rect.centery - 2, 8, 4))
 
-    DIAG_ROAD_WIDTH = 50
-    DIAG_KERB_WIDTH = 62
+    # Aliases of the module constants the tile reservation is derived from.
+    # They are deliberately not independent numbers: widening the paint here
+    # without widening the reservation is what put buildings in the road.
+    DIAG_ROAD_WIDTH = globals()['DIAG_ROAD_WIDTH']
+    DIAG_KERB_WIDTH = globals()['DIAG_KERB_WIDTH']
 
     @staticmethod
     def ground_color_at(c, r):
@@ -18653,12 +18879,123 @@ class Game:
                                      (x0 + ux * end, y0 + uy * end), 3)
                     pos += 27.0
 
+    def _route_screen_points(self, waypoints):
+        """A route's waypoints in screen space, as one polyline."""
+        return [(int(c * TILE_SIZE + TILE_SIZE * 0.5 - self.camera.x),
+                 int(r * TILE_SIZE + TILE_SIZE * 0.5 - self.camera.y))
+                for c, r in waypoints]
+
+    @staticmethod
+    def _route_normals(points):
+        """Per-segment (unit heading, unit left normal) for a screen polyline."""
+        out = []
+        for (x0, y0), (x1, y1) in zip(points, points[1:]):
+            dx, dy = x1 - x0, y1 - y0
+            length = math.hypot(dx, dy)
+            if length <= 0:
+                continue
+            ux, uy = dx / length, dy / length
+            out.append(((x0, y0), (x1, y1), (ux, uy), (-uy, ux), length))
+        return out
+
+    def _route_rungs(self, points, half, spacing, color, thickness=1,
+                     inset=0.0, start=0.0):
+        """Draw evenly spaced cross-members ACROSS a polyline.
+
+        Deck stringers, channel expansion joints and bridge trusses are all
+        the same primitive: a short line perpendicular to the route, repeated
+        along it. Spacing them along the true polyline is what stops them from
+        stepping - a rung drawn on a tile edge can only ever be horizontal.
+        """
+        for (x0, y0), _end, (ux, uy), (nx, ny), length in self._route_normals(points):
+            pos = start
+            while pos < length:
+                cx, cy = x0 + ux * pos, y0 + uy * pos
+                a = (cx + nx * (half - inset), cy + ny * (half - inset))
+                b = (cx - nx * (half - inset), cy - ny * (half - inset))
+                pygame.draw.line(self.screen, color, a, b, thickness)
+                pos += spacing
+
+    def _route_edges(self, points, half, color, thickness):
+        """The two kerbs / railings, run parallel to the route on both sides."""
+        for side in (1, -1):
+            edge = []
+            for (x0, y0), (x1, y1), _u, (nx, ny), _len in self._route_normals(points):
+                edge.append((x0 + nx * half * side, y0 + ny * half * side))
+                edge.append((x1 + nx * half * side, y1 + ny * half * side))
+            if len(edge) >= 2:
+                pygame.draw.lines(self.screen, color, False, edge, thickness)
+
+    def _draw_channel_crossings(self):
+        """Carry each named street over the channel on its own short deck."""
+        for col, (row0, row1) in DES_PERES_CROSSINGS.items():
+            deck = self.camera.apply(pygame.Rect(
+                col * TILE_SIZE, row0 * TILE_SIZE - 6,
+                TILE_SIZE, (row1 - row0 + 1) * TILE_SIZE + 12))
+            if not deck.colliderect(pygame.Rect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)):
+                continue
+            pygame.draw.rect(self.screen, COLOR_SHADOW, deck.move(3, 0))
+            pygame.draw.rect(self.screen, COLOR_ROAD, deck)
+            # parapets down both sides, and the centre line carried across
+            for x in (deck.left + 2, deck.right - 4):
+                pygame.draw.rect(self.screen, COLOR_SIDEWALK, (x, deck.top, 3, deck.height))
+            for y in range(deck.top + 4, deck.bottom - 8, 14):
+                pygame.draw.rect(self.screen, COLOR_ROAD_LINE, (deck.centerx - 2, y, 4, 8))
+
+    def draw_bridge_and_channel(self):
+        """The Old Chain of Rocks bridge and the River Des Peres channel.
+
+        Both used to be painted one 64px square at a time, with a rail along
+        the square's top and bottom edge - so a route that turns produced a
+        staircase, and the bridge's famous bend came out as four steps. Both
+        are now single polylines: the deck turns once, where the real one
+        turns, and the railings turn with it.
+        """
+        # --- River Des Peres: a concrete flood channel you can drive down ---
+        channel = self._route_screen_points(RIVER_DES_PERES_WAYPOINTS)
+        if len(channel) >= 2:
+            half = DES_PERES_WIDTH * 0.5
+            pygame.draw.lines(self.screen, (70, 74, 76), False, channel,
+                              DES_PERES_WIDTH)
+            pygame.draw.lines(self.screen, (106, 110, 108), False, channel,
+                              DES_PERES_WIDTH - 6)
+            # the wet trickle down the invert, and its high-water stain
+            pygame.draw.lines(self.screen, (54, 82, 88), False, channel, 4)
+            self._route_edges(channel, half - 9, (142, 146, 142), 1)
+            # expansion joints across the floor, every third of a tile
+            self._route_rungs(channel, half - 3, TILE_SIZE / 3.0,
+                              (92, 96, 94), 1, inset=2.0)
+            self._draw_channel_crossings()
+
+        # --- The Old Chain of Rocks bridge ---------------------------------
+        deck = self._route_screen_points(CHAIN_OF_ROCKS_WAYPOINTS)
+        if len(deck) >= 2:
+            half = CHAIN_OF_ROCKS_WIDTH * 0.5
+            # the deck, then the steel it is carried on
+            pygame.draw.lines(self.screen, (46, 54, 52), False, deck,
+                              CHAIN_OF_ROCKS_WIDTH + 4)
+            pygame.draw.lines(self.screen, (64, 78, 76), False, deck,
+                              CHAIN_OF_ROCKS_WIDTH)
+            # deck planking: close-spaced rungs, which is what you actually
+            # see crossing it, and they follow the kink
+            self._route_rungs(deck, half, 7.0, (56, 68, 66), 1, inset=3.0)
+            # centre stripe, the two railings, and the truss verticals
+            pygame.draw.lines(self.screen, (230, 202, 98), False, deck, 1)
+            self._route_edges(deck, half, (198, 184, 142), 3)
+            self._route_rungs(deck, half + 3, TILE_SIZE * 0.5,
+                              (168, 156, 120), 2, inset=0.0, start=8.0)
+
     def draw_props(self, c, r):
         """Street furniture. Placement is deterministic per tile so nothing
         flickers between frames."""
         tile = GAME_MAP[r][c]
         ttype = tile['type']
         if ttype in (TILE_WATER, TILE_BUILDING) or self.landmark_has_art(tile):
+            return
+        # Nobody puts a hydrant on a bridge deck or a bench in the bottom of a
+        # flood channel, and the props pass has no idea either is there: it
+        # saw a road tile and a plaza tile and furnished them. Measured 34.
+        if tile.get('chain_of_rocks') or tile.get('des_peres'):
             return
         is_sidewalk = ttype != TILE_ROAD and (
             tile_type_at(c - 1, r) == TILE_ROAD or tile_type_at(c + 1, r) == TILE_ROAD or
@@ -18717,6 +19054,27 @@ class Game:
                                                  lw * TILE_SIZE, lh * TILE_SIZE))
             if rect.colliderect(clip):
                 lm_draw_landmark(self.screen, name, rect, clip)
+
+    def draw_landmark_streets(self, start_col, end_col, start_row, end_row):
+        """Repaint the named streets that cross a landmark, over its art.
+
+        A landmark's art is ONE baked composition blitted across the whole
+        footprint - it has no idea a street crosses it, and cannot be given
+        one without re-authoring nine compositions by hand. So the street wins
+        on the tiles the map says are street. Without this, opening Broadway
+        through Downtown and Cherokee through the brewery fixed the collision
+        and left the old brick painted over the top: asphalt you could drive
+        on with a roof drawn on it, which is the same bug from the other side.
+        """
+        for r in range(start_row, end_row):
+            on_ew = r in ROAD_LINES
+            for c in range(start_col, end_col):
+                if not (on_ew or c in ROAD_LINES):
+                    continue
+                tile = GAME_MAP[r][c]
+                if tile['type'] != TILE_ROAD or tile['landmark'] is None:
+                    continue
+                self.draw_tile(c, r)
 
     def draw_arch_foreground(self):
         """Occlude actors with the elevated Arch after the entity pass."""
@@ -19515,7 +19873,9 @@ class Game:
             for c in range(start_col, end_col):
                 self.draw_tile(c, r)
         self.draw_diagonal_network()
+        self.draw_bridge_and_channel()
         self.draw_landmark_art()
+        self.draw_landmark_streets(start_col, end_col, start_row, end_row)
         self.draw_decals()          # stains sit on the ground, under everything
         for r in range(start_row, end_row):
             for c in range(start_col, end_col):

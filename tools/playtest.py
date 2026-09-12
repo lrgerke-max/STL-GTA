@@ -21,6 +21,7 @@ handling, police or traffic change.
     cophandling  how hard a five-star cruiser can turn
     drive        can the grid be driven at speed at all (see GridDriver)
     wear         where a chase car's health actually goes
+    roads        every reachable tile, four headings: can a car drive off it
     traffic      overlapping AI cars, stalled cars, mean traffic speed
     onscreen     how much of the population is actually in frame
     chase/chases a real pursuit: GridDriver flees, the game's own police chase
@@ -921,6 +922,56 @@ def probe_wear(steps=3600, seed=5):
     return tally
 
 
+def probe_roads(steps=45):
+    """Is every drivable tile actually drivable OUT of? No RNG, no autopilot.
+
+    probe_drive is a random walk: change the map and the walk goes somewhere
+    else, so its numbers move for reasons that have nothing to do with the
+    change. This sweep is the opposite - it stands a car on every reachable
+    tile at each of four headings, floors it, and reports the tiles it could
+    not leave. Same answer every run, and it names the tile instead of the
+    route, which is what you need when somebody says "I get blocked here".
+    """
+    boxed, oneway, tested = [], [], 0
+    for r in range(M.MAP_TILES_H):
+        for c in range(M.MAP_TILES_W):
+            tile = M.GAME_MAP[r][c]
+            if tile['collidable'] or not M.WALK_REACHABLE[r][c]:
+                continue
+            stuck = []
+            for hi, ang in enumerate((0.0, math.pi / 2, math.pi, -math.pi / 2)):
+                car = M.Car(c * M.TILE_SIZE + M.TILE_SIZE // 2,
+                            r * M.TILE_SIZE + M.TILE_SIZE // 2, variant='sedan')
+                car.angle = ang
+                car.velocity = 0.0
+                car.driver = 'player'
+                car.parked = False
+                if M.is_blocked(car.rect):
+                    continue
+                tested += 1
+                x0, y0 = car.rect.center
+                for _ in range(steps):
+                    car.input_throttle = 1.0
+                    car.input_steer = 0.0
+                    car.input_handbrake = False
+                    car.physics_step()
+                if math.hypot(car.rect.centerx - x0, car.rect.centery - y0) < 40:
+                    stuck.append('ESWN'[hi])
+            if len(stuck) == 4:
+                boxed.append((c, r))
+            elif len(stuck) == 3:
+                oneway.append((c, r, stuck))
+    print(f"  {tested} (tile, heading) placements swept")
+    print(f"  tiles a car cannot leave in ANY direction: {len(boxed)}")
+    for t in boxed[:12]:
+        tile = M.GAME_MAP[t[1]][t[0]]
+        print(f"     BOXED IN {t} lm={tile.get('landmark')} "
+              f"street={M.street_name(*t)}")
+    print(f"  tiles with only one way out: {len(oneway)} "
+          f"(map edges and levee cul-de-sacs are expected)")
+    return len(boxed), len(oneway)
+
+
 PROBES = {
     'camera': probe_camera,
     'handling': probe_handling,
@@ -939,6 +990,7 @@ PROBES = {
     'chases': probe_chase_all,
     'drive': probe_drive,
     'wear': probe_wear,
+    'roads': probe_roads,
 }
 
 

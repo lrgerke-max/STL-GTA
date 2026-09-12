@@ -35,12 +35,16 @@ pip install -r requirements.txt && python main.py
   the east side of Tower Grove Park and out to the windmill at Morganford, which is why Bevo
   Mill sits in the fork. Ambient traffic still drives the grid; the diagonals are yours, which
   is what makes "TAKE GRAVOIS, THEY'LL NEVER FOLLOW" a real plan instead of a joke.
-  The tiles under a diagonal are a 4-connected staircase because collision and
-  reachability are, but the *street* is not: diagonal tiles get their own
-  renderer that chamfers the outside corner of every step and runs the grime and
-  the centre dashes along the street's real heading. Before that, each 64px step
-  was drawn as a square boxed in sidewalk on three sides, and Gravois read as a
-  flight of stairs.
+  A diagonal is drawn as one continuous polyline of asphalt, and the tiles it
+  reserves are **derived from that same band** — every tile at least a fifth
+  inside the 62px kerb-to-kerb envelope, unioned with the 4-connected centreline
+  spine so an arterial can never be opened into two corner-touching halves.
+  That is the point: when the reservation was a hand-stepped staircase and the
+  paint was a straight line, the two disagreed on **53 tiles** across the three
+  diagonals, and every one of those was a building standing in the middle of
+  the road — asphalt you could see under a brick facade, and drive straight
+  into. `DIAG_ROAD_WIDTH` / `DIAG_KERB_WIDTH` are read by the renderer and the
+  reservation both, so they cannot drift apart again.
 - **A city laid out like St. Louis**: the Gateway Arch on the riverfront with downtown and the ballpark just inland, Soulard and the Anheuser-Busch brewery south along the river, a midtown spine (Grand Center → Central West End) running west to a big Forest Park, the Delmar Loop up in the north-west, and The Hill, **Ted Drewes** and Tower Grove Park down in the south. Compressed and not to scale, but recognisable in the hand — dozens of landmarks and named park features, each discoverable for score.
 - **What you can see is what you can walk on**: the **Anheuser-Busch Brewery**
   had no layout entry, so its collision was the default hollow ring while its art
@@ -164,7 +168,21 @@ pip install -r requirements.txt && python main.py
   station order. Fairground Park and the Bissell Street Water Tower anchor newly distinct
   Wells-Goodfellow, Fairground, and College Hill neighborhoods. Along the edges, River des
   Peres is a driveable concrete-channel escape and the bent Old Chain of Rocks Bridge admits
-  the fixed Lambert scooter while cruiser-width cars hit the bollards.
+  the fixed Lambert scooter while cruiser-width cars hit the bollards. Both are drawn as
+  polylines rather than tile by tile: painted a square at a time, with a rail along each
+  tile's own top and bottom edge, the bridge's famous 22-degree kink came out as a flight of
+  four stairs. The sixteen named north-south streets that meet the channel now visibly bridge
+  it instead of vanishing for three tiles and reappearing on the far side.
+- **No named street ever dead-ends into a landmark**: a street with a name, a sign and two
+  lanes goes where it says it goes. This used to be an opt-*in* table naming the three
+  landmarks somebody had noticed and fixed by hand, which is exactly why nine others were
+  quietly walling a street off — **39 tiles** of signposted two-lane street were solid brick.
+  Broadway and Tucker stopped dead inside Downtown, Cherokee and Meramec inside the brewery,
+  Vandeventer inside the Central West End. It is a rule now (`landmark_street_crosses`, with
+  `_open_street_lines` as a build-time backstop), parks are the standing exception because
+  Forest Park genuinely has no through streets, and `LANDMARK_STREETS_EXEMPT` is the opt-*out*
+  for a place that is deliberately different. `tools/playtest.py roads` sweeps every reachable
+  tile at four headings and reports any a car cannot drive off: currently zero.
 - **City/county pursuit handoffs**: hold a crossing over the Skinker city line for half a second
   and the chase transfers without erasing stars or heat. Existing units withdraw, the next
   agency dispatches from its own jurisdiction, county cars carry a white belt, and county wails

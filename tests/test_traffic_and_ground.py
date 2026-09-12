@@ -68,8 +68,12 @@ def test_the_clydesdales_stay_on_soulard_streets():
 
 # -------------------------------------------------------- the diagonals ---
 def test_every_diagonal_tile_knows_which_way_the_street_runs():
-    """The tiles are a 4-connected staircase because collision is. The street
-    is not, and the renderer needs the real heading or it draws stairs."""
+    """A tile knows the heading of whichever leg of the street passes closest.
+
+    The reservation is the painted band now, not a staircase, but the reason
+    the heading has to be carried per tile is unchanged: the renderer needs
+    the street's real angle or it boxes every tile in square kerbs, and the
+    road reads as a flight of stairs."""
     assert set(M.DIAGONAL_DIR) == set(M.DIAGONAL_AT)
     for (tile, (ux, uy)) in M.DIAGONAL_DIR.items():
         assert abs((ux * ux + uy * uy) - 1.0) < 1e-6, tile
@@ -85,7 +89,12 @@ def test_every_diagonal_tile_knows_which_way_the_street_runs():
 def test_diagonals_are_normal_two_lane_width_and_miss_landmarks():
     """The first diagonal pass stamped two full 64px tiles side by side, so
     Manchester and Gravois read as 128px asphalt plazas. Gravois' centreline
-    also entered Bevo Mill's footprint instead of passing beside the fork."""
+    also entered Bevo Mill's footprint instead of passing beside the fork.
+
+    Still true now the reservation is the painted band rather than a one-tile
+    staircase: the band is measured off DIAG_KERB_WIDTH, which is 62px - just
+    under a single tile - so widening the reservation to match the paint did
+    not widen the street."""
     assert all(width == 1 for _name, _points, width in M.DIAGONAL_STREETS)
     footprints = {
         name: {(c, r) for c in range(lx, lx + lw) for r in range(ly, ly + lh)}
@@ -215,16 +224,30 @@ def test_the_brewery_yard_is_ground_and_its_blocks_are_buildings():
                 on_block.add((c, r))
     assert on_block, "the campus has no buildings on it"
 
+    # A named street beats the mask. CHEROKEE ST, MERAMEC ST and 14TH ST all
+    # cross this campus, and before they were punched through, 17 tiles of
+    # signposted two-lane street were solid brick - you drove at a street with
+    # a name on it and hit a wall. Where the two disagree the street wins, and
+    # Game.draw_landmark_streets repaints that asphalt over the baked campus
+    # art, so the collision and the picture still agree.
+    crossed = 0
     open_tiles = sealed = 0
     for r in range(ly, ly + lh):
         for c in range(lx, lx + lw):
             solid = M.GAME_MAP[r][c]["collidable"]
-            assert solid == ((c - lx, r - ly) in on_block), \
-                f"art and collision disagree at {c},{r}"
+            if c in M.ROAD_LINES or r in M.ROAD_LINES:
+                assert not solid, f"the street at {c},{r} is walled off"
+                assert M.WALK_REACHABLE[r][c], \
+                    f"the street at {c},{r} is open but cut off"
+                crossed += 1
+            else:
+                assert solid == ((c - lx, r - ly) in on_block), \
+                    f"art and collision disagree at {c},{r}"
             if not solid:
                 open_tiles += 1
                 if not M.WALK_REACHABLE[r][c]:
                     sealed += 1
+    assert crossed, "no named street crosses the brewery - check the grid"
     assert sealed == 0, f"{sealed} brewery yard tiles are sealed off"
     assert open_tiles >= lw * lh // 3, "the yard streets are too narrow to drive"
 
@@ -398,3 +421,158 @@ def test_unstack_does_not_shove_correct_opposing_lanes_off_the_road():
     game.cars = [south, north]
     game.unstack_traffic()
     assert (south.rect.center, north.rect.center) == before
+
+
+# ------------------------------------------- streets you can actually drive --
+def test_no_named_street_is_ever_walled_off():
+    """A street with a name, a sign and two lanes has to go where it says.
+
+    Measured before `landmark_street_crosses` and `_open_street_lines` existed:
+    39 tiles of named, signposted street were solid brick. Broadway and Tucker
+    stopped dead inside Downtown, Cherokee and Meramec inside the brewery,
+    Vandeventer inside the Central West End, Skinker inside Ted Drewes and the
+    Delmar Loop, Compton inside the water tower. You drove at a street with a
+    name on it and hit a wall.
+
+    The river is the one thing allowed to interrupt the grid, and it does so
+    at exactly the crossings in RIVER_BRIDGES.
+    """
+    walled = []
+    for row in range(M.MAP_TILES_H):
+        for col in range(M.MAP_TILES_W):
+            if not (col in M.ROAD_LINES or row in M.ROAD_LINES):
+                continue
+            tile = M.GAME_MAP[row][col]
+            if tile["collidable"] and tile["type"] != M.TILE_WATER:
+                walled.append((col, row, tile["type"], tile.get("landmark")))
+    assert not walled, f"{len(walled)} tiles of named street are solid: {walled[:8]}"
+
+
+def test_every_named_street_is_reachable_for_its_whole_length():
+    """Open is not enough: every tile of it has to be reachable from the net.
+
+    A street can be perfectly clear and still be useless if the only ways on
+    to it are walled - which is what a sealed landmark interior looks like
+    from the inside.
+
+    Note WHARF ST (col 93) is legitimately short: the river bank swings west
+    below row 19 and the Mississippi takes the rest of it. Water is the one
+    thing allowed to end a street, so it is skipped rather than counted.
+    """
+    for line in sorted(M.ROAD_LINES):
+        for axis in ("ns", "ew"):
+            tiles = [(i, line) if axis == "ew" else (line, i)
+                     for i in range(M.MAP_TILES_W if axis == "ew"
+                                    else M.MAP_TILES_H)]
+            live = [(c, r) for c, r in tiles
+                    if M.GAME_MAP[r][c]["type"] != M.TILE_WATER]
+            unreachable = [t for t in live if not M.WALK_REACHABLE[t[1]][t[0]]]
+            assert not unreachable, (
+                f"{axis} line {line} has {len(unreachable)} tiles cut off "
+                f"from the street network: {unreachable[:6]}")
+
+
+def test_nothing_solid_stands_in_a_diagonal_as_it_is_painted():
+    """The tile reservation IS the painted band, so it cannot disagree with it.
+
+    The reservation used to be a 4-connected staircase while the renderer drew
+    a straight polyline of asphalt. They disagreed on 53 tiles across the three
+    diagonals, and every one was a building standing in the middle of the road:
+    asphalt under a brick facade, which you could see and then drive into.
+    """
+    for name, points, width in M.DIAGONAL_STREETS:
+        reserved = set(M._diagonal_run(points, width))
+        painted = M._band_tiles(points, M.DIAG_KERB_WIDTH * width * 0.5)
+        assert not (painted - reserved), (
+            f"{name} is painted on unreserved tiles: {sorted(painted - reserved)[:8]}")
+        solid = [t for t in reserved if M.GAME_MAP[t[1]][t[0]]["collidable"]]
+        assert not solid, f"{name} has {len(solid)} solid tiles in it: {solid[:8]}"
+
+
+def test_every_off_grid_route_is_one_connected_run():
+    """4-connected, because every collider and reachability check here is."""
+    routes = [(name, M._diagonal_run(points, width))
+              for name, points, width in M.DIAGONAL_STREETS]
+    routes.append(("CHAIN OF ROCKS", tuple(M.CHAIN_OF_ROCKS_TILES)))
+    routes.append(("DES PERES", tuple(M.RIVER_DES_PERES_TILES)))
+    for name, tiles in routes:
+        assert tiles, f"{name} claims no tiles"
+        pool = set(tiles)
+        seen, stack = {tiles[0]}, [tiles[0]]
+        while stack:
+            col, row = stack.pop()
+            for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nxt = (col + dc, row + dr)
+                if nxt in pool and nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        assert seen == pool, (
+            f"{name} is in {len(pool) - len(seen)} disconnected pieces")
+
+
+def test_the_chain_of_rocks_bend_is_a_bend_and_not_a_flight_of_stairs():
+    """The 22-degree kink is the only thing anybody knows about this bridge.
+
+    Drawn per-tile it came out as four stairs, because each 64px tile got a
+    horizontal rail along its own top and bottom edge. The deck is one
+    polyline now, so the railing turns once, where the deck turns.
+    """
+    pts = M.CHAIN_OF_ROCKS_WAYPOINTS
+    assert len(pts) >= 3, "no bend in the waypoints at all"
+    legs = []
+    for a, b in zip(pts, pts[1:]):
+        legs.append(math.atan2(b[1] - a[1], b[0] - a[0]))
+    turns = [abs(math.degrees(b - a)) for a, b in zip(legs, legs[1:])]
+    assert len(turns) == 1, f"the deck turns {len(turns)} times, not once"
+    assert 15.0 < turns[0] < 30.0, f"the kink is {turns[0]:.1f} degrees"
+
+    # and the tile pass must NOT be painting per-tile deck edges any more
+    game = M.Game()
+    col, row = next(iter(M.CHAIN_OF_ROCKS_TILES))
+    game.camera.x, game.camera.y = col * M.TILE_SIZE, row * M.TILE_SIZE
+    game.screen.fill((255, 0, 255))
+    game.draw_tile(col, row)
+    top = [game.screen.get_at((x, 1))[:3] for x in range(8, 56)]
+    assert len(set(top)) <= 2, (
+        "draw_tile is still drawing a deck rail along the tile edge")
+
+
+def test_the_named_streets_bridge_the_des_peres_channel():
+    """The channel is below grade and the city carries on south of it.
+
+    Painted straight over the top, it made sixteen named north-south streets
+    vanish for three tiles and reappear on the far side.
+    """
+    assert len(M.DES_PERES_CROSSINGS) >= 12, (
+        f"only {len(M.DES_PERES_CROSSINGS)} streets cross the channel")
+    for col, (row0, row1) in M.DES_PERES_CROSSINGS.items():
+        assert col in M.ROAD_LINES
+        for row in range(row0, row1 + 1):
+            assert not M.GAME_MAP[row][col]["collidable"], (
+                f"the crossing at {col},{row} is blocked")
+
+
+def test_no_street_furniture_on_a_bridge_deck_or_in_a_flood_channel():
+    """Nobody puts a hydrant on a bridge or a bench in the bottom of a
+    concrete channel; the props pass saw a road tile and furnished it. 34."""
+    game = M.Game()
+    for col, row in set(M.CHAIN_OF_ROCKS_TILES) | set(M.RIVER_DES_PERES_TILES):
+        game.camera.x, game.camera.y = col * M.TILE_SIZE, row * M.TILE_SIZE
+        game.screen.fill((255, 0, 255))
+        game.draw_props(col, row)
+        painted = sum(game.screen.get_at((x, y))[:3] != (255, 0, 255)
+                      for y in range(0, M.TILE_SIZE, 4)
+                      for x in range(0, M.TILE_SIZE, 4))
+        assert painted == 0, f"a prop is standing on the route at {col},{row}"
+
+
+def test_no_open_ground_is_sealed_away_from_the_streets():
+    """A courtyard with no gate is where drop markers go to be unreachable.
+
+    _fill_city_blocks cut 2x2 courtyards into the middle of large blocks and
+    left no throat out of them: four tiles of open plaza the street network
+    could not reach.
+    """
+    sealed = [(c, r) for r in range(M.MAP_TILES_H) for c in range(M.MAP_TILES_W)
+              if not M.GAME_MAP[r][c]["collidable"] and not M.WALK_REACHABLE[r][c]]
+    assert not sealed, f"{len(sealed)} tiles of open ground are sealed off: {sealed[:8]}"
