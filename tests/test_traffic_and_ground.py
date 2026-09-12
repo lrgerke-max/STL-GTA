@@ -427,25 +427,83 @@ def test_unstack_does_not_shove_correct_opposing_lanes_off_the_road():
 def test_no_named_street_is_ever_walled_off():
     """A street with a name, a sign and two lanes has to go where it says.
 
-    Measured before `landmark_street_crosses` and `_open_street_lines` existed:
-    39 tiles of named, signposted street were solid brick. Broadway and Tucker
-    stopped dead inside Downtown, Cherokee and Meramec inside the brewery,
-    Vandeventer inside the Central West End, Skinker inside Ted Drewes and the
-    Delmar Loop, Compton inside the water tower. You drove at a street with a
-    name on it and hit a wall.
+    Measured before `_open_street_lines` existed: 39 tiles of named,
+    signposted street were solid brick. Broadway and Tucker stopped dead
+    inside Downtown, Cherokee and Meramec inside the brewery, Vandeventer
+    inside the Central West End, Skinker inside Ted Drewes and the Delmar
+    Loop, Compton inside the water tower. You drove at a street with a name on
+    it and hit a wall.
 
-    The river is the one thing allowed to interrupt the grid, and it does so
-    at exactly the crossings in RIVER_BRIDGES.
+    Two things may still interrupt a street, and both are visible to the
+    player: the Mississippi (which crosses at exactly RIVER_BRIDGES), and a
+    landmark named in LANDMARK_STREETS_EXEMPT. Anything else is the bug.
     """
     walled = []
+    exempt = []
     for row in range(M.MAP_TILES_H):
         for col in range(M.MAP_TILES_W):
             if not (col in M.ROAD_LINES or row in M.ROAD_LINES):
                 continue
             tile = M.GAME_MAP[row][col]
-            if tile["collidable"] and tile["type"] != M.TILE_WATER:
+            if not tile["collidable"] or tile["type"] == M.TILE_WATER:
+                continue
+            parent = M.landmark_owner(tile.get("landmark"))
+            if parent in M.LANDMARK_STREETS_EXEMPT:
+                exempt.append((col, row, parent))
+            else:
                 walled.append((col, row, tile["type"], tile.get("landmark")))
     assert not walled, f"{len(walled)} tiles of named street are solid: {walled[:8]}"
+
+    # An exemption is a hole in the invariant, so it has to stay a small,
+    # deliberate one. A whole arterial swallowed by an "exempt" landmark would
+    # otherwise pass this test in silence.
+    assert len(exempt) <= 4, (
+        f"exempt landmarks are walling {len(exempt)} street tiles: {exempt}")
+    for _col, _row, parent in exempt:
+        assert parent in M.LANDMARK_STREETS_EXEMPT
+
+
+def test_a_street_the_invariant_opened_is_not_still_painted_as_a_building():
+    """The tiles _open_street_lines opens are drivable ground, and the
+    landmark's baked art has no idea a wall came out of it.
+
+    Without Game.draw_landmark_streets the block stays painted over ground you
+    can now drive on - a roof on a surface with no collision, which is the
+    same lie as a wall in a street, from the other side. This walks the actual
+    rendered frame rather than the baked composition, because the fix is a
+    draw pass and the baked art is still (correctly) unchanged.
+    """
+    structure = {M.lm_LIMESTONE, M.lm_LIMESTONE_DK, M.lm_BRICK, M.lm_BRICK_DK,
+                 M.lm_BRICK_LT, M.lm_BRICK_BROWN, M.lm_TERRACOTTA,
+                 M.lm_VERDIGRIS, M.lm_VERDIGRIS_DK, M.lm_SLATE, M.lm_SLATE_DK,
+                 M.lm_STEEL, M.lm_STEEL_HI}
+    cut = [(c, r) for r in range(M.MAP_TILES_H) for c in range(M.MAP_TILES_W)
+           if M.GAME_MAP[r][c].get("street_cut")]
+    assert cut, "the street invariant opened nothing - did the map change?"
+
+    game = M.Game()
+    game.cars, game.pedestrians = [], []
+    for col, row in cut:
+        assert not M.GAME_MAP[row][col]["collidable"]
+        game.camera.x = col * M.TILE_SIZE + M.TILE_SIZE // 2 - M.SCREEN_WIDTH // 2
+        game.camera.y = row * M.TILE_SIZE + M.TILE_SIZE // 2 - M.SCREEN_HEIGHT // 2
+        game.camera.shake_ox = game.camera.shake_oy = 0.0
+        game.screen.fill(M.COLOR_SKY_BG)
+        sc, ec, sr, er = game.camera.visible_tile_range()
+        for r in range(sr, er):
+            for c in range(sc, ec):
+                game.draw_tile(c, r)
+        game.draw_landmark_art()
+        game.draw_landmark_streets(sc, ec, sr, er)
+        ox = col * M.TILE_SIZE - game.camera.x
+        oy = row * M.TILE_SIZE - game.camera.y
+        seen = [game.screen.get_at((int(ox + dx), int(oy + dy)))[:3]
+                for dy in range(6, M.TILE_SIZE - 5, 6)
+                for dx in range(6, M.TILE_SIZE - 5, 6)]
+        painted = sum(px in structure for px in seen)
+        assert painted / float(len(seen)) < 0.25, (
+            f"{col},{row} is drivable but still painted as a building "
+            f"({painted}/{len(seen)} structure pixels)")
 
 
 def test_every_named_street_is_reachable_for_its_whole_length():
@@ -464,8 +522,13 @@ def test_every_named_street_is_reachable_for_its_whole_length():
             tiles = [(i, line) if axis == "ew" else (line, i)
                      for i in range(M.MAP_TILES_W if axis == "ew"
                                     else M.MAP_TILES_H)]
+            # Water and the deliberate exemptions above are walls, and a wall
+            # is not expected to be reachable - test_no_named_street_is_ever_
+            # walled_off is what governs those. This test is about open tiles
+            # that are nonetheless cut off from the network.
             live = [(c, r) for c, r in tiles
-                    if M.GAME_MAP[r][c]["type"] != M.TILE_WATER]
+                    if M.GAME_MAP[r][c]["type"] != M.TILE_WATER
+                    and not M.GAME_MAP[r][c]["collidable"]]
             unreachable = [t for t in live if not M.WALK_REACHABLE[t[1]][t[0]]]
             assert not unreachable, (
                 f"{axis} line {line} has {len(unreachable)} tiles cut off "

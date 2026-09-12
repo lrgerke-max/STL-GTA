@@ -2245,34 +2245,57 @@ LANDMARK_DEFAULT_LAYOUT = "district"     # building ring + gates + open courtyar
 # landmark's coarse tile mask turn the painted carriageway into a wall. Grand
 # Boulevard is drawn north/south through the middle of Grand Center at column
 # 57; it must remain continuous between the grid roads above and below.
-#: Building landmarks a named street must NOT be carried through. Empty, and
-#: that is the point: add a name here only when a street through a place would
-#: be actively wrong, and say why.
-#:
-#: This replaced an opt-IN table that named the three landmarks whose streets
-#: somebody had noticed and fixed by hand - which is exactly why nine others
-#: were quietly walling a street off. An opt-in list of the places that work
-#: is a list of the places somebody got to. An opt-out list of the places that
-#: are deliberately different is a decision you can read, check and test.
-LANDMARK_STREETS_EXEMPT = frozenset()
+# Streets and landmarks, which is two different jobs:
+#
+#   LANDMARK_THROUGH_ROADS below says "this landmark's ART is authored with a
+#   street at this index" - its baked composition draws the asphalt, and its
+#   solid mask already keeps out of the way, so the tile is laid as real road.
+#   Only three landmarks are built that way, and it shows: they are the only
+#   three where a street line crosses no painted structure at all.
+#
+#   _open_street_lines is the invariant, and it is the thing that was missing.
+#   Whatever the art intended, no named street may END in a wall. It opens any
+#   solid tile that lands on a street line, anywhere on the map. Before it
+#   existed, this table was the ONLY mechanism - so the nine landmarks nobody
+#   had got to were each quietly walling a street off, 39 tiles in total.
+#
+# What neither of them does is repaint a whole line of landmark as asphalt.
+# That was tried and measured: it erased 76 tiles of painted structure across
+# eight landmarks for no gain, because every tile it touched beyond those 39
+# was already passable.
+#
+#: Landmarks whose solid mass is allowed to stand in a named street, with the
+#: reason. A name here is a deliberate decision that a street through this
+#: place would be worse than a street that stops - so keep it short, and say
+#: why, because every entry is a hole in the invariant above.
+LANDMARK_STREETS_EXEMPT = frozenset((
+    # KINGSHIGHWAY (col 32) crosses the garden at rows 47-48, which is the
+    # west face of the Climatron. Opening those two tiles takes a clean 64px
+    # rectangular bite out of Buckminster Fuller's dome - and the dome is the
+    # garden's entire silhouette, so it reads as a rendering fault rather than
+    # as a street. The dome cannot be moved clear either: the two street bands
+    # leave 256px between them and the dome's apron plus Seiwa-en's lake need
+    # 298px. Shaw's Garden is a walled 79 acres you enter through a gate, the
+    # real Kingshighway runs beside it rather than through it, and a driver
+    # who stops here has stopped at a visible glass dome, not at an invisible
+    # wall. Two tiles, and you can see both of them.
+    "Missouri Botanical Garden",
+))
 
-
-def landmark_street_crosses(kind, name, col, row):
-    """True when a named grid street should be carried across this tile.
-
-    A street with a name, a sign and two lanes has to go where it says it
-    goes. Measured before this rule existed: 39 tiles of named street were
-    solid brick - Broadway and Tucker stopping dead inside Downtown, Cherokee
-    and Meramec inside the brewery, Vandeventer inside the Central West End.
-
-    Parks are the standing exception, by kind rather than by name: Forest Park
-    and Tower Grove Park have no through streets, which is the single most
-    obvious thing about driving round them. Their grid lanes stay as park
-    ground you can cross, not asphalt.
-    """
-    if kind == "park" or name in LANDMARK_STREETS_EXEMPT:
-        return False
-    return col in ROAD_LINES or row in ROAD_LINES
+LANDMARK_THROUGH_ROADS = {
+    "Lambert Airport": {
+        'cols': frozenset((2,)),
+        'rows': frozenset((2,)),
+    },
+    "Grand Center Arts District": {
+        'cols': frozenset((57,)),
+        'rows': frozenset((32, 37)),
+    },
+    "The Hill": {
+        'cols': frozenset((27, 32)),
+        'rows': frozenset((57, 63)),
+    },
+}
 
 # Positions trace the real St. Louis map (north = up, Mississippi on the east
 # edge): the Arch on the riverfront with downtown and the ballpark just inland,
@@ -2941,9 +2964,11 @@ def build_map():
     _fill_city_blocks(game_map)
 
     for (lx, ly, lw, lh, kind, name, color) in LANDMARKS:
+        through = LANDMARK_THROUGH_ROADS.get(name)
         for y in range(ly, min(ly + lh, MAP_TILES_H)):
             for x in range(lx, min(lx + lw, MAP_TILES_W)):
-                if landmark_street_crosses(kind, name, x, y):
+                if (through is not None
+                        and (x in through['cols'] or y in through['rows'])):
                     game_map[y][x] = {
                         'type': TILE_ROAD, 'collidable': False,
                         'landmark': name, 'color': COLOR_ROAD,
@@ -2977,15 +3002,27 @@ def _open_street_lines(game_map):
     a street with a name on it and hit a wall, which is the single worst thing
     a driving sandbox can do.
 
-    So it is an invariant rather than a table: if a tile is on a named grid
-    line and it is solid, it becomes road. Two exceptions, both deliberate:
+    So it is an invariant rather than a table: a solid tile on a named grid
+    line is opened. What it is opened INTO matters, though, and the obvious
+    answer is wrong. Laying a full road tile - kerb aprons and all - into the
+    middle of a landmark produced a boxed square of asphalt surrounded on
+    four sides by campus, thirteen of them scattered through the brewery,
+    reading as road tiles dropped at random rather than as a street. A wall
+    that comes out of a block leaves a PASSAGE through that block, so the
+    tile is opened into the landmark's own open ground - exactly what
+    _landmark_tile would have laid had the mask not called it solid.
 
-      * water - the Mississippi is SUPPOSED to interrupt the grid, and it
-        does so at exactly the two crossings in RIVER_BRIDGES. Punching every
-        street across it would put a dozen invisible bridges back.
-      * the landmark's own name is kept on the tile, so the place stays
-        discoverable and its art still knows the tile belongs to it. Only the
-        collision and the surface change.
+    Three things are deliberate here:
+
+      * water is never touched. The Mississippi is SUPPOSED to interrupt the
+        grid, and it does so at exactly the two crossings in RIVER_BRIDGES;
+        punching every street across it would put a dozen invisible bridges
+        back.
+      * the landmark's own name is kept, so the place stays discoverable and
+        its art still knows the tile belongs to it.
+      * 'street_cut' tags the tile for Game.draw_landmark_streets, because
+        the landmark's art is one baked composition that has no idea a wall
+        was taken out of it and will happily keep painting the building.
     """
     for row in range(MAP_TILES_H):
         row_is_street = row in ROAD_LINES
@@ -2995,10 +3032,23 @@ def _open_street_lines(game_map):
             tile = game_map[row][col]
             if not tile['collidable'] or tile['type'] == TILE_WATER:
                 continue
-            tile['type'] = TILE_ROAD
+            owner = tile.get('landmark')
+            # Resolve a feature to its parent before testing the exemption:
+            # _stamp_features renames these tiles to the feature that claims
+            # them, so the Climatron's tiles answer "The Climatron", not
+            # "Missouri Botanical Garden", and a name-only test silently
+            # missed every exemption on a landmark that has features.
+            parent = landmark_owner(owner) if owner else None
+            if parent in LANDMARK_STREETS_EXEMPT:
+                continue
+            base = next((entry[6] for entry in LANDMARKS if entry[5] == parent),
+                        None)
+            tile['type'] = TILE_PLAZA
             tile['collidable'] = False
-            tile['color'] = COLOR_ROAD
+            tile['color'] = (_blend(base, COLOR_SIDEWALK, 0.55) if base
+                             else COLOR_SIDEWALK)
             tile['street'] = street_name(col, row)
+            tile['street_cut'] = True
 
 
 #: Landmarks a diagonal is allowed to cut through. These are neighbourhoods
@@ -19055,16 +19105,38 @@ class Game:
             if rect.colliderect(clip):
                 lm_draw_landmark(self.screen, name, rect, clip)
 
+    @staticmethod
+    def street_cut_color(tile):
+        """The ground colour to lay where a wall was taken out of a landmark.
+
+        A landmark with hand-made art knows what its own yard looks like, and
+        `lm_ground_color` is that answer - the brewery's grey concrete, Ted
+        Drewes' asphalt lot, the Loop's paving. The generic
+        `_blend(colour, COLOR_SIDEWALK, 0.55)` that _open_street_lines stores
+        is right for a landmark with no art, and badly wrong for one with it:
+        against the brewery's grey yard it painted the passages a pale tan and
+        they read as patches rather than as ground.
+
+        Resolved here rather than at build time because `build_map()` runs at
+        import, well before the landmark art module's functions are defined.
+        """
+        parent = landmark_owner(tile.get('landmark'))
+        if parent is not None and lm_has_art(parent):
+            return lm_ground_color(parent)
+        return tile['color']
+
     def draw_landmark_streets(self, start_col, end_col, start_row, end_row):
-        """Repaint the named streets that cross a landmark, over its art.
+        """Clear the landmark art off the walls _open_street_lines took out.
 
         A landmark's art is ONE baked composition blitted across the whole
-        footprint - it has no idea a street crosses it, and cannot be given
-        one without re-authoring nine compositions by hand. So the street wins
-        on the tiles the map says are street. Without this, opening Broadway
-        through Downtown and Cherokee through the brewery fixed the collision
-        and left the old brick painted over the top: asphalt you could drive
-        on with a roof drawn on it, which is the same bug from the other side.
+        footprint. It has no idea a wall was removed from it, so without this
+        the block is still painted over ground you can now drive on: a roof
+        drawn on a surface with no collision, which is the same lie as a
+        street with a wall in it, just from the other side.
+
+        What goes down is the landmark's own open ground, not asphalt - the
+        tile is a passage through a block, and it should look like the rest of
+        that landmark's yard rather than like a road tile someone dropped in.
         """
         for r in range(start_row, end_row):
             on_ew = r in ROAD_LINES
@@ -19072,9 +19144,23 @@ class Game:
                 if not (on_ew or c in ROAD_LINES):
                     continue
                 tile = GAME_MAP[r][c]
-                if tile['type'] != TILE_ROAD or tile['landmark'] is None:
+                if not tile.get('street_cut'):
                     continue
-                self.draw_tile(c, r)
+                rect = self.camera.apply(pygame.Rect(
+                    c * TILE_SIZE, r * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+                pygame.draw.rect(self.screen, self.street_cut_color(tile), rect)
+                # the same paving seams a landmark plaza tile carries, so the
+                # passage reads as ground rather than as a flat patch
+                pygame.draw.line(self.screen, COLOR_PLAZA_SEAM,
+                                 (rect.left, rect.centery),
+                                 (rect.right, rect.centery), 1)
+                pygame.draw.line(self.screen, COLOR_PLAZA_SEAM,
+                                 (rect.centerx, rect.top),
+                                 (rect.centerx, rect.bottom), 1)
+                n = _noise(c, r, 17)
+                self.screen.fill(COLOR_SIDEWALK_SEAM,
+                                 (rect.left + (n % 48) + 8,
+                                  rect.top + ((n >> 6) % 48) + 8, 5, 3))
 
     def draw_arch_foreground(self):
         """Occlude actors with the elevated Arch after the entity pass."""

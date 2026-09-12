@@ -174,15 +174,28 @@ pip install -r requirements.txt && python main.py
   four stairs. The sixteen named north-south streets that meet the channel now visibly bridge
   it instead of vanishing for three tiles and reappearing on the far side.
 - **No named street ever dead-ends into a landmark**: a street with a name, a sign and two
-  lanes goes where it says it goes. This used to be an opt-*in* table naming the three
-  landmarks somebody had noticed and fixed by hand, which is exactly why nine others were
-  quietly walling a street off — **39 tiles** of signposted two-lane street were solid brick.
-  Broadway and Tucker stopped dead inside Downtown, Cherokee and Meramec inside the brewery,
-  Vandeventer inside the Central West End. It is a rule now (`landmark_street_crosses`, with
-  `_open_street_lines` as a build-time backstop), parks are the standing exception because
-  Forest Park genuinely has no through streets, and `LANDMARK_STREETS_EXEMPT` is the opt-*out*
-  for a place that is deliberately different. `tools/playtest.py roads` sweeps every reachable
-  tile at four headings and reports any a car cannot drive off: currently zero.
+  lanes goes where it says it goes. `LANDMARK_THROUGH_ROADS` used to be the *only* mechanism,
+  and it was an opt-in table naming the three landmarks somebody had noticed and fixed by
+  hand — which is exactly why nine others were quietly walling a street off. **39 tiles** of
+  signposted two-lane street were solid brick: Broadway and Tucker stopped dead inside
+  Downtown, Cherokee and Meramec inside the brewery, Vandeventer inside the Central West End,
+  Compton inside a water tower. `_open_street_lines` is the invariant now — whatever the art
+  intended, a solid tile on a street line gets opened, anywhere on the map.
+  What it opens the wall *into* matters, and the obvious answer is wrong: laying a full kerbed
+  road tile into the middle of a campus produced boxed squares of asphalt surrounded on four
+  sides by brewery, reading as road tiles dropped at random. A wall taken out of a block
+  leaves a **passage** through that block, so the tile is opened into the landmark's own yard
+  (`lm_ground_color`) and `draw_landmark_streets` clears the baked art off it — because the
+  art is one composition that has no idea a wall was removed, and would otherwise keep
+  painting a roof over ground you can now drive on.
+  Converting a *whole* street line through a landmark was also tried, and measured: it erased
+  **76 tiles** of painted structure across eight landmarks — the Basilica's west tower, the
+  Old Courthouse's dome, Ted Drewes' queue, Lambert's aircraft — for no gain at all, since
+  every tile beyond those 39 was already passable. `LANDMARK_STREETS_EXEMPT` holds the one
+  deliberate hole: Kingshighway would take a clean rectangular bite out of the Climatron, and
+  Shaw's Garden is a walled 79 acres the real Kingshighway runs beside.
+  `tools/playtest.py roads` sweeps every reachable tile at four headings and reports any a car
+  cannot drive off: currently zero.
 - **City/county pursuit handoffs**: hold a crossing over the Skinker city line for half a second
   and the chase transfers without erasing stars or heat. Existing units withdraw, the next
   agency dispatches from its own jurisdiction, county cars carry a white belt, and county wails
