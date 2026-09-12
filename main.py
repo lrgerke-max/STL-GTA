@@ -36,6 +36,14 @@ SCREEN_HEIGHT = 360         # internal render buffer height
 SCALE_FACTOR = 2
 FPS = 60
 
+#: Ordered 4x4 Bayer matrix, shared by every pass that needs translucency.
+#: Dither is how 8- and 16-bit art did it, and the reason to use it here is
+#: not nostalgia: an ALPHA-blended overlay creates one new intermediate colour
+#: for every colour it lands on, so a single translucent shadow or light pool
+#: quietly multiplies the palette by however many surfaces it crosses. A
+#: stipple adds nothing. Sample as `BAYER_4X4[y % 4][x % 4] < density * 16`.
+BAYER_4X4 = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+
 TILE_SIZE = 64
 MAP_TILES_W = 100
 MAP_TILES_H = 100
@@ -6928,11 +6936,29 @@ def props__rect(s, x, y, w, h, color):
 # ============================================================
 # Individual props (top-down, hard pixels, 1px outline)
 # ============================================================
+def props__dither_ellipse(surf, color, rect, density):
+    """A stippled pool of light. Alpha would blend with the ground it lands
+    on, and this prop lands on asphalt, sidewalk, grass, park and plaza -
+    five different intermediate colours for one glow. See BAYER_4X4."""
+    x0, y0, w, h = (int(v) for v in rect)
+    if w <= 0 or h <= 0:
+        return
+    mask = pygame.Surface((w, h), pygame.SRCALPHA)
+    mask.fill((0, 0, 0, 0))
+    pygame.draw.ellipse(mask, (255, 255, 255, 255), (0, 0, w, h))
+    cut = max(0, min(16, int(round(density * 16))))
+    opaque = (color[0], color[1], color[2], 255)
+    for y in range(h):
+        for x in range(w):
+            if mask.get_at((x, y))[3] and BAYER_4X4[y % 4][x % 4] < cut:
+                surf.set_at((x0 + x, y0 + y), opaque)
+
+
 def props__build_streetlight():
     # Pole + arm reaching north, bright head, short warm pool on the pavement.
     s = props__surf(12, 12)
-    pygame.draw.ellipse(s, (206, 190, 132, 34), (1, 2, 11, 10))
-    pygame.draw.ellipse(s, (214, 198, 140, 52), (3, 4, 7, 6))
+    props__dither_ellipse(s, (206, 190, 132), (1, 2, 11, 10), 34 / 255.0)
+    props__dither_ellipse(s, (214, 198, 140), (3, 4, 7, 6), 52 / 255.0)
     # arm / pole
     props__box(s, 2, 3, 4, 8, props_C_POLE)
     props__rect(s, 3, 4, 1, 6, props_C_POLE_DARK)
@@ -9541,15 +9567,10 @@ def lm__ribbon(surf, pts, w_end, w_mid, col, dx=0.0, dy=0.0):
                           (x2 - px, y2 - py), (x1 - px, y1 - py)])
 
 
-#: Ordered 4x4 Bayer matrix. Dither is how 8- and 16-bit art did translucency,
-#: and the reason to use it here is not nostalgia: an ALPHA-blended shadow
-#: creates one new intermediate colour for every background colour it crosses.
-#: The Arch's catenary shadow falls over grass, three greens of tree, gravel,
-#: two waters and concrete, so a single translucent ribbon added an
-#: eleven-colour chain of near-identical darks - steps 2-3 RGB units apart,
-#: invisible as steps, and the largest remaining departure from the era look
-#: once the Climatron's gradient was banded. A dither adds no colours at all.
-LM_BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+#: The shared stipple. The Arch's catenary shadow falls over grass, three
+#: greens of tree, gravel, two waters and concrete, so as an alpha blend that
+#: one ribbon added an eleven-colour chain of near-identical darks by itself.
+LM_BAYER = BAYER_4X4
 
 
 def lm__dither_tile(color, density):

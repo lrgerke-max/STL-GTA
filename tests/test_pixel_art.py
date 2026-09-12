@@ -157,3 +157,69 @@ def test_the_era_palette_stays_small_per_composition():
     for name, lw, lh in _art_landmarks():
         seen, _alphas = _colours(_art(name, lw, lh))
         assert len(seen) <= 72, f"{name} uses {len(seen)} colours"
+
+
+def test_every_baked_sprite_keeps_a_tight_palette():
+    """Cars, people, the dog, props, facades - these are what you look at.
+
+    A landmark composition is a whole scene, so 72 colours is reasonable for
+    one. A sprite is a sprite: measured, the car sets top out at 14 colours,
+    pedestrians at 13, props at 8 and the dog at 3, with no invisible ramp
+    longer than two steps anywhere. Nothing here should need more.
+    """
+    game = M.Game()                      # bakes the atlases
+    groups = {}
+
+    cars = []
+    for name, frames in M.cars_bake_all().items():
+        for i, frame in enumerate(frames[:4]):
+            if isinstance(frame, pygame.Surface):
+                cars.append((f"{name}[{i}]", frame))
+    groups["car"] = cars
+
+    peds = []
+    for key in list(M.PED_SPRITES)[:12]:
+        for facing in range(4):
+            # element 0 is the sprite; element 1 is its drop shadow, which is
+            # deliberately translucent - see the next test.
+            sprite = M.ped_sprite(key, facing, True, 0)[0]
+            peds.append((f"{key}/{facing}", sprite))
+    groups["pedestrian"] = peds
+
+    groups["prop"] = [(name, M.props_get(name))
+                      for name in sorted(M.props__SPRITES)]
+    groups["facade"] = [(f"{hood}[{i}]", sprite)
+                        for hood, sprites in M.NEIGHBORHOOD_BUILDING_SPRITES.items()
+                        for i, sprite in enumerate(sprites[:2])]
+
+    for label, sprites in groups.items():
+        assert sprites, f"no {label} sprites to check"
+        for name, sprite in sprites:
+            seen, alphas = _colours(sprite)
+            opaque = [c for c in seen]
+            assert len(opaque) <= 24, (
+                f"{label} {name} uses {len(opaque)} colours")
+            assert _longest_invisible_chain(opaque) <= 3, (
+                f"{label} {name} has an invisible ramp in it")
+            soft = sorted(a for a in alphas if a not in (0, 255))
+            assert not soft, f"{label} {name} has antialiased alpha: {soft[:4]}"
+
+
+def test_a_static_light_pool_is_stippled_not_blended():
+    """The streetlight's glow used alpha 34 and 52.
+
+    That prop lands on asphalt, sidewalk, grass, park and plaza, so as an
+    alpha blend one glow invented five different intermediate colours. It is
+    dithered now.
+
+    Actor drop shadows are the deliberate exception and keep their alpha: the
+    dither pattern in a BAKED sprite lives in sprite space, so on something
+    that moves it swims across the ground as a crawl of noise, while a
+    landmark's shadow never moves and bands cleanly.
+    """
+    M.props_bake()
+    light = M.props_get('streetlight')
+    alphas = {light.get_at((x, y))[3]
+              for y in range(light.get_height())
+              for x in range(light.get_width())}
+    assert alphas <= {0, 255}, f"the light pool still blends: {sorted(alphas)}"

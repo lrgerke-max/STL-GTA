@@ -22,6 +22,7 @@ handling, police or traffic change.
     drive        can the grid be driven at speed at all (see GridDriver)
     wear         where a chase car's health actually goes
     chasewear    ... split by source, at every star level
+    careful      aggressive vs careful driving: whose fault is the damage
     roads        every reachable tile, four headings: can a car drive off it
     traffic      overlapping AI cars, stalled cars, mean traffic speed
     onscreen     how much of the population is actually in frame
@@ -659,11 +660,21 @@ class GridDriver:
     measuring the game rather than measuring a bad autopilot.
     """
 
-    def __init__(self, car, rng, turn_chance=0.35, handbrake=True):
+    def __init__(self, car, rng, turn_chance=0.35, handbrake=True,
+                 careful=False, game=None):
         self.car = car
         self.rng = rng
         self.turn_chance = turn_chance
         self.handbrake = handbrake
+        # A careful driver exists to separate "the game did this to me" from
+        # "the bot drove into it". It holds a lower cruise, and it lifts off
+        # for anything in its lane - traffic, a pedestrian, a spike strip -
+        # rather than shouldering through, which is what the default driver
+        # does and what makes its damage figures hard to read.
+        self.careful = careful
+        self.game = game
+        self.cruise = car.max_speed * (0.60 if careful else 1.0)
+        self.yields = 0
         self.d = int(round(car.angle / (math.pi / 2))) % 4
         self.line = self._line_for(self.d)
         self.next_dir = None
@@ -676,6 +687,33 @@ class GridDriver:
         self.pinned = 0            # consecutive steps facing a known wall
         self.trail = collections.deque(maxlen=45)
         self.walls = 0             # times it had to re-plan off a wall
+
+    def _hazard_ahead(self):
+        """Anything in our lane worth lifting off for, within braking range."""
+        if self.game is None:
+            return False
+        car = self.car
+        hx, hy = DIRS[self.d]
+        reach = int(52 + abs(car.velocity) * 18)
+        if hx:
+            box = pygame.Rect(0, 0, reach, car.rect.height + 14)
+            box.centery = car.rect.centery
+            box.left = car.rect.right if hx > 0 else car.rect.left - reach
+        else:
+            box = pygame.Rect(0, 0, car.rect.width + 14, reach)
+            box.centerx = car.rect.centerx
+            box.top = car.rect.bottom if hy > 0 else car.rect.top - reach
+        game = self.game
+        for other in game.cars:
+            if other is not car and box.colliderect(other.rect):
+                return True
+        for ped in game.pedestrians:
+            if box.colliderect(ped.rect):
+                return True
+        for block in getattr(game, 'roadblocks', ()):
+            if box.colliderect(block['strip']):
+                return True
+        return False
 
     @staticmethod
     def _corridor_clear(col, row, d, steps=3):
@@ -893,6 +931,13 @@ class GridDriver:
             car.input_throttle = 0.35
         else:
             car.input_throttle = 1.0
+        if self.careful:
+            if abs(car.velocity) > self.cruise:
+                car.input_throttle = min(car.input_throttle, -0.35)
+            if self._hazard_ahead():
+                car.input_throttle = -1.0
+                hb = False
+                self.yields += 1
         if wall_ahead and car.input_throttle > 0.0:
             # Still facing something solid after the re-plan (a corner pocket,
             # or a turn we have not rotated into yet). Come off the throttle
@@ -1102,6 +1147,96 @@ def probe_chase_wear():
             probe_wear(steps=2400, seed=seed, star=star)
 
 
+def probe_careful(steps=2400, seeds=(5, 17, 29)):
+    """Does a CAREFUL driver still lose the car? Aggressive vs careful.
+
+    The point is to separate "the game did this to me" from "the bot drove
+    into it". The default driver holds the throttle down and shoulders
+    through traffic, so when a chase ends WRECK TOTALLED it is not obvious
+    whether the pursuit was lethal or the driving was. The careful variant
+    cruises at 60% and lifts off for anything in its lane, which is what a
+    player who wants to keep the car does.
+    """
+    # "survived" alone hides the trade-off. A careful run that ends early with
+    # 90hp in the tank was not wrecked, it was ARRESTED - which is the game
+    # working: drive slowly enough to protect the car in a pursuit and the
+    # police catch you. Report the cause so the table says that out loud.
+    print("  star  driver      alive busted wrecked   secs  hp left"
+          "   contact   wall   spikes   yields")
+    for star in (0, 1, 2, 3, 4, 5):
+        for careful in (False, True):
+            alive = busted = wrecked = 0
+            hp_left = []
+            tallies = collections.Counter()
+            yields = 0
+            secs = []
+            for seed in seeds:
+                g = game()
+                x, y = straight_road_point()
+                car = put_in_car(g, x, y, 0.0)
+                g.wanted_level = star
+                g.heat_timer = 0
+                g.cop_dispatch = 0
+                g.infraction_at = {k: 10 ** 9 for k in M.INFRACTION_COOLDOWN}
+                d = GridDriver(car, random.Random(seed),
+                               careful=careful, game=g)
+                before_spike = {'hp': car.hp}
+                real_rb = M.Game.update_roadblock_contacts
+
+                def rb_spy(self, _car=car, _t=tallies):
+                    was = _car.hp
+                    real_rb(self)
+                    _t['spikes'] += max(0.0, was - _car.hp)
+                M.Game.update_roadblock_contacts = rb_spy
+                real_hc = M.Game.handle_collisions
+                mark = {'k': 'wall'}
+
+                def hc(self, _m=mark):
+                    _m['k'] = 'contact'
+                    real_hc(self)
+                    _m['k'] = 'wall'
+                M.Game.handle_collisions = hc
+                real_dmg = M.Car.damage
+
+                def dmg(self, amount, _car=car, _t=tallies, _m=mark):
+                    was = self.hp
+                    real_dmg(self, amount)
+                    if self is _car:
+                        _t[_m['k']] += was - self.hp
+                M.Car.damage = dmg
+                try:
+                    i = 0
+                    for i in range(steps):
+                        if g.driving is None or g.state != M.STATE_PLAYING:
+                            break
+                        d.step()
+                        g.update()
+                        g.wanted_level = star
+                finally:
+                    M.Game.update_roadblock_contacts = real_rb
+                    M.Game.handle_collisions = real_hc
+                    M.Car.damage = real_dmg
+                secs.append(i / 60.0)
+                if g.state == M.STATE_PLAYING and g.driving is not None:
+                    alive += 1
+                elif getattr(g, 'busted_flash', 0):
+                    busted += 1
+                else:
+                    wrecked += 1
+                hp_left.append(max(0.0, car.hp))
+                yields += d.yields
+                g.wanted_level = 0
+                g.police = []
+                g.foot_police = []
+                g.state = M.STATE_PLAYING
+            label = "careful" if careful else "aggressive"
+            n = float(len(seeds))
+            print(f"   {star}    {label:10}  {alive:5d} {busted:6d} "
+                  f"{wrecked:7d}  {sum(secs)/n:5.0f}s  {sum(hp_left)/n:6.0f}   "
+                  f"{tallies['contact']/n:7.0f}  {tallies['wall']/n:5.0f}  "
+                  f"{tallies['spikes']/n:6.0f}   {yields/n:6.0f}")
+
+
 def probe_roads(steps=45):
     """Is every drivable tile actually drivable OUT of? No RNG, no autopilot.
 
@@ -1171,6 +1306,7 @@ PROBES = {
     'drive': probe_drive,
     'wear': probe_wear,
     'chasewear': probe_chase_wear,
+    'careful': probe_careful,
     'roads': probe_roads,
 }
 

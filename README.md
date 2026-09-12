@@ -82,6 +82,14 @@ pip install -r requirements.txt && python main.py
   They are **ordered-dither stipples** now (4x4 Bayer), which is how the era did translucency
   and costs the palette nothing. Worst chain of invisible colour steps anywhere: **38 → 3**.
   The Arch went from 44 colours to 25, the Botanical Garden from 69 to 35.
+  The **streetlight's glow** was the same mistake in miniature - alpha 34 and 52, and that
+  prop lands on asphalt, sidewalk, grass, park and plaza, so one glow invented five
+  intermediate colours; it stipples now too. Everything else was already clean on
+  measurement: car sets top out at **14 colours**, pedestrians 13, generated facades 14,
+  props 8, the dog 3, with no invisible ramp longer than two steps anywhere.
+  **Actor drop shadows deliberately keep their alpha**: a dither baked into a sprite lives
+  in sprite space, so on something that moves it swims across the ground as a crawl of noise,
+  where a landmark's shadow never moves and bands cleanly.
   `tests/test_pixel_art.py` pins all of it, including no antialiased alpha.
 - **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is **Busch Memorial Stadium**, 1966-2005 — the one Edward Durell Stone crowned with a ring of ninety-six arches to answer Saarinen's, a few blocks east. It is drawn as what it was: a near-perfect circle, three decks of red seats ringing the field the whole way round, no roof, the mown outfield fan opening east toward the river, and that arcade round the rim at the real count of 96 — the crown's mid-circumference is about 900px, so each arch still gets a pier and an opening. The collision mask is *generated from the same radii the art uses* (`busch_geometry`), by majority tile area, which is what keeps the seats you can see and the seats you cannot walk through a single decision; the previous pair were a squared-off horseshoe and a grid of flat red squares. One visible west gate leads into the field, and the spare row below the bowl is the plaza deck the real one stood on. The **Missouri Botanical Garden** is a garden: it had no layout entry at all, so it fell through to the default district rule and generated a **ring of buildings around a courtyard** — a wall of masonry through the middle of Henry Shaw's garden. It now gets its own composition, and the thing you can pick out from across the map is the **Climatron** — Buckminster Fuller's dome, 1960, the first geodesic structure ever used as a conservatory — drawn as a triangulated net over glass. **Seiwa-en**, the largest Japanese garden in North America, is real water with an island and a drum bridge you have to go round; the **Linnean House** of 1882 and **Tower Grove House** are the only other solid mass, and 44 of the garden's 56 tiles are open ground. All four are separately discoverable. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
 - **Twenty-eight neighbourhoods, and the game says which one you are in**: eleven coarse
@@ -212,6 +220,14 @@ pip install -r requirements.txt && python main.py
   Shaw's Garden is a walled 79 acres the real Kingshighway runs beside.
   `tools/playtest.py roads` sweeps every reachable tile at four headings and reports any a car
   cannot drive off: currently zero.
+- **Careful driving is a real strategy, and the rig can prove it**: `playtest.py careful`
+  runs the same pursuit with the default flat-out driver and with one that cruises at 60% and
+  lifts off for anything in its lane. Across 18 runs each, the aggressive driver is **never
+  busted** and the careful driver is **never wrecked** - at three stars, contact damage falls
+  34 → 12 and the car finishes with 88hp instead of 39, but at five stars the careful driver
+  gets arrested 2 runs in 3. Drive flat out and you keep your freedom and lose the car; drive
+  carefully and you keep the car and lose your freedom. The probe exists because "WRECK
+  TOTALLED" on its own cannot tell you whether the pursuit was lethal or the driving was.
 - **A spike strip is an event, not a field**: it shreds a given car **once**.
   `ROADBLOCK_HIT_COOLDOWN` alone was the wrong shape of limit - the strip is 52px long, and a
   hit deliberately scrubs your speed and cripples your steering, which is precisely what keeps
