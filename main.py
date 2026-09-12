@@ -9290,6 +9290,30 @@ def lm__shade(col, f):
             max(0, min(255, int(col[2] * f))))
 
 
+#: How many shades a curved surface is allowed. Four is an era choice, not a
+#: technical limit: SNES-era art had a handful of separated shades and let the
+#: banding show, because that is what a limited palette looks like.
+LM_BANDS = 4
+
+
+def lm__band(dark, light, t, steps=LM_BANDS):
+    """One step of a DELIBERATELY banded shade ramp, `t` in 0..1.
+
+    The thing that stops procedural art reading as 8/16-bit is not the colour
+    count, it is colour SEPARATION. Interpolating a fresh colour per ring
+    gives an airbrush: measured, the Climatron's dome was a 39-step radial
+    gradient whose neighbouring shades sat 2-3 RGB units apart, and Art Hill
+    was nine contours shaded 4.5% at a time - both invisible as steps, both
+    reading as a soft 3D render rather than as pixel art. Quantising the ramp
+    to four separated stops puts the banding back.
+    """
+    level = min(steps - 1, max(0, int(t * steps)))
+    f = level / float(steps - 1) if steps > 1 else 0.0
+    return (max(0, min(255, int(round(dark[0] + (light[0] - dark[0]) * f)))),
+            max(0, min(255, int(round(dark[1] + (light[1] - dark[1]) * f)))),
+            max(0, min(255, int(round(dark[2] + (light[2] - dark[2]) * f)))))
+
+
 # --------------------------------------------------------------------------
 # small drawing helpers (lm_bake time only)
 # --------------------------------------------------------------------------
@@ -9517,19 +9541,72 @@ def lm__ribbon(surf, pts, w_end, w_mid, col, dx=0.0, dy=0.0):
                           (x2 - px, y2 - py), (x1 - px, y1 - py)])
 
 
+#: Ordered 4x4 Bayer matrix. Dither is how 8- and 16-bit art did translucency,
+#: and the reason to use it here is not nostalgia: an ALPHA-blended shadow
+#: creates one new intermediate colour for every background colour it crosses.
+#: The Arch's catenary shadow falls over grass, three greens of tree, gravel,
+#: two waters and concrete, so a single translucent ribbon added an
+#: eleven-colour chain of near-identical darks - steps 2-3 RGB units apart,
+#: invisible as steps, and the largest remaining departure from the era look
+#: once the Climatron's gradient was banded. A dither adds no colours at all.
+LM_BAYER = ((0, 8, 2, 10), (12, 4, 14, 6), (3, 11, 1, 9), (15, 7, 13, 5))
+
+
+def lm__dither_tile(color, density):
+    """A 4x4 tile of `color`, `density` (0..1) of its pixels set."""
+    cut = max(0, min(16, int(round(density * 16))))
+    tile = pygame.Surface((4, 4), pygame.SRCALPHA)
+    tile.fill((0, 0, 0, 0))
+    for y in range(4):
+        for x in range(4):
+            if LM_BAYER[y][x] < cut:
+                tile.set_at((x, y), (color[0], color[1], color[2], 255))
+    return tile
+
+
+def lm__dither_mask(surf, color, density, draw_mask):
+    """Stipple `color` through wherever `draw_mask` paints, then composite.
+
+    `draw_mask` is handed a scratch layer and should fill the shadow's shape
+    on it in any opaque colour; only its alpha is used.
+    """
+    w, h = surf.get_size()
+    mask = pygame.Surface((w, h), pygame.SRCALPHA)
+    mask.fill((0, 0, 0, 0))
+    draw_mask(mask)
+    # Saturate the mask to fully opaque. It is only a stencil, but a caller
+    # that painted it with a translucent colour would otherwise survive the
+    # RGBA_MIN below and hand back a half-alpha shadow - the very thing this
+    # is replacing. Doubling alpha three times takes anything >= 32 to 255
+    # and leaves 0 at 0.
+    for _ in range(3):
+        mask.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_ADD)
+    pattern = pygame.Surface((w, h), pygame.SRCALPHA)
+    tile = lm__dither_tile(color, density)
+    for y in range(0, h, 4):
+        for x in range(0, w, 4):
+            pattern.blit(tile, (x, y))
+    # Keep the stipple only inside the mask: outside it the mask's alpha is 0,
+    # so RGBA_MIN zeroes the pattern there.
+    pattern.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+    surf.blit(pattern, (0, 0))
+
+
 def lm__alpha_poly(surf, pts, rgba):
-    """Soft cast shadow that lets ground texture read through (lm_bake only)."""
-    w, h = surf.get_size()
-    lay = pygame.Surface((w, h), pygame.SRCALPHA)
-    lm__poly(lay, rgba, pts)
-    surf.blit(lay, (0, 0))
+    """Cast shadow, stippled so it lets the ground read through.
+
+    Takes an RGBA for call-site compatibility and converts the alpha into a
+    dither density - the shadow reads the same at a glance and costs the
+    palette nothing.
+    """
+    density = (rgba[3] if len(rgba) > 3 else 255) / 255.0
+    lm__dither_mask(surf, rgba[:3], density,
+                    lambda lay: lm__poly(lay, (255, 255, 255, 255), pts))
 
 
-def lm__alpha_shape(surf, draw_fn):
-    w, h = surf.get_size()
-    lay = pygame.Surface((w, h), pygame.SRCALPHA)
-    draw_fn(lay)
-    surf.blit(lay, (0, 0))
+def lm__alpha_shape(surf, draw_fn, color=(8, 7, 9), density=0.58):
+    """As lm__alpha_poly, for a shadow drawn by an arbitrary callback."""
+    lm__dither_mask(surf, color, density, draw_fn)
 
 
 def lm__road(surf, x, y, rw, rh, horizontal, salt, dashes=True, sidewalk=6):
@@ -9655,7 +9732,9 @@ def lm__bake_arch(w, h):
 
     sh_dx, sh_dy = w * 0.075, h * 0.075
     lm__alpha_shape(s, lambda lay: lm__ribbon(lay, pts, w_end + 2, w_mid + 2,
-                                        (8, 7, 9, 165), sh_dx, sh_dy))
+                                              (255, 255, 255, 255),
+                                              sh_dx, sh_dy),
+                    color=(8, 7, 9), density=165 / 255.0)
 
     lm__ribbon(s, pts, w_end + 2, w_mid + 2, lm_OUTLINE)
     lm__ribbon(s, pts, w_end, w_mid, lm_STEEL)
@@ -9999,12 +10078,17 @@ def lm__bake_forest_park(w, h):
     hill_top = bcy - bh2 - 210
     # Broad contour bands, each a stop lighter than the last, so the slope
     # reads as a slope from above. This is the hill the whole city sleds.
+    # Nine contours, four shades: shading each contour 4.5% lighter than the
+    # last put neighbouring greens three RGB units apart, so the steps were
+    # invisible and the hill read as an airbrushed mound covering 70% of the
+    # park in one indistinguishable smear of green. Banded, it terraces.
     for i in range(9):
         f = 1.22 - i * 0.085
         band = pygame.Rect(int(bcx - bw2 * f), int(hill_top + (8 - i) * 24 - 30),
                            int(bw2 * 2 * f), 60)
-        pygame.draw.ellipse(s, lm__shade(lm_GRASS, 1.00 + i * 0.045), band)
-        pygame.draw.ellipse(s, lm__shade(lm_GRASS_DK, 1.00 + i * 0.03), band, 1)
+        t = i / 8.0
+        pygame.draw.ellipse(s, lm__band(lm_GRASS, lm_GRASS_LT, t), band)
+        pygame.draw.ellipse(s, lm__band(lm_GRASS_DK, lm_GRASS, t), band, 1)
 
     # ---- Saint Louis Art Museum: Cass Gilbert, limestone, pedimented -------
     mus_w = max(120, min(int(bw2 * 1.35), 300))
@@ -11372,12 +11456,15 @@ def lm__bake_botanical(w, h):
     pygame.draw.circle(s, lm_CONCRETE_DK, (icx, icy), rad + 7)
     pygame.draw.circle(s, lm_CONCRETE, (icx, icy), rad + 5)
     pygame.draw.circle(s, lm_OUTLINE, (icx, icy), rad + 7, 1)
-    # glass, shaded from the top-left so it reads as a dome and not a disc
+    # Glass, shaded from the top-left so it reads as a dome and not a disc -
+    # in four stops, not thirty-nine. A colour per two-pixel ring made a
+    # smooth airbrushed hemisphere: the single largest departure from the
+    # 8/16-bit look anywhere in this file, 38 near-identical blues covering a
+    # tenth of the garden. Fuller's dome is a net of flat triangular panels,
+    # so flat bands are also the more honest reading of it.
     for i in range(rad, 0, -2):
         t = i / float(rad)
-        col = (int(GLASS_DK[0] + (GLASS_HI[0] - GLASS_DK[0]) * (1.0 - t) ** 1.4),
-               int(GLASS_DK[1] + (GLASS_HI[1] - GLASS_DK[1]) * (1.0 - t) ** 1.4),
-               int(GLASS_DK[2] + (GLASS_HI[2] - GLASS_DK[2]) * (1.0 - t) ** 1.4))
+        col = lm__band(GLASS_DK, GLASS_HI, (1.0 - t) ** 1.4)
         pygame.draw.circle(s, col, (icx - int(rad * 0.10 * t), icy - int(rad * 0.12 * t)), i)
     # the geodesic net: latitude rings plus spokes, then chords for triangles
     rings = [rad, int(rad * 0.78), int(rad * 0.55), int(rad * 0.31)]

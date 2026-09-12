@@ -67,6 +67,22 @@ pip install -r requirements.txt && python main.py
   AI-car pairs went **mean 2.08 / worst 9 -> mean 0.38 / worst 3**, stalls
   **0.49 -> 0.19**, and mean traffic speed **1.93 -> 2.34** of a 3.25 cap.
   Nothing respawns on a spot another vehicle is already sitting on.
+- **It still has to look like 1997**: the facade atlas already had a palette discipline;
+  the hand-made landmark compositions did not, and they had drifted in two measurable ways.
+  The **Climatron's dome was a thirty-nine-step radial interpolation** - a fresh colour every
+  two-pixel ring, neighbouring shades 2-3 RGB units apart - a smooth airbrushed hemisphere,
+  and the single largest departure from the era look in the file; **Art Hill** was the same
+  mistake at smaller scale, nine contours shaded 4.5% at a time, reading as a soft mound over
+  70% of the park. Both are **banded** to four separated stops now (`lm__band`), which is
+  what a limited palette actually looks like - and flat panels are the more honest reading of
+  Fuller's dome anyway. Separately, four cast shadows were **alpha-blended**, and a
+  translucent shadow invents one new intermediate colour for every background colour it
+  crosses: the Arch's catenary ribbon falls over grass, three greens of tree, gravel, two
+  waters and concrete, so on its own it added an eleven-colour chain of near-identical darks.
+  They are **ordered-dither stipples** now (4x4 Bayer), which is how the era did translucency
+  and costs the palette nothing. Worst chain of invisible colour steps anywhere: **38 → 3**.
+  The Arch went from 44 colours to 25, the Botanical Garden from 69 to 35.
+  `tests/test_pixel_art.py` pins all of it, including no antialiased alpha.
 - **Landmarks with real shapes**: the **Arch** is a vertical catenary, so in plan only the two leg footings are solid and you walk straight under the span. **Busch Stadium** is **Busch Memorial Stadium**, 1966-2005 — the one Edward Durell Stone crowned with a ring of ninety-six arches to answer Saarinen's, a few blocks east. It is drawn as what it was: a near-perfect circle, three decks of red seats ringing the field the whole way round, no roof, the mown outfield fan opening east toward the river, and that arcade round the rim at the real count of 96 — the crown's mid-circumference is about 900px, so each arch still gets a pier and an opening. The collision mask is *generated from the same radii the art uses* (`busch_geometry`), by majority tile area, which is what keeps the seats you can see and the seats you cannot walk through a single decision; the previous pair were a squared-off horseshoe and a grid of flat red squares. One visible west gate leads into the field, and the spare row below the bowl is the plaza deck the real one stood on. The **Missouri Botanical Garden** is a garden: it had no layout entry at all, so it fell through to the default district rule and generated a **ring of buildings around a courtyard** — a wall of masonry through the middle of Henry Shaw's garden. It now gets its own composition, and the thing you can pick out from across the map is the **Climatron** — Buckminster Fuller's dome, 1960, the first geodesic structure ever used as a conservatory — drawn as a triangulated net over glass. **Seiwa-en**, the largest Japanese garden in North America, is real water with an island and a drum bridge you have to go round; the **Linnean House** of 1882 and **Tower Grove House** are the only other solid mass, and 44 of the garden's 56 tiles are open ground. All four are separately discoverable. City blocks are two bands of buildings with a service alley, a gate through the middle of every side and a courtyard in the centre — dense to look at, legible to walk. Every open tile in the game is flood-fill verified reachable from the street network, so a drop marker can never land in a sealed pocket.
 - **Twenty-eight neighbourhoods, and the game says which one you are in**: eleven coarse
   regions were still doing violence to the map. Measured, `south` alone was **30.6% of the
