@@ -21,6 +21,7 @@ handling, police or traffic change.
     cophandling  how hard a five-star cruiser can turn
     drive        can the grid be driven at speed at all (see GridDriver)
     wear         where a chase car's health actually goes
+    chasewear    ... split by source, at every star level
     roads        every reachable tile, four headings: can a car drive off it
     traffic      overlapping AI cars, stalled cars, mean traffic speed
     onscreen     how much of the population is actually in frame
@@ -28,11 +29,32 @@ handling, police or traffic change.
 
 GridDriver is the point of the rig: a scripted driver good enough that the
 numbers describe the game rather than describing a bad autopilot. It holds a
-lane, checks a corridor is open before committing to it (landmarks are stamped
-over the road grid, so "it is a road line" does not mean "you can drive down
-it"), brakes into the corners it means to turn at, and backs out when stuck.
+lane, checks a corridor is open before committing to it, brakes into the
+corners it means to turn at, refuses to throttle at a wall it can already
+see, and backs out when it stops making progress.
+
+It judges a corridor by COLLISION, not by tile type, and that distinction was
+worth 2.3 px/step. Asking `traffic__segment_clear` - "is every tile
+TILE_ROAD" - is right for ambient traffic, which must follow named lanes and
+stay off the lawn. It is wrong for a player: Forest Park's grid lanes are
+TILE_PARK, so inside the park all four directions came back blocked and the
+driver went blind. It could then neither plan a turn nor re-face during
+recovery, so it simply ground whatever was in front of it. Measured before
+the fix: 1,144 of 2,400 frames pinned against the Grand Basin, mean speed
+2.65 of a 6.40 top speed, and all fifteen `chases` runs finishing ~345px from
+a start one tile outside the park. After: 4.68 mean, 2 hits median.
+
+Two lessons worth keeping, both learned the hard way here:
+
+  * `probe_drive` and `probe_chase` start from a FIXED point, so a map change
+    re-rolls the route and their numbers move for reasons unrelated to it.
+    `probe_roads` is the deterministic one; use it for map work.
+  * a probe that says it holds a star level has to pin it, not floor it. The
+    scripted driver earns a twelve-kill pedestrian combo, which forces three
+    stars on purpose, so every labelled tier used to drift upward.
 """
 
+import collections
 import math
 import os
 import random
@@ -651,6 +673,57 @@ class GridDriver:
         self.junction = None       # latched once we commit to it
         self.stuck = 0
         self.reverse = 0
+        self.pinned = 0            # consecutive steps facing a known wall
+        self.trail = collections.deque(maxlen=45)
+        self.walls = 0             # times it had to re-plan off a wall
+
+    @staticmethod
+    def _corridor_clear(col, row, d, steps=3):
+        """Can a car actually drive this way? Asks collision, not tile type.
+
+        `traffic__segment_clear` asks "is every tile TILE_ROAD", which is the
+        right question for ambient traffic - that AI follows named lanes and
+        must not wander onto a lawn. It is the wrong question for a player,
+        and asking it made this driver BLIND: inside Forest Park every grid
+        lane is a TILE_PARK, so all four directions came back blocked, and the
+        driver could then neither plan a turn nor re-face during recovery. It
+        just ground whatever was in front of it.
+
+        Measured with the old test: 1,144 of 2,400 frames spent against the
+        Grand Basin's west face, and all fifteen chase runs finishing ~345px
+        from where they started after "driving" up to 12.6k px. The probe's
+        fixed start is one tile from the park's edge, so every run drove
+        straight into that blind spot.
+        """
+        dx, dy = DIRS[d]
+        for step in range(1, steps + 1):
+            c, r = col + dx * step, row + dy * step
+            if not (0 <= c < M.MAP_TILES_W and 0 <= r < M.MAP_TILES_H):
+                return False
+            if M.GAME_MAP[r][c]['collidable']:
+                return False
+        return True
+
+    def _replan(self, avoid=None):
+        """Face a direction that is actually open from where we are standing.
+
+        Preference order is turn, turn, reverse of travel, straight on - the
+        straight-on option comes last because we only ever call this when the
+        way we were going has stopped working.
+        """
+        col = self.car.rect.centerx // M.TILE_SIZE
+        row = self.car.rect.centery // M.TILE_SIZE
+        for nd in ((self.d + 1) % 4, (self.d + 3) % 4, (self.d + 2) % 4, self.d):
+            if nd == avoid:
+                continue
+            if self._corridor_clear(col, row, nd, 3):
+                self.d = nd
+                self.line = self._line_for(nd)
+                self.junction = None
+                self.next_dir = None
+                self.walls += 1
+                return True
+        return False
 
     def _line_for(self, d):
         c = self.car.rect.centerx // M.TILE_SIZE
@@ -676,10 +749,22 @@ class GridDriver:
     def step(self):
         car = self.car
         # --- stuck recovery: back out and take the next turn instead ------
+        # Speed alone is not enough to notice being stuck. Grinding a wall is
+        # a limit cycle - throttle, hit, bounce back at -0.18, throttle again -
+        # and the bounce crosses this threshold often enough to keep resetting
+        # the counter. Measured: the driver ground the Grand Basin's west face
+        # for 1,144 of 2,400 frames and never once triggered recovery. So also
+        # ask the only question that matters, which is whether we have
+        # actually gone anywhere.
         if abs(car.velocity) < 0.35:
             self.stuck += 1
         else:
             self.stuck = 0
+        self.trail.append(car.rect.center)
+        if len(self.trail) == self.trail.maxlen:
+            first, last = self.trail[0], self.trail[-1]
+            if math.hypot(last[0] - first[0], last[1] - first[1]) < 40:
+                self.stuck += 3
         if self.stuck > 24 and self.reverse <= 0:
             self.stuck = 0
             self.reverse = 34
@@ -695,7 +780,7 @@ class GridDriver:
                 c = car.rect.centerx // M.TILE_SIZE
                 r = car.rect.centery // M.TILE_SIZE
                 for nd in self.rng.sample(range(4), 4):
-                    if M.traffic__segment_clear(c, r, nd, 3):
+                    if self._corridor_clear(c, r, nd, 3):
                         self.d = nd
                         self.line = self._line_for(nd)
                         break
@@ -703,6 +788,29 @@ class GridDriver:
             self.turning_now = False
             return
         hx, hy = DIRS[self.d]
+        # --- never drive into a wall we can already see --------------------
+        # Forest Park's grid lanes are park tiles, so they have no kerb to
+        # hold a car in its lane; drift one tile north of line 37 and the
+        # Grand Basin is dead ahead. The old driver detected that the tile in
+        # front was blocked and threw throttle at it anyway, which is how half
+        # of every low-star chase was spent parked against a lake. Re-plan
+        # instead, which is what a player does.
+        def blocked_ahead():
+            reach = int(M.TILE_SIZE * 0.7)
+            probe = car.rect.move(int(DIRS[self.d][0] * reach),
+                                  int(DIRS[self.d][1] * reach))
+            return M.is_blocked(probe)
+
+        if blocked_ahead():
+            self.pinned += 1
+            if self.pinned >= 3:
+                self.pinned = 0
+                if not self._replan(avoid=self.d):
+                    self.stuck += 12          # boxed in: let recovery reverse
+                hx, hy = DIRS[self.d]
+        else:
+            self.pinned = 0
+        wall_ahead = blocked_ahead()
         px, py = car.rect.center
         # Latch the junction we are working on. Recomputing it every step means
         # that the moment the car's centre crosses the crossing, "the next
@@ -732,7 +840,7 @@ class GridDriver:
             jc, jr = j[0] // M.TILE_SIZE, j[1] // M.TILE_SIZE
             opts = []
             for nd in (self.d, (self.d + 1) % 4, (self.d + 3) % 4):
-                if M.traffic__segment_clear(jc, jr, nd, 9):
+                if self._corridor_clear(jc, jr, nd, 9):
                     opts.append(nd)
             if not opts:
                 opts = [(self.d + 2) % 4]
@@ -785,6 +893,11 @@ class GridDriver:
             car.input_throttle = 0.35
         else:
             car.input_throttle = 1.0
+        if wall_ahead and car.input_throttle > 0.0:
+            # Still facing something solid after the re-plan (a corner pocket,
+            # or a turn we have not rotated into yet). Come off the throttle
+            # and let the steering bring the nose round instead of pushing.
+            car.input_throttle = -1.0 if car.velocity > 0.35 else 0.0
         car.input_handbrake = hb
         self.turning_now = turning and dist < 190
         self.speeds.append(abs(car.velocity))
@@ -839,10 +952,17 @@ def probe_chase(star=3, steps=3600, seed=7):
     g.wanted_level = star
     g.heat_timer = 0
     g.cop_dispatch = 0
-    # This probe compares fixed response tiers. The scripted driver clips
-    # traffic and pedestrians; without locking offence cooldowns those bumps
-    # silently turn every labelled one-to-four-star run into a five-star run.
+    # This probe compares fixed response tiers, so the tier has to actually
+    # hold. Locking the offence cooldowns is not enough: at 4.7 px/step the
+    # scripted driver racks up a twelve-kill pedestrian combo, and that path
+    # (Game.bump_combo -> "YOU MONSTER") forces three stars on purpose,
+    # un-cooldowned, because mowing down twelve people should make the police
+    # care. Measured before this line existed: a labelled ONE-star run sat at
+    # one star for 664 frames and then ran the remaining 1,136 at THREE, so
+    # every row of the chases table was fiction and the difficulty curve it
+    # printed was noise. Pin the level each frame instead of raising a floor.
     g.infraction_at = {key: 10 ** 9 for key in M.INFRACTION_COOLDOWN}
+    g.peak_star = star
     d = GridDriver(car, rng)
     ended = None
     cause = "escaped"
@@ -866,7 +986,7 @@ def probe_chase(star=3, steps=3600, seed=7):
                 for p in list(g.police) + list(g.foot_police)]
         if near:
             gaps.append(min(near))
-        g.wanted_level = max(g.wanted_level, star)
+        g.wanted_level = star
     dur = (ended if ended is not None else steps) / 60.0
     mean_v = sum(d.speeds) / max(1, len(d.speeds))
     away = math.hypot(prev[0] - p0[0], prev[1] - p0[1])
@@ -880,32 +1000,71 @@ def probe_chase(star=3, steps=3600, seed=7):
     return dur
 
 
-def probe_wear(steps=3600, seed=5):
-    """Where does a chase car's health actually go? Split the damage sources."""
+def probe_wear(steps=3600, seed=5, star=0):
+    """Where does a chase car's health actually go? Split the damage sources.
+
+    At star=0 this measures ordinary city wear, which is the baseline. Pass a
+    star level to measure it under pursuit, which is the number that matters:
+    once the scripted driver could actually travel, twelve of fifteen chase
+    runs ended WASTED - WRECK TOTALLED rather than busted, at every star
+    including one, so it is worth knowing whether that is the police, the
+    traffic, or the driver's own kerbs.
+    """
     g = game()
     rng = random.Random(seed)
     x, y = straight_road_point()
     car = put_in_car(g, x, y, 0.0)
-    # Measure ordinary city wear, not the five-star response earned when the
-    # scripted driver shoulders traffic during the route.
+    g.wanted_level = star
+    g.heat_timer = 0
+    g.cop_dispatch = 0
+    # Lock offence cooldowns: the scripted driver clips traffic, and without
+    # this every labelled run silently escalates to a five-star response.
     g.infraction_at = {key: 10 ** 9 for key in M.INFRACTION_COOLDOWN}
-    tally = {'wall': 0.0, 'traffic': 0.0, 'cop': 0.0, 'other': 0.0}
-    real = M.Car.crash_damage
-    src = {'k': 'other'}
+    tally = {'wall': 0.0, 'traffic': 0.0, 'shot': 0.0, 'spikes': 0.0}
+    # Wrap Car.damage, not Car.crash_damage. crash_damage is only the
+    # sustained-contact path; gunfire, potholes, explosions and trains all
+    # call damage() directly, so a tally built on crash_damage silently
+    # dropped them. Measured: an 18s four-star run lost 99hp and the old
+    # tally accounted for 16 of it. Below three stars the two agree, which is
+    # exactly why the gap went unnoticed - that is when the police open fire.
+    real = M.Car.damage
+    src = {'k': 'shot'}
 
     def spy(self, amount):
         before = self.hp
         real(self, amount)
         if self is g.driving:
             tally[src['k']] += before - self.hp
-    M.Car.crash_damage = spy
+    M.Car.damage = spy
     real_hc = M.Game.handle_collisions
 
     def hc(self):
         src['k'] = 'traffic'
         real_hc(self)
-        src['k'] = 'wall'
+        src['k'] = 'shot'
     M.Game.handle_collisions = hc
+    real_wall = M.Car.crash_damage
+
+    def wall_spy(self, amount):
+        was = src['k']
+        if was != 'traffic':
+            src['k'] = 'wall'
+        real_wall(self, amount)
+        src['k'] = was
+    M.Car.crash_damage = wall_spy
+    # Spike strips write car.hp directly rather than going through damage(),
+    # deliberately - max(1.0, ...) is what stops them killing you outright.
+    # So they are invisible to the wrapper above, and they are not small: at
+    # four stars the scripted driver drives through about ten strips a run,
+    # which is 80 of the 100hp it loses.
+    real_rb = M.Game.update_roadblock_contacts
+
+    def rb_spy(self):
+        before = g.driving.hp if g.driving is not None else 0.0
+        real_rb(self)
+        if g.driving is not None:
+            tally['spikes'] += max(0.0, before - g.driving.hp)
+    M.Game.update_roadblock_contacts = rb_spy
     d = GridDriver(car, rng)
     hp0 = car.hp
     try:
@@ -914,12 +1073,33 @@ def probe_wear(steps=3600, seed=5):
                 break
             d.step()
             g.update()
+            g.wanted_level = star          # hold the tier; see probe_chase
     finally:
-        M.Car.crash_damage = real
+        M.Car.damage = real
+        M.Car.crash_damage = real_wall
         M.Game.handle_collisions = real_hc
-    print(f"  {i/60:.0f}s solo: hp {car.hp:.0f}/{hp0:.0f}"
-          f"   wall {tally['wall']:.0f}   traffic+cop {tally['traffic']:.0f}")
+        M.Game.update_roadblock_contacts = real_rb
+    label = "solo" if not star else f"{star}-star"
+    lost = hp0 - car.hp
+    total = sum(tally.values()) or 1.0
+    print(f"  {i/60:4.0f}s {label:7} lost {lost:5.0f}/{hp0:.0f}"
+          f"   contact {tally['traffic']:5.0f} ({tally['traffic']/total*100:3.0f}%)"
+          f"   wall {tally['wall']:5.0f} ({tally['wall']/total*100:3.0f}%)"
+          f"   shot {tally['shot']:5.0f} ({tally['shot']/total*100:3.0f}%)"
+          f"   spikes {tally['spikes']:5.0f} ({tally['spikes']/total*100:3.0f}%)"
+          f"   unaccounted {lost - sum(tally.values()):4.0f}")
+    g.wanted_level = 0
+    g.police = []
+    g.foot_police = []
+    g.state = M.STATE_PLAYING
     return tally
+
+
+def probe_chase_wear():
+    """The damage split at every star, which is what decides survivability."""
+    for star in (0, 1, 2, 3, 4, 5):
+        for seed in (5, 17):
+            probe_wear(steps=2400, seed=seed, star=star)
 
 
 def probe_roads(steps=45):
@@ -990,6 +1170,7 @@ PROBES = {
     'chases': probe_chase_all,
     'drive': probe_drive,
     'wear': probe_wear,
+    'chasewear': probe_chase_wear,
     'roads': probe_roads,
 }
 

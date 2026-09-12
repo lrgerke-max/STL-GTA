@@ -196,6 +196,15 @@ pip install -r requirements.txt && python main.py
   Shaw's Garden is a walled 79 acres the real Kingshighway runs beside.
   `tools/playtest.py roads` sweeps every reachable tile at four headings and reports any a car
   cannot drive off: currently zero.
+- **A spike strip is an event, not a field**: it shreds a given car **once**.
+  `ROADBLOCK_HIT_COOLDOWN` alone was the wrong shape of limit - the strip is 52px long, and a
+  hit deliberately scrubs your speed and cripples your steering, which is precisely what keeps
+  you on top of the strip a second later to be shredded again. Measured: one strip took **nine
+  hits** off a single car, 72 of its 100hp, and four- and five-star chases were ending WRECK
+  TOTALLED with spikes doing **79-86% of all damage** to the player while the nearest cruiser
+  was still hundreds of pixels back. Now 8-24hp a chase across two or three distinct strips,
+  and four-star pursuits are survivable again. Same rule `Car.crash_damage` already applies to
+  kerbs: one scrape is one impact, however long you hold it.
 - **City/county pursuit handoffs**: hold a crossing over the Skinker city line for half a second
   and the chase transfers without erasing stars or heat. Existing units withdraw, the next
   agency dispatches from its own jurisdiction, county cars carry a white belt, and county wails

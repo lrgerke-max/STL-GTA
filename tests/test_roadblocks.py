@@ -166,3 +166,71 @@ def test_destroying_cruiser_opens_roadblock_and_delays_replacement(game):
     assert game.roadblocks == []
     assert game.roadblock_deploy_after == (
         game.frame + M.ROADBLOCK_REDEPLOY_BY_STAR[4])
+
+
+def test_one_strip_shreds_a_car_once_however_long_it_sits_on_it(game):
+    """A spike strip is an event, not a damage-over-time field.
+
+    ROADBLOCK_HIT_COOLDOWN on its own was the wrong shape of limit. The strip
+    is 52px long, and a hit deliberately scrubs your speed
+    (SPIKE_ENTRY_SPEED_SCALE) and cripples your steering (SPIKE_STEER_SCALE) -
+    which is exactly what keeps you on top of the strip a second later, to be
+    shredded again. Measured in tools/playtest.py: a single strip took NINE
+    hits off one car, 72 of its 100hp, and four- and five-star chases were
+    ending WRECK TOTALLED with spikes doing 79-86% of all damage to the
+    player. This is the rule Car.crash_damage already applies to kerbs.
+    """
+    car = reset_high_heat(game, 4)
+    game.update_roadblocks(4)
+    block = game.roadblocks[0]
+    car.hp = car.max_hp
+
+    hits = 0
+    for _ in range(10):
+        car.rect.center = block["strip"].center
+        car.velocity = 6.0
+        car.spike_cd = 0                     # a full second has passed
+        before = car.hp
+        game.update_roadblock_contacts()
+        if car.hp < before:
+            hits += 1
+    assert hits == 1, f"one strip shredded the same car {hits} times"
+    assert car.hp == car.max_hp - M.SPIKE_DAMAGE
+    assert block["serial"] in car.spiked_by
+
+
+def test_a_second_distinct_strip_still_bites(game):
+    """Once-per-strip must not mean once per chase."""
+    car = reset_high_heat(game, 5)
+    game.update_roadblocks(4)
+    game.roadblock_deploy_after = 0
+    game.update_roadblocks(5)
+    assert len(game.roadblocks) == 2, "need two strips for this to mean anything"
+    car.hp = car.max_hp
+
+    for block in game.roadblocks:
+        car.rect.center = block["strip"].center
+        car.velocity = 6.0
+        car.spike_cd = 0
+        game.update_roadblock_contacts()
+    assert car.hp == car.max_hp - 2 * M.SPIKE_DAMAGE
+    assert len(car.spiked_by) == 2
+
+
+def test_a_respray_puts_new_tyres_on(game):
+    """A resprayed car is a fresh car, so an old strip may shred it again."""
+    car = reset_high_heat(game, 4)
+    game.update_roadblocks(4)
+    block = game.roadblocks[0]
+    car.rect.center = block["strip"].center
+    car.velocity = 6.0
+    game.update_roadblock_contacts()
+    assert car.spiked_by
+
+    car.spiked_by.clear()                    # what the body shop does
+    car.hp = car.max_hp
+    car.spike_cd = 0
+    car.rect.center = block["strip"].center
+    car.velocity = 6.0
+    game.update_roadblock_contacts()
+    assert car.hp == car.max_hp - M.SPIKE_DAMAGE

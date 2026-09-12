@@ -12835,6 +12835,10 @@ class Car:
         # the strip cannot repeatedly apply the impact beat.
         self.puncture_steps = 0
         self.spike_cd = 0
+        # Serials of the spike strips that have already shredded this car.
+        # A strip is a one-time event, not a damage-over-time field; see
+        # Game.update_roadblock_contacts.
+        self.spiked_by = set()
 
     def damage(self, amount):
         """Take `amount` of impact damage; light the fuse at zero HP."""
@@ -16023,6 +16027,7 @@ class Game:
             self.driving.hp = self.driving.max_hp
             self.driving.puncture_steps = 0
             self.driving.spike_cd = 0
+            self.driving.spiked_by.clear()      # new tyres, so new strips bite
             self.add_callout("RESPRAYED", hud_HUD_GREEN, scale=2)
             self.add_pop(here, f"-${BODY_SHOP_COST}", hud_HUD_RED)
             self.play_sound('cash', vol=0.7)
@@ -18162,8 +18167,20 @@ class Game:
             return
         speed = abs(car.velocity)
         for block in self.roadblocks:
+            # One strip shreds a given car ONCE. ROADBLOCK_HIT_COOLDOWN alone
+            # is the wrong shape of limit: the strip is 52px long, and a spike
+            # hit deliberately scrubs your speed (SPIKE_ENTRY_SPEED_SCALE) and
+            # cripples your steering (SPIKE_STEER_SCALE) - which is precisely
+            # what keeps you on top of the strip a second later, to be hit
+            # again. Measured: a single strip took 9 hits off one car, 72 of
+            # the 100hp it had, and four- and five-star chases were ending
+            # WRECK TOTALLED with spikes accounting for 79-86% of all damage.
+            # This is the same rule Car.crash_damage already applies to kerbs:
+            # one scrape is one impact, however long you hold it.
             if (speed >= 0.6 and car.spike_cd <= 0
+                    and block['serial'] not in car.spiked_by
                     and car.rect.colliderect(block['strip'])):
+                car.spiked_by.add(block['serial'])
                 car.spike_cd = ROADBLOCK_HIT_COOLDOWN
                 car.puncture_steps = max(car.puncture_steps, SPIKE_PUNCTURE_STEPS)
                 car.hp = max(1.0, car.hp - SPIKE_DAMAGE)
