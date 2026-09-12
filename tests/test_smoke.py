@@ -2265,24 +2265,38 @@ def test_the_river_is_a_river_and_you_can_cross_it():
             f"the bridge on row {row} does not reach Illinois")
 
 
-def test_the_stadium_has_exactly_one_way_in():
-    """Angular baseball bowl, open field, and one west gate."""
+def test_the_stadium_is_a_round_bowl_with_exactly_one_way_in():
+    """Busch Memorial was a circle, not a squared-off horseshoe.
+
+    The mask is generated from busch_geometry rather than listed by hand, so
+    this checks the SHAPE the geometry has to produce: a closed ring of
+    grandstand with the footprint's corners left outside it (a box would fill
+    them), an open field in the middle, a plaza row below the bowl, and one
+    concourse in.
+    """
     entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
     lx, ly, lw, lh = entry[0], entry[1], entry[2], entry[3]
-    expected = {
-        (1, 0), (2, 0), (3, 0),
-        (0, 1), (4, 1), (0, 2), (4, 2), (4, 3),
-        (0, 4), (1, 4), (2, 4), (3, 4), (4, 4),
-    }
     actual = {(x, y) for y in range(lh) for x in range(lw)
               if M._lm_solid_stadium(x, y, lw, lh)}
-    assert actual == expected
-    field = (lx + 2, ly + 2)
+
+    # round, so the corners of the square footprint are outside the bowl
+    for corner in ((0, 0), (lw - 1, 0), (0, lw - 1), (lw - 1, lw - 1)):
+        assert corner not in actual, f"{corner} is solid - the bowl is a box"
+    # the bowl occupies the top lw rows; anything below it is plaza deck
+    assert all(y < lw for _x, y in actual), "the bowl spills past its circle"
+    assert lh > lw, "there should be a plaza row under the bowl"
+    # a complete ring: every row and column of the circle carries grandstand
+    for i in range(lw):
+        assert any(x == i for x, _y in actual), f"column {i} has no seating"
+        assert any(y == i for _x, y in actual), f"row {i} has no seating"
+
+    field = (lx + lw // 2, ly + lw // 2)
     assert not M.GAME_MAP[field[1]][field[0]]['collidable'], "field must be open"
     assert M.WALK_REACHABLE[field[1]][field[0]], "field must be reachable"
+
     # Flood only inside the footprint: the field reaches exactly one boundary
-    # tile, the visible west gate at local (0, 3).
-    todo, seen = [(2, 2)], set()
+    # tile, the visible west gate, and never leaks out under the grandstand.
+    todo, seen = [(lw // 2, lw // 2)], set()
     while todo:
         p = todo.pop()
         if p in seen or p in actual:
@@ -2294,7 +2308,7 @@ def test_the_stadium_has_exactly_one_way_in():
         todo.extend(((x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)))
     boundary = {p for p in seen
                 if p[0] in (0, lw - 1) or p[1] in (0, lh - 1)}
-    assert boundary == {(0, 3)}
+    assert boundary == {M.BUSCH_GATE}, f"ways in: {sorted(boundary)}"
 
 
 # ---------------------------------------------------------------------------

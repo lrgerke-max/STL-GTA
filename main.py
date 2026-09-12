@@ -2215,7 +2215,7 @@ CAR_COLORS = [
 LANDMARK_LAYOUT = {
     "Lambert Airport": "airport",
     "Gateway Arch": "arch",              # two leg footings; walk under the span
-    "Busch Stadium": "stadium",          # angular baseball bowl, one west gate
+    "Busch Stadium": "stadium",          # Busch II: round bowl, one west gate
     "Ted Drewes": "drivein",             # stand at the back, queue in the lot
     "Ted Drewes on Grand": "drivein",
     "Soulard Farmers Market": "market",  # open sheds you walk the aisles of
@@ -2308,8 +2308,11 @@ LANDMARKS = [
     (0, 0, 8, 8, "building", "Lambert Airport", (142, 148, 156)),
     # --- East: the river, the Arch, downtown, the ballpark ---
     (82, 40, 9, 12, "building", "Gateway Arch", (170, 172, 168)),
-    # Busch III was sited so the Arch stands over centre field; the two used
-    # to be half a map apart, with downtown fused onto the ballpark.
+    # Busch Memorial Stadium, 1966-2005. Sited so the Arch stands beyond the
+    # outfield; the two used to be half a map apart, with downtown fused onto
+    # the ballpark. Five tiles is the whole block between TUCKER and BROADWAY,
+    # and the bowl is a true circle of that diameter - the sixth row is the
+    # plaza deck the real one stood on, over its parking garages.
     # Fit the bowl inside the short downtown block. Chouteau (row 43), Poplar
     # (row 50), Broadway (73) and 7th (79) now remain actual asphalt instead
     # of sidewalk seams around a landmark painted over the road graph.
@@ -2390,7 +2393,7 @@ LANDMARK_PLAQUES = {
     "Bissell Street Water Tower":
         "The 206-foot Red Water Tower has watched over North City since 1885.",
     "Busch Stadium":
-        "Sited so the Arch stands over centre field.",
+        "Ninety-six arches round the roof, answering the one down the street.",
     "Downtown":
         "The Wainwright of 1891 is one of the first true skyscrapers.",
     "Soulard Farmers Market":
@@ -3821,25 +3824,59 @@ def _lm_solid_arch(lx, ly, lw, lh):
     return lx in (leg_a, leg_b) and base - 1 <= ly <= base
 
 
-def _lm_solid_stadium(lx, ly, lw, lh):
-    """Busch's angular, east-facing baseball bowl.
+# --- Busch Memorial Stadium, 1966-2005 -------------------------------------
+# "Busch II": Edward Durell Stone's near-perfect circle with a crown of 96
+# arches round the roofline, put there to answer Saarinen's Gateway Arch a few
+# blocks east. It is the only thing anybody remembers about the building, and
+# the previous rendition - a squared-off horseshoe painted one red tile at a
+# time - had neither the circle nor the crown.
+#
+# The bowl is a TRUE circle of diameter `lw` tiles sitting in the top of the
+# footprint; the spare row below it is the plaza deck the real one stood on.
+# Every number here is shared by the collision mask and the baker, because
+# the two disagreeing is this file's most reliable source of bugs: a mask and
+# a composition drawn from separate constants is how you get seats you can
+# walk through and a field you cannot.
+BUSCH_OUTER_INSET = 3.0      # px of plaza left outside the crown
+BUSCH_FIELD_F = 0.62         # of the outer radius: inside this is the field
+BUSCH_CROWN_F = 0.91         # ... and outside this is the arcade itself
+BUSCH_DECKS = 3              # loge, mezzanine, upper - all the way round
+BUSCH_ARCHES = 96            # the real count, and it survives at this scale
+BUSCH_GATE = (0, 2)          # the one tile cut through the west grandstand
 
-    The old ellipse was both the wrong silhouette and unrelated to the seven
-    collision tiles beneath it. This exact mask is also what the baker paints:
-    a squared-off horseshoe with one west gate and an open central field.
+
+def busch_geometry(lw, lh):
+    """(centre x, centre y, outer radius, field radius) of the bowl, in px."""
+    radius = lw * TILE_SIZE * 0.5 - BUSCH_OUTER_INSET
+    centre = lw * TILE_SIZE * 0.5
+    return centre, centre, radius, radius * BUSCH_FIELD_F
+
+
+def _lm_solid_stadium(lx, ly, lw, lh):
+    """Solid where the majority of the tile is grandstand, and nowhere else.
+
+    Derived from busch_geometry rather than listed by hand, so the mask is
+    the circle the baker paints. A 320px circle on a 64px grid cannot fall on
+    tile boundaries - the interior corners of the ring clip the seating and
+    the outer corners clip the plaza - so "majority of the tile" is the honest
+    rule, and it yields a clean twelve-tile ring with open corners.
     """
-    if (lw, lh) == (5, 6):
-        return (lx, ly) in {
-            (1, 0), (2, 0), (3, 0),
-            (0, 1), (4, 1), (0, 2), (4, 2),
-            (4, 3),                         # west gate is open at (0, 3)
-            (0, 4), (1, 4), (2, 4), (3, 4), (4, 4),
-        }
-    gate_row = max(1, lh * 3 // 5)
-    return ((ly == 0 and 0 < lx < lw - 1)
-            or (lx in (0, lw - 1) and 0 < ly < lh - 1
-                and not (lx == 0 and ly == gate_row))
-            or (ly == lh - 2 and lx != lw // 2))
+    if (lx, ly) == BUSCH_GATE:
+        return False                      # the concourse you walk in through
+    cx, cy, radius, field_r = busch_geometry(lw, lh)
+    bowl = inside = outside = 0
+    for i in range(8):
+        px = lx * TILE_SIZE + (i + 0.5) * TILE_SIZE / 8.0
+        for j in range(8):
+            py = ly * TILE_SIZE + (j + 0.5) * TILE_SIZE / 8.0
+            dist = math.hypot(px - cx, py - cy)
+            if dist <= field_r:
+                inside += 1
+            elif dist <= radius:
+                bowl += 1
+            else:
+                outside += 1
+    return bowl > inside and bowl > outside
 
 
 def _lm_solid_district(lx, ly, lw, lh):
@@ -9690,163 +9727,7 @@ def lm__bake_arch_foreground(w, h):
 
 
 # --------------------------------------------------------------------------
-# 2. DOWNTOWN & BUSCH STADIUM
-# --------------------------------------------------------------------------
-def lm__bake_stadium(w, h):
-    """Busch Stadium, open-air ballpark, plus a slice of downtown.
-
-    Research: nearly circular bowl, >800ft outside diameter, three seating
-    decks completely ringing the field, no roof.  336ft down the lines,
-    400ft to centre.  From above: a green mown outfield fan, the brown
-    infield arc with its grass diamond and white chalk foul lines, home
-    plate at the near side, all inside a red-seat ring.
-    """
-    s = lm__new(w, h)
-    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT), 61, 8, 5)
-
-    scx, scy = w * 0.355, h * 0.50
-    orx, ory = w * 0.335, h * 0.465
-
-    def ell(f):
-        return pygame.Rect(int(scx - orx * f), int(scy - ory * f),
-                           int(orx * 2 * f), int(ory * 2 * f))
-
-    # street ring + shadow of the bowl
-    pygame.draw.ellipse(s, lm_SHADOW, ell(1.0).move(7, 7))
-    pygame.draw.ellipse(s, lm_CONCRETE_DK, ell(1.0))
-    pygame.draw.ellipse(s, lm_OUTLINE, ell(1.0), 2)
-    pygame.draw.ellipse(s, lm_SEAT_RED_DK, ell(0.955))
-    pygame.draw.ellipse(s, lm_SEAT_RED, ell(0.88))
-    pygame.draw.ellipse(s, lm_SEAT_RED_DK, ell(0.80))
-    pygame.draw.ellipse(s, lm_SEAT_RED, ell(0.72))
-    pygame.draw.ellipse(s, lm_CONCRETE_DK, ell(0.645))
-    pygame.draw.ellipse(s, lm_OUTLINE, ell(0.645), 1)
-
-    # radial aisles through the decks
-    for i in range(28):
-        a = 2.0 * math.pi * i / 28.0
-        ca, sa = math.cos(a), math.sin(a)
-        lm__line(s, lm_SEAT_RED_DK if i % 2 else lm_OUTLINE,
-              (scx + ca * orx * 0.655, scy + sa * ory * 0.655),
-              (scx + ca * orx * 0.985, scy + sa * ory * 0.985), 1)
-    # light standards on the rim
-    for i in range(8):
-        a = 2.0 * math.pi * (i + 0.5) / 8.0
-        px = scx + math.cos(a) * orx * 0.985
-        py = scy + math.sin(a) * ory * 0.985
-        lm__r(s, lm_SHADOW, px - 2, py - 1, 8, 5)
-        lm__r(s, lm_CONCRETE_LT, px - 4, py - 3, 8, 5)
-        pygame.draw.rect(s, lm_OUTLINE, (int(px - 4), int(py - 3), 8, 5), 1)
-
-    # ---- the field ---------------------------------------------------------
-    frx, fry = orx * 0.63, ory * 0.63
-    pygame.draw.ellipse(s, lm_DIRT, ell(0.63))          # warning track
-    pygame.draw.ellipse(s, lm__shade(lm_TURF, 0.86), ell(0.63).inflate(-16, -16))
-    hx, hy = scx, scy + fry * 0.70
-
-    def wall_hit(a):
-        lo, hi = 4.0, max(frx, fry) * 2.4
-        for _ in range(22):
-            mid = (lo + hi) * 0.5
-            px = hx + math.cos(a) * mid
-            py = hy + math.sin(a) * mid
-            v = ((px - scx) / (frx - 8.0)) ** 2 + ((py - scy) / (fry - 8.0)) ** 2
-            if v > 1.0:
-                hi = mid
-            else:
-                lo = mid
-        return lo
-
-    a0, a1 = math.pi * 1.25, math.pi * 1.75
-    seg = 12
-    angs = lm__lin(a0, a1, seg)
-    for i in range(seg):
-        col = lm_TURF_LT if i % 2 else lm_TURF
-        band = [(hx, hy)]
-        for a in lm__lin(angs[i], angs[i + 1], 4):
-            rr = wall_hit(a)
-            band.append((hx + math.cos(a) * rr, hy + math.sin(a) * rr))
-        lm__poly(s, col, band)
-    # outfield wall along the fan edge
-    wallpts = []
-    for a in lm__lin(a0, a1, 26):
-        rr = wall_hit(a)
-        wallpts.append((hx + math.cos(a) * rr, hy + math.sin(a) * rr))
-    lm__thick_path(s, wallpts, 3, (46, 62, 46))
-
-    # infield dirt arc
-    inf_r = wall_hit(math.pi * 1.5) * 0.40
-    arc = [(hx, hy)]
-    for a in lm__lin(a0, a1, 14):
-        arc.append((hx + math.cos(a) * inf_r, hy + math.sin(a) * inf_r))
-    lm__poly(s, lm_DIRT, arc)
-    lm__poly(s, lm_DIRT_DK, arc, 1)
-
-    # base-path diamond, grass infield, bases, mound
-    d = inf_r * 0.60
-    home = (hx, hy - 4)
-    first = (hx + d, hy - d - 4)
-    second = (hx, hy - 2 * d - 4)
-    third = (hx - d, hy - d - 4)
-    ctr = (hx, hy - d - 4)
-    inner = [(ctr[0] + (p[0] - ctr[0]) * 0.70, ctr[1] + (p[1] - ctr[1]) * 0.70)
-             for p in (home, first, second, third)]
-    lm__poly(s, lm_TURF, inner)
-    lm__poly(s, lm__shade(lm_TURF, 0.85), inner, 1)
-    pygame.draw.circle(s, lm_DIRT, (int(ctr[0]), int(ctr[1])), max(4, int(d * 0.20)))
-    pygame.draw.circle(s, lm_DIRT_DK, (int(ctr[0]), int(ctr[1])), max(4, int(d * 0.20)), 1)
-    lm__r(s, lm_CHALK, ctr[0] - 2, ctr[1] - 1, 4, 2)
-    for p in (first, second, third):
-        lm__r(s, lm_CHALK, p[0] - 2, p[1] - 2, 5, 5)
-    lm__poly(s, lm_CHALK, [(home[0], home[1] - 3), (home[0] + 3, home[1]),
-                     (home[0] + 3, home[1] + 3), (home[0] - 3, home[1] + 3),
-                     (home[0] - 3, home[1])])
-    # backstop dirt behind the plate
-    lm__poly(s, lm_DIRT, [(hx - 20, hy + 2), (hx + 20, hy + 2),
-                    (hx + 26, hy + 15), (hx - 26, hy + 15)])
-    # chalk foul lines
-    for a in (a0, a1):
-        rr = wall_hit(a)
-        lm__line(s, lm_CHALK, (hx, hy), (hx + math.cos(a) * rr, hy + math.sin(a) * rr), 1)
-
-    # ---- downtown blocks along the east side --------------------------------
-    dx0 = int(w * 0.715)
-    lm__road(s, dx0 - 18, 0, 12, h, False, 63, True, 0)
-    lm__road(s, dx0 - 6, int(h * 0.47), int(w - dx0 + 6), 12, True, 64, True, 0)
-    cols = [(dx0, int(w * 0.128)), (int(dx0 + w * 0.152), int(w * 0.108))]
-    tones = ((74, 72, 80), (92, 86, 90), (62, 60, 68), (104, 96, 94),
-             (80, 74, 68), (56, 58, 66))
-    for ci, (bx, bw2) in enumerate(cols):
-        y = 10
-        i = 0
-        while y < h - 30:
-            n = lm__noise(ci, i, 71)
-            bh2 = 44 + (n % 62)
-            if y > h * 0.42 and y < h * 0.50:
-                y = int(h * 0.50)
-                continue
-            if y + bh2 > h * 0.44 and y < h * 0.44:
-                bh2 = int(h * 0.44 - y)
-            if y + bh2 > h - 12:
-                bh2 = int(h - 12 - y)
-            if bh2 < 18:
-                break
-            wob = (n >> 7) % 3 * 6
-            if (n >> 11) % 7 == 0 and bh2 > 34:
-                lm__parking(s, bx, y, bw2 - wob, bh2, 73 + i, False)
-            else:
-                rf = lm__block(s, bx, y, bw2 - wob, bh2, lm__pick(tones, ci, i, 72), 5, 8)
-                lm__r(s, lm__shade(tones[(n >> 3) % len(tones)], 1.25),
-                   rf.x + 3, rf.y + 3, rf.w - 6, 3)
-                lm__roof_clutter(s, rf, 80 + ci + i, 3)
-            y += bh2 + 12
-            i += 1
-    pygame.draw.rect(s, lm_OUTLINE, (0, 0, w, h), 1)
-    return s
-
-
-# --------------------------------------------------------------------------
-# 3. SOULARD / ANHEUSER-BUSCH BREWERY
+# 2. SOULARD / ANHEUSER-BUSCH BREWERY
 # --------------------------------------------------------------------------
 def lm__bake_brewery(w, h):
     """Anheuser-Busch, Soulard: 142 acres, ~140 red-brick structures.
@@ -9977,7 +9858,7 @@ def lm__bake_brewery(w, h):
 
 
 # --------------------------------------------------------------------------
-# 4. FOREST PARK
+# 3. FOREST PARK
 # --------------------------------------------------------------------------
 def lm__fp_basin(s, w, h, bcx, bcy, bw2, bh2):
     """The Emerson Grand Basin: coping, jets, plumes and the cascades.
@@ -10311,7 +10192,7 @@ def lm__bake_forest_park(w, h):
 
 
 # --------------------------------------------------------------------------
-# 5. CENTRAL WEST END
+# 4. CENTRAL WEST END
 # --------------------------------------------------------------------------
 def lm__bake_water_tower(w, h):
     """The Compton Hill Water Tower.
@@ -10731,7 +10612,7 @@ def lm__bake_cwe(w, h):
 
 
 # --------------------------------------------------------------------------
-# 6. THE HILL
+# 5. THE HILL
 # --------------------------------------------------------------------------
 def lm__bake_the_hill(w, h):
     """The Hill: ~50 tight square blocks of Italian-American St. Louis.
@@ -10814,7 +10695,7 @@ def lm__bake_the_hill(w, h):
 
 
 # --------------------------------------------------------------------------
-# 7. DELMAR LOOP
+# 6. DELMAR LOOP
 # --------------------------------------------------------------------------
 def lm__bake_delmar_loop(w, h):
     """The Delmar Loop: an eight-block commercial STRIP on one street.
@@ -10988,7 +10869,7 @@ def lm__bake_delmar_loop(w, h):
 
 
 # --------------------------------------------------------------------------
-# 8. TOWER GROVE PARK
+# 7. TOWER GROVE PARK
 # --------------------------------------------------------------------------
 def lm__bake_tower_grove(w, h):
     """Tower Grove Park: 289 acres, best-preserved Gardenesque city park.
@@ -11127,7 +11008,7 @@ def lm__bake_tower_grove(w, h):
 
 
 # --------------------------------------------------------------------------
-# 9. GRAND CENTER ARTS DISTRICT
+# 8. GRAND CENTER ARTS DISTRICT
 # --------------------------------------------------------------------------
 def lm__bake_grand_center(w, h):
     """Grand Center: theatres and civic halls on Grand Boulevard.
@@ -11359,7 +11240,7 @@ def lm__bake_ted_drewes(w, h):
 
 
 # --------------------------------------------------------------------------
-# 14. MISSOURI BOTANICAL GARDEN
+# 9. MISSOURI BOTANICAL GARDEN
 # --------------------------------------------------------------------------
 def lm__bake_botanical(w, h):
     """Shaw's Garden, and the Climatron.
@@ -11658,63 +11539,202 @@ def lm__bake_grand_center_aligned(w, h):
         661, 'grand')
 
 
-def lm__bake_stadium_angular(w, h):
-    """Busch as a compact angular baseball bowl aimed toward the Arch."""
-    s = lm__new(w, h)
-    lm__fill_mottle(s, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
-                    671, 7, 5)
-    # Home plate sits at the west gate; center field points east/northeast.
-    home = (42, int(h * 0.58))
-    field = (home, (int(w * 0.64), 42), (int(w) - 18, int(h * 0.43)),
-             (int(w * 0.72), 4 * TILE_SIZE - 10))
-    lm__poly(s, lm_DIRT, field)
-    inner = ((home[0] + 8, home[1]), (int(w * 0.62), 58),
-             (int(w) - 33, int(h * 0.43)), (int(w * 0.69), 4 * TILE_SIZE - 24))
-    lm__poly(s, lm_TURF, inner)
-    for x in range(home[0] + 24, int(w) - 36, 32):
-        lm__line(s, lm_TURF_LT, (x, int(h * 0.28)),
-                 (x + 28, int(h * 0.72)), 5)
+def lm__bake_busch_memorial(w, h):
+    """Busch Memorial Stadium, 1966-2005 - "Busch II", the one with the crown.
 
-    lw, lh = int(w) // TILE_SIZE, int(h) // TILE_SIZE
-    for ly in range(lh):
-        for lx in range(lw):
-            if not _lm_solid_stadium(lx, ly, lw, lh):
-                continue
-            x, y = lx * TILE_SIZE, ly * TILE_SIZE
-            lm__r(s, lm_SEAT_RED_DK, x, y, TILE_SIZE, TILE_SIZE)
-            lm__r(s, lm_SEAT_RED, x + 5, y + 5, TILE_SIZE - 10, TILE_SIZE - 10)
-            for aisle in range(14, TILE_SIZE - 12, 14):
-                lm__line(s, lm_CONCRETE_DK, (x + aisle, y + 8),
-                         (x + aisle, y + TILE_SIZE - 10))
-            pygame.draw.rect(s, lm_OUTLINE, (x, y, TILE_SIZE, TILE_SIZE), 2)
+    Research: Edward Durell Stone put a ring of ninety-six arches round the
+    roofline, deliberately answering Saarinen's Gateway Arch a few blocks
+    east, and that crown is the only thing anybody remembers about the
+    building. Under it, a near-perfect circle about 800ft across - a
+    multi-purpose "cookie cutter" bowl shared with the football Cardinals
+    until they left for Phoenix after 1987 - with three seating decks ringing
+    the field the whole way round and no roof over them. 330ft down the
+    lines, 402ft to centre at opening. Natural grass to 1970, AstroTurf
+    1970-95, grass again from 1996. Home plate on the west side, so the
+    outfield opens toward the river.
 
-    # East-facing infield diamond and chalk lines.
-    d = 30
-    first = (home[0] + d, home[1] + d)
-    second = (home[0] + d * 2, home[1])
-    third = (home[0] + d, home[1] - d)
-    lm__poly(s, lm_DIRT, (home, first, second, third))
-    inner_diamond = tuple((int(home[0] + (px - home[0]) * .72),
-                           int(home[1] + (py - home[1]) * .72))
-                          for px, py in (home, first, second, third))
-    lm__poly(s, lm_TURF, inner_diamond)
-    for base in (first, second, third):
-        lm__r(s, lm_CHALK, base[0] - 3, base[1] - 3, 6, 6)
-    lm__line(s, lm_CHALK, home, (int(w * 0.64), 42), 2)
-    lm__line(s, lm_CHALK, home, (int(w * 0.72), 4 * TILE_SIZE - 10), 2)
-    # The only gate is visibly cut through the west/southwest grandstand.
-    lm__r(s, lm_ASPHALT, 0, 3 * TILE_SIZE + 18, 58, 30)
-    lm__line(s, lm_LINE_Y, (3, 3 * TILE_SIZE + 33),
-             (55, 3 * TILE_SIZE + 33), 2)
-    hud_text(s, "BUSCH", int(w) - 61, int(h * .46), lm_MARQUEE, False, 1)
-    pygame.draw.rect(s, lm_OUTLINE, (0, 0, int(w), int(h)), 1)
-    return s
+    The previous rendition painted each solid tile as a red square with aisle
+    stripes. It had neither the circle nor the crown, which is to say it had
+    nothing that made this building that building.
+
+    Every radius here comes from busch_geometry, which is also what
+    _lm_solid_stadium masks from - so the seats you can see and the seats you
+    cannot walk through are one decision rather than two.
+    """
+    surf = lm__new(w, h)
+    lm__fill_mottle(surf, w, h, lm_CONCRETE, (lm_CONCRETE_DK, lm_CONCRETE_LT),
+                    61, 8, 5)
+    lw = max(1, int(w) // TILE_SIZE)
+    lh = max(1, int(h) // TILE_SIZE)
+    cx, cy, radius, field_r = busch_geometry(lw, lh)
+    crown_r = radius * BUSCH_CROWN_F
+
+    def ring(rad, col, width=0):
+        if rad > 0:
+            pygame.draw.circle(surf, col, (int(cx), int(cy)), int(rad), width)
+
+    # ---- the bowl, outside in --------------------------------------------
+    pygame.draw.circle(surf, lm_SHADOW, (int(cx) + 6, int(cy) + 6), int(radius))
+    ring(radius, lm_CONCRETE_LT)                 # the crown's pale top surface
+    ring(radius, lm_OUTLINE, 2)
+
+    # ---- the Crown of Arches ---------------------------------------------
+    # Ninety-six, which is the real count and survives at this scale: the
+    # crown's mid-circumference is about 900px, so each arch gets ~9px of it -
+    # enough for a pier and a slot. Each opening is a capsule pointing
+    # outward, a radial slot with a rounded end, which is what an arch looks
+    # like from above and reads as an arcade rather than as notches.
+    arch_in = crown_r + 1.5
+    arch_out = radius - 2.5
+    # Half the slot width. 0.26 of the pitch leaves the pier as wide as the
+    # opening, which is what makes it read as an arcade: at 0.34 the slots
+    # merged and the whole crown came out as one dark band.
+    half = max(1.4, (math.pi * (arch_in + arch_out)) / BUSCH_ARCHES * 0.26)
+    arch_void = (58, 54, 56)                    # shaded opening, not a hole
+    for i in range(BUSCH_ARCHES):
+        ang = 2.0 * math.pi * i / BUSCH_ARCHES
+        ca, sa = math.cos(ang), math.sin(ang)
+        nx, ny = -sa, ca                        # across the arch
+        tip = arch_out - half
+        lm__poly(surf, arch_void, (
+            (cx + ca * arch_in + nx * half, cy + sa * arch_in + ny * half),
+            (cx + ca * tip + nx * half, cy + sa * tip + ny * half),
+            (cx + ca * tip - nx * half, cy + sa * tip - ny * half),
+            (cx + ca * arch_in - nx * half, cy + sa * arch_in - ny * half)))
+        pygame.draw.circle(surf, arch_void,
+                           (int(cx + ca * tip), int(cy + sa * tip)),
+                           max(1, int(round(half))))
+    ring(radius, lm_OUTLINE, 1)
+    ring(crown_r, lm_CONCRETE_DK)
+    ring(crown_r, lm_OUTLINE, 1)
+
+    # ---- three decks of red seats, ringing the field completely ----------
+    deck_span = crown_r - field_r
+    for deck in range(BUSCH_DECKS):
+        outer = crown_r - deck_span * (deck / float(BUSCH_DECKS))
+        inner = crown_r - deck_span * ((deck + 1) / float(BUSCH_DECKS))
+        ring(outer, lm_SEAT_RED if deck % 2 == 0 else lm_SEAT_RED_DK)
+        ring(inner + 1.5, lm_OUTLINE, 1)
+    for i in range(40):                          # radial aisles
+        ang = 2.0 * math.pi * i / 40.0
+        ca, sa = math.cos(ang), math.sin(ang)
+        lm__line(surf,
+                 lm_SEAT_RED_DK if i % 2 else lm__shade(lm_SEAT_RED, 0.72),
+                 (cx + ca * (field_r + 3), cy + sa * (field_r + 3)),
+                 (cx + ca * (crown_r - 2), cy + sa * (crown_r - 2)), 1)
+
+    # ---- light banks, which stood on top of the crown --------------------
+    for i in range(10):
+        ang = 2.0 * math.pi * (i + 0.5) / 10.0
+        px = cx + math.cos(ang) * (radius - 7)
+        py = cy + math.sin(ang) * (radius - 7)
+        lm__r(surf, lm_SHADOW, px - 3, py - 2, 9, 6)
+        lm__r(surf, lm_CONCRETE_LT, px - 5, py - 4, 9, 6)
+        pygame.draw.rect(surf, lm_OUTLINE, (int(px - 5), int(py - 4), 9, 6), 1)
+
+    # ---- the field -------------------------------------------------------
+    ring(field_r, lm_DIRT)                       # warning track
+    ring(field_r - 5, lm__shade(lm_TURF, 0.88))
+    hx, hy = cx - field_r * 0.66, cy             # home plate, west side
+
+    def wall_at(ang):
+        """Distance from home to the outfield wall along `ang`, exactly."""
+        ux, uy = math.cos(ang), math.sin(ang)
+        dx, dy = hx - cx, hy - cy
+        b = ux * dx + uy * dy
+        c = dx * dx + dy * dy - (field_r - 6) ** 2
+        return -b + math.sqrt(max(0.0, b * b - c))
+
+    a0, a1 = -math.pi * 0.25, math.pi * 0.25     # the two foul lines
+    bands = 11
+    edges = lm__lin(a0, a1, bands)
+    for i in range(bands):
+        wedge = [(hx, hy)]
+        for ang in lm__lin(edges[i], edges[i + 1], 4):
+            reach = wall_at(ang)
+            wedge.append((hx + math.cos(ang) * reach, hy + math.sin(ang) * reach))
+        lm__poly(surf, lm_TURF_LT if i % 2 else lm_TURF, wedge)
+    wall = [(hx + math.cos(a) * wall_at(a), hy + math.sin(a) * wall_at(a))
+            for a in lm__lin(a0, a1, 30)]
+    lm__thick_path(surf, wall, 3, (46, 62, 46))
+
+    # infield: the dirt arc, the diamond, the mound, the chalk
+    inf = wall_at(0.0) * 0.40
+    arc = [(hx, hy)]
+    for ang in lm__lin(a0, a1, 16):
+        arc.append((hx + math.cos(ang) * inf, hy + math.sin(ang) * inf))
+    lm__poly(surf, lm_DIRT, arc)
+    lm__poly(surf, lm_DIRT_DK, arc, 1)
+    base = inf * 0.62
+    home = (hx + 3, hy)
+    first = (hx + base, hy + base)
+    second = (hx + base * 2, hy)
+    third = (hx + base, hy - base)
+    grass = [(second[0] + (p[0] - second[0]) * 0.70,
+              second[1] + (p[1] - second[1]) * 0.70)
+             for p in (home, first, second, third)]
+    lm__poly(surf, lm_TURF, grass)
+    lm__poly(surf, lm__shade(lm_TURF, 0.84), grass, 1)
+    mound = (hx + base, hy)
+    pygame.draw.circle(surf, lm_DIRT, (int(mound[0]), int(mound[1])),
+                       max(3, int(base * 0.22)))
+    pygame.draw.circle(surf, lm_DIRT_DK, (int(mound[0]), int(mound[1])),
+                       max(3, int(base * 0.22)), 1)
+    for spot in (first, second, third):
+        lm__r(surf, lm_CHALK, spot[0] - 2, spot[1] - 2, 5, 5)
+    lm__r(surf, lm_CHALK, home[0] - 2, home[1] - 2, 4, 4)
+    for ang in (a0, a1):
+        reach = wall_at(ang)
+        lm__line(surf, lm_CHALK, (hx, hy),
+                 (hx + math.cos(ang) * reach, hy + math.sin(ang) * reach), 2)
+
+    # ---- the scoreboard, out over the centre-field seats -----------------
+    sb_w, sb_h = int(field_r * 0.52), 13
+    sbx = cx + (crown_r + field_r) * 0.5 - sb_w * 0.5
+    sby = cy - sb_h * 0.5
+    lm__r(surf, lm_SHADOW, sbx + 2, sby + 2, sb_w, sb_h)
+    lm__r(surf, (34, 36, 40), sbx, sby, sb_w, sb_h)
+    pygame.draw.rect(surf, lm_OUTLINE, (int(sbx), int(sby), sb_w, sb_h), 1)
+    for i in range(3):
+        lm__r(surf, lm_MARQUEE, sbx + 4 + i * (sb_w - 8) / 3.0, sby + 4,
+              (sb_w - 12) / 3.0, 4)
+
+    # ---- the one gate, cut clean through crown and decks -----------------
+    # Due west, matching BUSCH_GATE, so the concourse arrives behind home.
+    gate_a = math.pi
+    gca, gsa = math.cos(gate_a), math.sin(gate_a)
+    gnx, gny = -gsa, gca
+    ghalf = TILE_SIZE * 0.40
+    lm__poly(surf, lm_ASPHALT, (
+        (cx + gca * (field_r - 4) + gnx * ghalf,
+         cy + gsa * (field_r - 4) + gny * ghalf),
+        (cx + gca * (radius + 4) + gnx * ghalf,
+         cy + gsa * (radius + 4) + gny * ghalf),
+        (cx + gca * (radius + 4) - gnx * ghalf,
+         cy + gsa * (radius + 4) - gny * ghalf),
+        (cx + gca * (field_r - 4) - gnx * ghalf,
+         cy + gsa * (field_r - 4) - gny * ghalf)))
+    lm__line(surf, lm_LINE_Y,
+             (cx + gca * (field_r - 2), cy + gsa * (field_r - 2)),
+             (cx + gca * (radius + 2), cy + gsa * (radius + 2)), 2)
+    for side in (-1, 1):                         # the gate's flanking piers
+        ang = gate_a + side * (ghalf + 5) / radius
+        ca, sa = math.cos(ang), math.sin(ang)
+        lm__line(surf, lm_CONCRETE_LT,
+                 (cx + ca * crown_r, cy + sa * crown_r),
+                 (cx + ca * radius, cy + sa * radius), 3)
+
+    # No baked name: the spare row below the bowl is the plaza deck the real
+    # one stood on, and lm__LABEL_AT already puts the landmark's own label
+    # there. Painting "BUSCH STADIUM" into the art too printed it twice.
+    pygame.draw.rect(surf, lm_OUTLINE, (0, 0, int(w), int(h)), 1)
+    return surf
 
 
 lm__BAKERS = {
     "lambert": lm__bake_lambert,
     "arch": lm__bake_arch,
-    "stadium": lm__bake_stadium_angular,
+    "stadium": lm__bake_busch_memorial,
     "ted_drewes": lm__bake_ted_drewes,
     "brewery": lm__bake_brewery,
     "forest_park": lm__bake_forest_park,

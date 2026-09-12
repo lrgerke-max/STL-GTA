@@ -252,20 +252,92 @@ def test_the_brewery_yard_is_ground_and_its_blocks_are_buildings():
     assert open_tiles >= lw * lh // 3, "the yard streets are too narrow to drive"
 
 
-def test_stadium_art_uses_the_same_angular_mask_as_collision():
+def test_busch_memorial_art_and_collision_are_the_same_circle():
+    """Busch II was a circle, and the mask is generated from the art's radii.
+
+    The old pair were a squared-off horseshoe and a per-tile red square, and
+    the test that guarded them only sampled one pixel 11px into each tile - a
+    check a circle cannot pass, because a circle inscribed in a square ring
+    leaves the outer corners of every ring tile outside the bowl. Measure what
+    actually matters instead: grandstand tiles are grandstand, field tiles are
+    field, and the one gate is a concourse.
+    """
     entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
     _x, _y, lw, lh = entry[:4]
-    art = M.lm__bake_stadium_angular(lw * M.TILE_SIZE, lh * M.TILE_SIZE)
-    seat_colors = {M.lm_SEAT_RED, M.lm_SEAT_RED_DK}
-    for ly in range(lh):
-        for lx in range(lw):
-            pixel = art.get_at((lx * M.TILE_SIZE + 11,
-                                ly * M.TILE_SIZE + 11))[:3]
-            if M._lm_solid_stadium(lx, ly, lw, lh):
-                assert pixel in seat_colors, (lx, ly, pixel)
-    field_pixel = art.get_at((2 * M.TILE_SIZE + M.TILE_SIZE // 2,
-                              2 * M.TILE_SIZE + M.TILE_SIZE // 2))[:3]
-    assert field_pixel not in seat_colors
+    art = M.lm__bake_busch_memorial(lw * M.TILE_SIZE, lh * M.TILE_SIZE)
+    seats = {M.lm_SEAT_RED, M.lm_SEAT_RED_DK, M.lm__shade(M.lm_SEAT_RED, 0.72)}
+    field = {M.lm_TURF, M.lm_TURF_LT, M.lm_DIRT, M.lm_DIRT_DK, M.lm_CHALK,
+             M.lm__shade(M.lm_TURF, 0.88), M.lm__shade(M.lm_TURF, 0.84),
+             (46, 62, 46)}
+
+    def shares(tx, ty):
+        seat = grass = asphalt = total = 0
+        for dy in range(3, M.TILE_SIZE, 4):
+            for dx in range(3, M.TILE_SIZE, 4):
+                px = art.get_at((tx * M.TILE_SIZE + dx,
+                                 ty * M.TILE_SIZE + dy))[:3]
+                total += 1
+                if px in seats:
+                    seat += 1
+                elif px in field:
+                    grass += 1
+                elif px == M.lm_ASPHALT:
+                    asphalt += 1
+        return seat / total, grass / total, asphalt / total
+
+    for ty in range(lh):
+        for tx in range(lw):
+            seat, grass, asphalt = shares(tx, ty)
+            if M._lm_solid_stadium(tx, ty, lw, lh):
+                assert seat > 0.30, (
+                    f"solid tile {tx},{ty} is only {seat:.0%} seating")
+                assert grass < 0.05, f"{tx},{ty} is solid but shows field"
+            elif (tx, ty) == M.BUSCH_GATE:
+                assert asphalt > 0.50, "the one gate is not a concourse"
+            elif 0 < tx < lw - 1 and 0 < ty < lw - 1:
+                # the open interior: more field than grandstand. A 320px
+                # circle on a 64px grid cannot land on tile edges, so the
+                # diagonal interior tiles legitimately catch some seating -
+                # "majority" is the rule the mask itself uses.
+                assert grass > seat, (
+                    f"interior tile {tx},{ty} is {seat:.0%} seats "
+                    f"vs {grass:.0%} field")
+
+    # the corners are plaza, because the bowl is round and the footprint square
+    for corner in ((0, 0), (lw - 1, 0), (0, lw - 1), (lw - 1, lw - 1)):
+        seat, grass, _a = shares(*corner)
+        assert seat < 0.05 and grass < 0.05, f"corner {corner} is inside the bowl"
+
+
+def test_busch_memorial_wears_its_crown_of_arches():
+    """The ring of arches answering the Gateway Arch is the whole building.
+
+    Stone's crown was ninety-six arches; drawn as an unbroken band, or as a
+    handful of notches, it stops being the thing people remember. Walk the
+    crown and count light-to-dark transitions: an arcade alternates pier,
+    opening, pier, so the count should approach two per arch.
+    """
+    entry = next(e for e in M.LANDMARKS if e[5] == "Busch Stadium")
+    _x, _y, lw, lh = entry[:4]
+    art = M.lm__bake_busch_memorial(lw * M.TILE_SIZE, lh * M.TILE_SIZE)
+    cx, cy, radius, _field = M.busch_geometry(lw, lh)
+    sample_r = radius * (M.BUSCH_CROWN_F + 1.0) * 0.5      # mid-crown
+
+    seen = []
+    steps = M.BUSCH_ARCHES * 8
+    for i in range(steps):
+        ang = 2.0 * math.pi * i / steps
+        px = int(cx + math.cos(ang) * sample_r)
+        py = int(cy + math.sin(ang) * sample_r)
+        seen.append(sum(art.get_at((px, py))[:3]) / 3.0)
+
+    mid = (max(seen) + min(seen)) * 0.5
+    assert max(seen) - min(seen) > 40, "the crown has no light/dark rhythm"
+    flips = sum(1 for a, b in zip(seen, seen[1:] + seen[:1])
+                if (a > mid) != (b > mid))
+    assert flips >= M.BUSCH_ARCHES, (
+        f"only {flips} transitions round the crown - expected about "
+        f"{2 * M.BUSCH_ARCHES} for {M.BUSCH_ARCHES} arches")
 
 
 def test_grand_and_hill_art_bakers_share_the_collision_predicates():
