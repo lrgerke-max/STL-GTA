@@ -23,6 +23,8 @@ handling, police or traffic change.
     wear         where a chase car's health actually goes
     chasewear    ... split by source, at every star level
     careful      aggressive vs careful driving: whose fault is the damage
+    soak         five minutes of real play: exceptions, leaks, drift
+    perf         frame time under the worst load, against the 60fps budget
     roads        every reachable tile, four headings: can a car drive off it
     traffic      overlapping AI cars, stalled cars, mean traffic speed
     onscreen     how much of the population is actually in frame
@@ -1287,6 +1289,153 @@ def probe_roads(steps=45):
     return len(boxed), len(oneway)
 
 
+def probe_perf(frames=600):
+    """Frame time under the worst load the game can produce.
+
+    16.7ms is the 60fps budget. Note this runs on the dummy SDL driver, which
+    skips the real present/flip, so treat these as a floor rather than a
+    promise - the headroom on real hardware is smaller than it looks here.
+    """
+    import time
+
+    def run(label, setup, draw=True):
+        random.seed(7)
+        g = game()
+        g.state = M.STATE_PLAYING
+        x, y = straight_road_point()
+        car = put_in_car(g, x, y, 0.0)
+        d = GridDriver(car, random.Random(3), game=g)
+        setup(g, car)
+        for _ in range(90):                    # let the load build
+            d.step()
+            g.update()
+        times = []
+        for _ in range(frames):
+            t0 = time.perf_counter()
+            d.step()
+            g.update()
+            if draw:
+                g.draw()
+            times.append((time.perf_counter() - t0) * 1000.0)
+        times.sort()
+        over = sum(1 for t in times if t > 16.7)
+        # A COUNT, not a rounded percentage: five dropped frames out of six
+        # hundred is a visible hitch and integer division prints it as 0%.
+        print(f"  {label:32} p50 {times[len(times) // 2]:5.2f}ms  "
+              f"p99 {times[int(len(times) * 0.99)]:5.2f}ms  "
+              f"max {times[-1]:5.2f}ms  "
+              f"over budget {over:3d}/{len(times)} frames")
+
+    def quiet(g, _c):
+        g.wanted_level = 0
+
+    def chase(g, _c):
+        g.wanted_level = 5
+
+    def stains(g, _c):
+        g.wanted_level = 5
+        for i in range(M.DECAL_MAX + 20):
+            g.add_decal((g.player_rect.centerx + (i % 17) * 30,
+                         g.player_rect.centery + (i % 13) * 30), 'blood', 1.2)
+
+    def blasts(g, car):
+        g.wanted_level = 5
+        for other in list(g.cars)[:8]:
+            if other is not car:
+                g.explode(other)
+
+    def atlas(g, _c):
+        g.wanted_level = 5
+        g.show_map = True
+
+    def afoot(g, car):
+        g.wanted_level = 5
+        car.driver = None
+        car.parked = True
+        g.driving = None
+
+    print("  update + draw, 60fps budget = 16.7ms")
+    for label, setup in (("quiet street", quiet), ("five-star chase", chase),
+                         ("chase + full decal set", stains),
+                         ("chase + eight explosions", blasts),
+                         ("chase + map screen open", atlas),
+                         ("five-star on foot", afoot)):
+        run(label, setup)
+    print("  update only, no draw")
+    run("five-star chase", chase, draw=False)
+
+
+def probe_soak(frames=18000, seed=99):
+    """Five minutes of real play: exceptions, leaks, and invariant drift.
+
+    The bugs a short test cannot see. Runs the actual game loop with police,
+    traffic and population live, drives the whole map, raises the heat every
+    1500 frames, and watches three things: whether anything raises, whether
+    any per-frame collection grows without bound, and whether the collision
+    invariants hold over time rather than just at frame one.
+    """
+    tracked = ('cars', 'pedestrians', 'police', 'foot_police', 'roadblocks',
+               'callouts', 'toasts', 'decals', 'rail')
+    spots = [(10, 37), (57, 32), (27, 57), (71, 51), (40, 95),
+             (66, 31), (91, 2), (76, 46), (46, 53), (9, 79)]
+    random.seed(seed)
+    g = game()
+    g.state = M.STATE_PLAYING
+    x, y = straight_road_point()
+    car = put_in_car(g, x, y, 0.0)
+    d = GridDriver(car, random.Random(5), game=g)
+
+    peaks = collections.Counter()
+    first = {}
+    errors = []
+    bad_ped = bad_player = 0
+    i = 0
+    for i in range(frames):
+        if i % 1500 == 0:
+            g.wanted_level = (i // 1500) % (M.WANTED_MAX + 1)
+            if g.driving is None or g.state != M.STATE_PLAYING:
+                g.state = M.STATE_PLAYING
+                col, row = spots[(i // 1500) % len(spots)]
+                car = put_in_car(g, col * M.TILE_SIZE + 32,
+                                 row * M.TILE_SIZE + 32, 0.0)
+                d = GridDriver(car, random.Random(i), game=g)
+        try:
+            d.step()
+            g.update()
+            g.draw()
+        except Exception as exc:
+            errors.append((i, repr(exc)))
+            if len(errors) > 3:
+                break
+        for attr in tracked:
+            seq = getattr(g, attr, None)
+            if seq is None:
+                continue
+            peaks[attr] = max(peaks[attr], len(seq))
+            first.setdefault(attr, len(seq))
+        if i % 240 == 0:
+            for ped in g.pedestrians:
+                if not M.pedestrian_ground_is_clear(ped.rect):
+                    bad_ped += 1
+            if g.driving is None and M.is_blocked(g.player_rect):
+                bad_player += 1
+
+    print(f"  {i + 1} frames ({(i + 1) / 60.0:.0f}s of play), "
+          f"{len(errors)} exceptions")
+    for frame, err in errors[:3]:
+        print(f"     frame {frame}: {err}")
+    print(f"  pedestrians on bad ground: {bad_ped}   "
+          f"player inside geometry: {bad_player}")
+    print(f"  {'collection':14} {'first':>6} {'peak':>6} {'now':>6}")
+    for attr in tracked:
+        if attr not in peaks:
+            continue
+        now = len(getattr(g, attr))
+        leak = "  <-- unbounded?" if now > max(24, 3 * peaks[attr] // 2) else ""
+        print(f"  {attr:14} {first[attr]:6d} {peaks[attr]:6d} {now:6d}{leak}")
+    return len(errors)
+
+
 PROBES = {
     'camera': probe_camera,
     'handling': probe_handling,
@@ -1307,6 +1456,8 @@ PROBES = {
     'wear': probe_wear,
     'chasewear': probe_chase_wear,
     'careful': probe_careful,
+    'soak': probe_soak,
+    'perf': probe_perf,
     'roads': probe_roads,
 }
 

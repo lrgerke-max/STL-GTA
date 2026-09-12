@@ -17299,8 +17299,16 @@ class Game:
         self.side_target_pos = None
         self.smash_targets = []
         if family == mission_logic.VEHICLE_THEFT:
+            # `driver is None` is not decoration: toggle_enter_exit refuses to
+            # jack a car that already has one, so without this the mission can
+            # mark a vehicle the game will never let you enter and the run
+            # becomes quietly impossible. Nothing driven is in self.cars today
+            # - cruisers and roadblock units live in their own lists - so this
+            # changes no behaviour; it stops a future one-line change
+            # elsewhere from breaking a whole mission family.
             candidates = [car for car in self.cars
-                          if car is not self.driving and car.burn <= 0]
+                          if car is not self.driving and car.burn <= 0
+                          and car.driver is None]
             if not candidates:
                 self.add_toast("No suitable ride on the street")
                 return True

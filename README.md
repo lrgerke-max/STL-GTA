@@ -219,7 +219,30 @@ pip install -r requirements.txt && python main.py
   deliberate hole: Kingshighway would take a clean rectangular bite out of the Climatron, and
   Shaw's Garden is a walled 79 acres the real Kingshighway runs beside.
   `tools/playtest.py roads` sweeps every reachable tile at four headings and reports any a car
-  cannot drive off: currently zero.
+  cannot drive off: currently zero. Two more instruments live beside it: `playtest.py soak`
+  runs **five minutes of real play** with police, traffic and population live and reports
+  exceptions, collection growth and invariant drift (currently 18,000 frames, 0 exceptions, no
+  leaks, no pedestrian ever on bad ground), and `playtest.py perf` measures frame time against
+  the 60fps budget under the worst load the game can make - a five-star chase with roadblocks,
+  a full decal set, eight simultaneous explosions and the map screen open. Nothing currently
+  drops a frame, though the headroom is modest and the dummy SDL driver skips the real
+  present, so treat those numbers as a floor rather than a promise.
+- **Every piece of content is provably finishable**: a mission you cannot complete is worse
+  than one that does not exist, and it is invisible to every other test - the state machine is
+  fine, the map is fine, and the run is simply impossible. `tests/test_content_completable.py`
+  walks all three side-mission families, all four courier kinds and all five local challenges
+  from start to payout. It found that the vehicle-theft mission drew its target from
+  `self.cars` **without** the `driver is None` test `toggle_enter_exit` enforces, so it could
+  mark a vehicle the game would never let you enter; and it pins the vehicle gates (the Chain
+  of Rocks run demands the bike, Trash Day the garbage truck) so nobody "fixes" them away.
+- **A corrupt save never costs you the run**: `tests/test_robustness.py` feeds `load_game`
+  **23 malformed files** - empty, truncated, not JSON, a bare list, wrong version, no player
+  key, NaN coordinates, negative cash, `wanted_level: 99`, unknown weapons, ammo as an int -
+  and every one is handled without an exception, leaves the wanted level in range and the
+  player on the map. It also saves mid-drive, mid-chase, mid-mission, mid-challenge, while
+  dead and with the map open, reloads each, and runs 60 frames. Plus 25 death/respawn cycles
+  that must all land somewhere legal and reachable, every weapon fired in all eight headings,
+  melee measured against its own declared range, and 3,000 frames of random input.
 - **Careful driving is a real strategy, and the rig can prove it**: `playtest.py careful`
   runs the same pursuit with the default flat-out driver and with one that cruises at 60% and
   lifts off for anything in its lane. Across 18 runs each, the aggressive driver is **never
