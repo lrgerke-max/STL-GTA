@@ -1,0 +1,683 @@
+<title>STL GTA</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Silkscreen:wght@400;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  /* ---- tokens: light is the bare :root, dark redefines ---------------- */
+  :root {
+    --paper:      #e7e2d5;
+    --paper-2:    #d9d3c3;
+    --ink:        #1b1b1f;
+    --ink-soft:   #4a4a4f;
+    --ink-faint:  #6f6d68;
+    --rule:       #bdb6a4;
+    --stripe:     #8a6a0c;   /* road paint, darkened to read on limestone */
+    --stripe-raw: #ffc428;   /* the game's own HUD gold, for paint marks */
+    --brick:      #7c4032;
+    --park:       #3d4d32;
+    --shot-bg:    #17171b;
+    --shot-edge:  #2b2b30;
+
+    --col: 66ch;
+    --f-display: "Archivo Black", "Arial Black", system-ui, sans-serif;
+    --f-hud: "Silkscreen", ui-monospace, "Courier New", monospace;
+    --f-body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:     #16161a;
+      --paper-2:   #1f1f24;
+      --ink:       #eae5d8;
+      --ink-soft:  #b6b2a6;
+      --ink-faint: #8b8880;
+      --rule:      #33333a;
+      --stripe:    #ffc428;
+      --brick:     #b0614d;
+      --park:      #7d9a67;
+      --shot-bg:   #0e0e11;
+      --shot-edge: #2b2b30;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:     #16161a;
+    --paper-2:   #1f1f24;
+    --ink:       #eae5d8;
+    --ink-soft:  #b6b2a6;
+    --ink-faint: #8b8880;
+    --rule:      #33333a;
+    --stripe:    #ffc428;
+    --brick:     #b0614d;
+    --park:      #7d9a67;
+    --shot-bg:   #0e0e11;
+    --shot-edge: #2b2b30;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 1.0625rem;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* height:auto is load-bearing. Without it, max-width/width:100% shrinks the
+     width while the height="360" attribute holds, and every screenshot is
+     squashed vertically.
+     Smoothing is the right default here: `pixelated` is for UPscaling, and it
+     drops rows and columns when an image is shown smaller than native, which
+     makes pixel art shimmer and go uneven. Only the hero is displayed near
+     1:1, so only the hero gets it. */
+  img {
+    max-width: 100%;
+    height: auto;
+    display: block;
+    image-rendering: auto;
+  }
+
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px 96px; }
+  .col  { max-width: var(--col); }
+
+  /* ---- the road stripe: one signature graphic, spent once ------------- */
+  .stripe {
+    height: 6px;
+    border: 0;
+    margin: 0;
+    background-image: repeating-linear-gradient(
+      to right, var(--stripe-raw) 0 26px, transparent 26px 52px);
+    opacity: .85;
+  }
+
+  /* ---- hero ----------------------------------------------------------- */
+  .hero { background: var(--shot-bg); border-bottom: 1px solid var(--shot-edge); }
+  .hero img { width: 100%; height: auto; image-rendering: pixelated; }
+
+  .masthead { padding: 40px 24px 34px; }
+  .masthead .inner { max-width: 1180px; margin: 0 auto; }
+
+  .eyebrow {
+    font-family: var(--f-hud);
+    font-size: .6875rem;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--stripe);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-size: clamp(2.6rem, 8vw, 4.75rem);
+    line-height: .94;
+    letter-spacing: -.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .tagline {
+    font-family: var(--f-hud);
+    font-size: clamp(.75rem, 2.1vw, .9375rem);
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--brick);
+    margin: 16px 0 0;
+  }
+
+  .standfirst {
+    font-size: 1.1875rem;
+    color: var(--ink-soft);
+    max-width: 60ch;
+    margin: 26px 0 0;
+  }
+
+  /* ---- spec strip ----------------------------------------------------- */
+  .spec {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin: 34px 0 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+  }
+  .spec div {
+    flex: 1 1 150px;
+    padding: 14px 18px 15px;
+    border-right: 1px solid var(--rule);
+  }
+  .spec div:last-child { border-right: 0; }
+  .spec dt {
+    font-family: var(--f-hud);
+    font-size: .625rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 7px;
+  }
+  .spec dd {
+    font-family: var(--f-display);
+    font-size: 1.25rem;
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- sections ------------------------------------------------------- */
+  section { padding: 62px 0 0; }
+  h2 {
+    font-family: var(--f-display);
+    font-size: clamp(1.5rem, 3.4vw, 2.125rem);
+    line-height: 1.08;
+    letter-spacing: -.015em;
+    margin: 26px 0 18px;
+    text-wrap: balance;
+  }
+  h3 {
+    font-family: var(--f-hud);
+    font-size: .8125rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--stripe);
+    margin: 38px 0 14px;
+  }
+  p { margin: 0 0 1.05em; }
+  .col > p:last-child { margin-bottom: 0; }
+  strong { font-weight: 600; color: var(--ink); }
+  em.term { font-style: normal; font-family: var(--f-hud); font-size: .8em; letter-spacing: .04em; }
+
+  /* ---- the city map, given room --------------------------------------- */
+  .plate {
+    margin: 30px 0 0;
+    background: var(--shot-bg);
+    border: 1px solid var(--shot-edge);
+  }
+  .plate img { width: 100%; height: auto; }
+  .plate figcaption {
+    padding: 13px 16px 14px;
+    border-top: 1px solid var(--shot-edge);
+    color: var(--ink-faint);
+    font-size: .9375rem;
+  }
+
+  /* ---- the gallery ---------------------------------------------------- */
+  .places {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+    gap: 26px;
+    margin: 30px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .places li {
+    background: var(--paper-2);
+    border: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+  }
+  .places img { width: 100%; height: auto; border-bottom: 1px solid var(--rule); }
+  .places .body { padding: 14px 16px 17px; }
+  .ref {
+    font-family: var(--f-hud);
+    font-size: .625rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--stripe);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin: 0 0 9px;
+  }
+  .ref .tile { color: var(--ink-faint); }
+  .places h4 {
+    font-family: var(--f-display);
+    font-size: 1.0625rem;
+    margin: 0 0 7px;
+    letter-spacing: -.005em;
+  }
+  .places p { margin: 0; font-size: .96875rem; color: var(--ink-soft); }
+
+  /* ---- the measured table --------------------------------------------- */
+  .scroll { overflow-x: auto; margin: 26px 0 0; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 520px;
+    font-size: .96875rem;
+  }
+  caption {
+    text-align: left;
+    font-family: var(--f-hud);
+    font-size: .625rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 0 0 10px;
+  }
+  th, td { text-align: left; padding: 11px 14px 11px 0; border-bottom: 1px solid var(--rule); }
+  thead th {
+    font-family: var(--f-hud);
+    font-size: .625rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 400;
+  }
+  td.was, td.now { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.was { color: var(--brick); }
+  td.now { color: var(--park); font-weight: 600; }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+
+  /* ---- log ------------------------------------------------------------ */
+  .log { margin: 26px 0 0; padding: 0; list-style: none; }
+  .log li {
+    display: grid;
+    grid-template-columns: 7.5rem 1fr;
+    gap: 18px;
+    padding: 15px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .log li:last-child { border-bottom: 1px solid var(--rule); }
+  .log .sha {
+    font-family: var(--f-hud);
+    font-size: .6875rem;
+    letter-spacing: .06em;
+    color: var(--stripe);
+    padding-top: .28em;
+  }
+  .log h4 { font-family: var(--f-display); font-size: 1rem; margin: 0 0 5px; }
+  .log p { margin: 0; font-size: .96875rem; color: var(--ink-soft); }
+
+  .foot {
+    margin: 72px 0 0;
+    padding: 24px 0 0;
+    border-top: 1px solid var(--rule);
+    font-size: .9375rem;
+    color: var(--ink-faint);
+  }
+  .foot a { color: var(--stripe); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, img:focus-visible { outline: 2px solid var(--stripe-raw); outline-offset: 3px; }
+
+  @media (max-width: 620px) {
+    .log li { grid-template-columns: 1fr; gap: 4px; }
+    .spec div { flex-basis: 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="hero">
+  <img src="shots/title.png" width="1280" height="720"
+       alt="The STL GTA title screen: the Gateway Arch in silhouette against a night skyline, a moon over the Mississippi, and a menu reading Continue, New Game, Quit.">
+</div>
+<hr class="stripe">
+
+<header class="masthead">
+  <div class="inner">
+    <p class="eyebrow">Devlog &middot; top-down driving sandbox</p>
+    <h1>STL GTA</h1>
+    <p class="tagline">A love letter with a wanted level</p>
+    <p class="standfirst">
+      A GTA1-style driving sandbox set in a compressed, stylised St.&nbsp;Louis &mdash;
+      the Arch on the riverfront, Gravois cutting the grid at forty degrees, frozen
+      custard on Chippewa. Every pixel in it is drawn by code at startup. There are
+      no art files.
+    </p>
+
+    <dl class="spec">
+      <div><dt>City</dt><dd>100 &times; 100 tiles</dd></div>
+      <div><dt>Named streets</dt><dd>32</dd></div>
+      <div><dt>Landmarks</dt><dd>23</dd></div>
+      <div><dt>Render buffer</dt><dd>640 &times; 360</dd></div>
+      <div><dt>Tests passing</dt><dd>320</dd></div>
+    </dl>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <section>
+    <div class="col">
+      <h2>A city you can hold in your hand</h2>
+      <p>
+        The map is six thousand four hundred pixels square and traces real geography:
+        the Mississippi down the east side with two bridges over it, a midtown spine
+        running west from downtown to Forest Park, the Delmar Loop up in the
+        north-west, the Hill and Tower Grove down in the south. Compressed, not to
+        scale, and recognisable in the hand.
+      </p>
+      <p>
+        The street grid is deliberately <strong>irregular</strong>. County blocks out
+        west are long, downtown blocks are short, and every line carries a real name.
+        Three arterials refuse the grid entirely &mdash; <em class="term">Gravois</em>,
+        <em class="term">Manchester</em> and <em class="term">West Florissant</em> run
+        at an angle across everything, because that is the single most St.&nbsp;Louis
+        fact about driving here.
+      </p>
+    </div>
+
+    <figure class="plate">
+      <img src="shots/citymap.png" width="1280" height="720"
+           alt="The in-game city map: a grid of coloured blocks with three diagonal arterials cutting across it, street names labelled down the left and along the bottom, and a numbered legend of all 23 landmarks.">
+      <figcaption>
+        The map screen. Street names down the west edge and along the south, the
+        three diagonals cutting the grid, and all twenty-three landmarks numbered.
+      </figcaption>
+    </figure>
+  </section>
+
+  <hr class="stripe" style="margin-top:62px">
+
+  <section>
+    <div class="col">
+      <h2>Places</h2>
+      <p>
+        Each landmark is a hand-written composition rather than a stamped building,
+        and several contain places worth naming in their own right. The reference
+        under each shot is its true position in the tile grid.
+      </p>
+    </div>
+
+    <ul class="places">
+      <li>
+        <img src="shots/stadium.png" width="640" height="360"
+             alt="Busch Memorial Stadium from above: a circular bowl with three rings of red seats, a ring of small arches around the roofline, and a green outfield fan.">
+        <div class="body">
+          <p class="ref"><span>Busch Memorial Stadium</span><span class="tile">tile 76,46</span></p>
+          <h4>Ninety-six arches</h4>
+          <p>
+            Busch II, 1966&ndash;2005. Edward Durell Stone crowned it with a ring of
+            arches answering Saarinen&rsquo;s, a few blocks east. Drawn at the real
+            count.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/arch.png" width="640" height="360"
+             alt="The Gateway Arch from above: two steel legs on concrete pads, the catenary span casting a long stippled shadow across the park, with tree-lined allees and a pond.">
+        <div class="body">
+          <p class="ref"><span>Gateway Arch</span><span class="tile">4th St &middot; tile 86,46</span></p>
+          <h4>You walk under the span</h4>
+          <p>
+            In plan only the two leg footings are solid. The catenary is drawn over
+            the top of everything, and its shadow is a dither stipple so the grass
+            reads through.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/chain_of_rocks.png" width="640" height="360"
+             alt="The Old Chain of Rocks Bridge crossing the Mississippi, with a single sharp bend partway across and pale railings following the turn.">
+        <div class="body">
+          <p class="ref"><span>Old Chain of Rocks Bridge</span><span class="tile">tile 95,3</span></p>
+          <h4>The infamous bend</h4>
+          <p>
+            A twenty-two degree kink mid-river, which is the only thing anybody
+            outside St.&nbsp;Louis knows about this bridge. It turns once, where the
+            real one turns.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/brewery.png" width="640" height="360"
+             alt="The Anheuser-Busch brewery from above: red brick blocks separated by grey service lanes, with pipe bridges and tanks between them.">
+        <div class="body">
+          <p class="ref"><span>Anheuser-Busch Brewery</span><span class="tile">tile 71,70</span></p>
+          <h4>A campus, not a building</h4>
+          <p>
+            Cherokee and Meramec pass straight through it as yard lanes. One hundred
+            and forty-odd brick structures over a hundred and forty-two acres, and
+            you can drive the middle of it.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/gravois.png" width="640" height="360"
+             alt="Gravois Avenue crossing the street grid at a sharp diagonal, its dashed yellow centre line following the true angle through an intersection.">
+        <div class="body">
+          <p class="ref"><span>Gravois Ave</span><span class="tile">tile 38,86</span></p>
+          <h4>Take Gravois, they&rsquo;ll never follow</h4>
+          <p>
+            The diagonals are drawn as one continuous polyline, and the tiles they
+            reserve are derived from that same band &mdash; so the asphalt you can see
+            and the road you can drive are one decision.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/garden.png" width="640" height="360"
+             alt="The Missouri Botanical Garden from above: a geodesic glass dome in banded shades, a dark lake with an island, flower beds and a long glasshouse.">
+        <div class="body">
+          <p class="ref"><span>Missouri Botanical Garden</span><span class="tile">Shaw &middot; tile 33,49</span></p>
+          <h4>Shaw&rsquo;s garden, and the Climatron</h4>
+          <p>
+            Buckminster Fuller&rsquo;s dome, 1960, the first geodesic conservatory.
+            Seiwa-en beside it is real water you have to go round.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/ted_drewes.png" width="640" height="360"
+             alt="Ted Drewes on Chippewa: a low white frozen-custard stand with a red sign and a row of service windows, its lot in front.">
+        <div class="body">
+          <p class="ref"><span>Ted Drewes</span><span class="tile">Chippewa St &middot; tile 8,79</span></p>
+          <h4>There are two of them</h4>
+          <p>
+            This is the Chippewa one. The other is on Grand. People will correct you
+            about this, so both are on the map.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/the_hill.png" width="640" height="360"
+             alt="The Hill: rows of small brick houses on a tight grid, with a church and green-white-and-red fire hydrants on the corners.">
+        <div class="body">
+          <p class="ref"><span>The Hill</span><span class="tile">Arsenal St &middot; tile 27,59</span></p>
+          <h4>Green, white and red hydrants</h4>
+          <p>
+            Every corner. It is the first thing anybody from here notices about the
+            neighbourhood, so the hydrants get repainted at the draw site.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/forest_park.png" width="640" height="360"
+             alt="Forest Park from above: the Grand Basin as a long stretch of water below the terraced slope of Art Hill, with the Art Museum crowning it.">
+        <div class="body">
+          <p class="ref"><span>Forest Park</span><span class="tile">tile 20,34</span></p>
+          <h4>Bigger than Central Park</h4>
+          <p>
+            And St.&nbsp;Louis will tell you so unprompted. Art Hill terraces down to
+            the Grand Basin in four banded stops; the basin is water you go round.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/downtown.png" width="640" height="360"
+             alt="Downtown from above: dark office blocks on a tight grid with crosswalks at the intersections, a Union Station sign and an Imo's storefront.">
+        <div class="body">
+          <p class="ref"><span>Downtown</span><span class="tile">14th St &middot; tile 68,36</span></p>
+          <h4>Streets that go through</h4>
+          <p>
+            Broadway and Tucker used to stop dead inside the district. No street with
+            a name and two lanes ends in a wall any more.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/des_peres.png" width="640" height="360"
+             alt="The River des Peres concrete flood channel running across the bottom of the city, with two named streets bridging over it.">
+        <div class="body">
+          <p class="ref"><span>River des Peres</span><span class="tile">Bevo &middot; tile 40,95</span></p>
+          <h4>A drivable escape route</h4>
+          <p>
+            The concrete channel along the southern edge. Sixteen named streets
+            bridge over it rather than vanishing into it.
+          </p>
+        </div>
+      </li>
+      <li>
+        <img src="shots/delmar.png" width="640" height="360"
+             alt="The Delmar Loop: two rows of small storefronts with coloured awnings facing each other across Delmar, with trolley tracks inset in the street.">
+        <div class="body">
+          <p class="ref"><span>Delmar Loop</span><span class="tile">Skinker Blvd &middot; tile 9,17</span></p>
+          <h4>The trolley is street-running</h4>
+          <p>
+            Rails inset into Delmar, no separate right-of-way and no gates &mdash; and
+            it stops after two miles, like the real one.
+          </p>
+        </div>
+      </li>
+    </ul>
+  </section>
+
+  <hr class="stripe" style="margin-top:62px">
+
+  <section>
+    <div class="col">
+      <h2>What changed lately</h2>
+      <p>
+        The recent work has mostly been making the picture and the collision map agree
+        with each other. Every figure below was measured before and after, because
+        &ldquo;it feels better now&rdquo; is not a number.
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <caption>measured, before &rarr; after</caption>
+        <thead>
+          <tr><th scope="col">What was wrong</th><th scope="col">Was</th><th scope="col">Now</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">Buildings standing inside the painted diagonals</th>
+            <td class="was">53 tiles</td><td class="now">0</td>
+          </tr>
+          <tr>
+            <th scope="row">Named street walled off by a landmark</th>
+            <td class="was">39 tiles</td><td class="now">0</td>
+          </tr>
+          <tr>
+            <th scope="row">Open ground sealed away from the streets</th>
+            <td class="was">4 tiles</td><td class="now">0</td>
+          </tr>
+          <tr>
+            <th scope="row">Hits one spike strip took off a single car</th>
+            <td class="was">9</td><td class="now">1</td>
+          </tr>
+          <tr>
+            <th scope="row">Longest ramp of invisible colour steps in the art</th>
+            <td class="was">38</td><td class="now">3</td>
+          </tr>
+          <tr>
+            <th scope="row">Tiles a car cannot drive off, anywhere on the map</th>
+            <td class="was">&mdash;</td><td class="now">0 of 28,640</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="col">
+      <h3>The bridge was a staircase</h3>
+      <p>
+        Painting the Chain of Rocks one sixty-four-pixel tile at a time, each with a
+        rail along its own top and bottom edge, turned its famous bend into a flight
+        of four stairs. Deck and railings are one polyline now.
+      </p>
+
+      <h3>The dome was an airbrush</h3>
+      <p>
+        The Climatron was a thirty-nine step radial gradient, neighbouring shades two
+        or three values apart &mdash; invisible as steps, and the single biggest
+        departure from the 8- and 16-bit look anywhere in the project. It is four
+        separated bands now, which is also the more honest reading of a dome made of
+        flat triangular panels.
+      </p>
+
+      <h3>The spike strips were a doom spiral</h3>
+      <p>
+        A spike hit deliberately scrubs your speed and cripples your steering &mdash;
+        which is exactly what keeps you sitting on the strip a second later, to be hit
+        again. One strip was taking nine bites out of the same car. A strip shreds a
+        given car once now.
+      </p>
+    </div>
+  </section>
+
+  <hr class="stripe" style="margin-top:62px">
+
+  <section>
+    <div class="col">
+      <h2>Where it stands</h2>
+      <p>
+        Three hundred and twenty tests pass. Alongside them is a playtest rig that
+        prints numbers rather than passing or failing &mdash; turning radius against
+        speed, whether a flat-out escape exists at each wanted level, how much of the
+        population is actually on screen, and a sweep that stands a car on every
+        reachable tile at four headings to find any it cannot drive off.
+      </p>
+      <p>
+        A five-minute soak with police, traffic and pedestrians live runs eighteen
+        thousand frames with no exceptions and no leaks. Nothing drops a frame against
+        the sixty-per-second budget, even in a five-star chase with roadblocks and
+        eight simultaneous explosions.
+      </p>
+      <p>
+        Still to do: audio has never been exercised properly, the gamepad paths are
+        untested, and no amount of scripted driving substitutes for someone actually
+        playing it. That part comes next.
+      </p>
+    </div>
+
+    <ul class="log">
+      <li>
+        <span class="sha">b221845</span>
+        <div>
+          <h4>Stress the content, the saves, the weapons and the clock</h4>
+          <p>Every mission, job and challenge walked to its payout; twenty-three malformed save files fed to the loader; every weapon measured against its own declared range.</p>
+        </div>
+      </li>
+      <li>
+        <span class="sha">bf995e7</span>
+        <div>
+          <h4>Put the pixels back</h4>
+          <p>Banded the gradients, dithered the cast shadows. An alpha-blended shadow invents a new colour for every surface it crosses; a stipple adds none.</p>
+        </div>
+      </li>
+      <li>
+        <span class="sha">cabd97b</span>
+        <div>
+          <h4>Fix the spike-strip doom spiral, and the rig that hid it</h4>
+          <p>The scripted driver was blind inside Forest Park, so half of every chase was spent grinding a lake. Fixing it raised mean speed from 41% of top to 73%.</p>
+        </div>
+      </li>
+      <li>
+        <span class="sha">f1f6a04</span>
+        <div>
+          <h4>Rebuild Busch as the Memorial Stadium it actually was</h4>
+          <p>A squared-off horseshoe of flat red tiles became a true circle with three decks and the crown of ninety-six arches.</p>
+        </div>
+      </li>
+      <li>
+        <span class="sha">d9b50f2</span>
+        <div>
+          <h4>Make the roads agree with the collision map</h4>
+          <p>Fifty-three buildings standing in the middle of three arterials, and thirty-nine tiles of signposted street that were solid brick.</p>
+        </div>
+      </li>
+    </ul>
+
+    <p class="foot">
+      Built in Python and pygame &mdash; one file, twenty-one thousand lines, no art
+      assets. Source at
+      <a href="https://github.com/lrgerke-max/STL-GTA">github.com/lrgerke-max/STL-GTA</a>.
+      Every screenshot on this page is the game rendering itself at 640&nbsp;&times;&nbsp;360
+      and scaled up with nearest-neighbour, which is how it is meant to be seen.
+    </p>
+  </section>
+
+</div>

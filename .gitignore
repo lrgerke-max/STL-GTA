@@ -7,3 +7,9 @@ savegame.dat
 .claude/
 _shots/
 sprites/stlouis-neighborhood-buildings-v*.png
+
+# PyInstaller output (see build_exe.py). The exe is a build artifact, not
+# source: rebuild it with `python build_exe.py` rather than committing 50MB.
+build/
+dist/
+*.spec

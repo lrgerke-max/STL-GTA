@@ -11,6 +11,33 @@ import missions as mission_logic
 import throwables as throwable_logic
 
 GAME_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def asset_path(*parts):
+    """Locate a bundled data file, running from source or from a frozen exe.
+
+    PyInstaller's one-file build unpacks the bundle into a temporary directory
+    and points sys._MEIPASS at it, so anything found relative to __file__ at
+    import time lands in the right place by accident and anything found later
+    does not. Every read-only asset the game ships - the facade atlas, the two
+    music files - goes through here.
+    """
+    root = getattr(sys, '_MEIPASS', None) or GAME_DIR
+    return os.path.join(root, *parts)
+
+
+def beside_executable(*parts):
+    """A path next to the running program, whether that is a .py or a .exe.
+
+    Distinct from asset_path: this is where the PLAYER's own files live, and
+    the frozen temp directory is deleted on exit, so it must never point
+    there.
+    """
+    root = (os.path.dirname(os.path.abspath(sys.executable))
+            if getattr(sys, 'frozen', False) else GAME_DIR)
+    return os.path.join(root, *parts)
+
+
 # Saves belong to the player, not whichever folder happened to be current when
 # a desktop shortcut launched the game. Keep the old repo-adjacent file as a
 # read-only migration source so existing progress is not stranded.
@@ -18,7 +45,7 @@ _user_data_root = (os.environ.get('LOCALAPPDATA')
                    or os.environ.get('XDG_DATA_HOME')
                    or os.path.join(os.path.expanduser('~'), '.local', 'share'))
 SAVE_PATH = os.path.join(_user_data_root, 'STL-GTA', 'savegame.json')
-LEGACY_SAVE_PATH = os.path.join(GAME_DIR, 'savegame.json')
+LEGACY_SAVE_PATH = beside_executable('savegame.json')
 
 # ============================================================
 # STL-GTA: a gritty, top-down, GTA1-style driving sandbox
@@ -3763,9 +3790,8 @@ HOOD_ATLAS_ALIAS = {
 # Native 64px hard-pixel atlas. It is authored at runtime size by
 # tools/build_pixel_facades.py: no high-resolution source art, resampling, or
 # antialiased alpha enters the game. Downtown receives two extra roof types.
-BUILDING_ATLAS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), 'sprites',
-    'stlouis-neighborhood-buildings-pixel.png')
+BUILDING_ATLAS_PATH = asset_path(
+    'sprites', 'stlouis-neighborhood-buildings-pixel.png')
 BUILDING_ATLAS_PATHS = (BUILDING_ATLAS_PATH,)  # compatibility / test reference
 BUILDING_ATLAS_COLUMNS = 6
 BUILDING_ATLAS_ROWS = 4
@@ -11992,10 +12018,8 @@ you is far more noticeable than a missing bin-lid clatter:
 import array as _array
 
 snd_SR = 22050
-GAME_MUSIC_SOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                      'music', 'AUD_HO1036.mid')
-GAME_MUSIC_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               'music', 'gloria-8bit.wav')
+GAME_MUSIC_SOURCE_PATH = asset_path('music', 'AUD_HO1036.mid')
+GAME_MUSIC_PATH = asset_path('music', 'gloria-8bit.wav')
 GAME_MUSIC_VOLUME = 0.32
 snd_CH_ENGINE_A = 0
 snd_CH_ENGINE_B = 1

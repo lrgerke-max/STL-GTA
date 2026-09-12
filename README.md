@@ -67,6 +67,16 @@ pip install -r requirements.txt && python main.py
   AI-car pairs went **mean 2.08 / worst 9 -> mean 0.38 / worst 3**, stalls
   **0.49 -> 0.19**, and mean traffic speed **1.93 -> 2.34** of a 3.25 cap.
   Nothing respawns on a spot another vehicle is already sitting on.
+- **One file you can send somebody**: `python build_exe.py` produces a single
+  `dist/STL-GTA.exe` (~22MB) that needs no Python, no pygame and no install on the machine it
+  lands on. The facade atlas and both music files are bundled inside it and found through
+  `main.asset_path`, which knows about PyInstaller's temporary unpack directory - the one
+  reason a frozen build can locate them at all. Saves stay in `%LOCALAPPDATA%\STL-GTA`, never
+  inside the bundle, so dropping in a newer exe keeps existing progress. It is unsigned, so
+  the first run shows a SmartScreen warning to click past.
+- **There is a devlog page** in `docs/` - the title screen, the city map, twelve places each
+  captioned with its true tile coordinate, and the measured before/after table. Rebuild its
+  screenshots with `python tools/render_devlog_shots.py`.
 - **It still has to look like 1997**: the facade atlas already had a palette discipline;
   the hand-made landmark compositions did not, and they had drifted in two measurable ways.
   The **Climatron's dome was a thirty-nine-step radial interpolation** - a fresh colour every
