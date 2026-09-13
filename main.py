@@ -1,5 +1,6 @@
 import pygame
 import argparse
+import asyncio
 import collections
 import sys
 import os
@@ -11,6 +12,12 @@ import missions as mission_logic
 import throwables as throwable_logic
 
 GAME_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Running inside a browser (pygbag/WebAssembly) rather than on a desktop.
+# Three things differ there and nowhere else: the frame loop has to yield to
+# the browser instead of owning the thread, there is no window to make
+# fullscreen, and the filesystem is a scratch space that vanishes on reload.
+IS_WEB = sys.platform in ("emscripten", "wasi")
 
 
 def asset_path(*parts):
@@ -44,6 +51,11 @@ def beside_executable(*parts):
 _user_data_root = (os.environ.get('LOCALAPPDATA')
                    or os.environ.get('XDG_DATA_HOME')
                    or os.path.join(os.path.expanduser('~'), '.local', 'share'))
+if IS_WEB:
+    # Emscripten's filesystem is in-memory: saving works for the session and
+    # is gone on reload. That is the honest behaviour for a browser demo, and
+    # it beats the alternative of every save raising through the HUD.
+    _user_data_root = '/tmp'
 SAVE_PATH = os.path.join(_user_data_root, 'STL-GTA', 'savegame.json')
 LEGACY_SAVE_PATH = beside_executable('savegame.json')
 
@@ -13827,7 +13839,10 @@ class Game:
         # RESIZABLE lets the window be dragged to any size. F11 toggles it.
         self._headless = os.environ.get("SDL_VIDEODRIVER") == "dummy"
         self.fullscreen = False
-        if self._headless:
+        if self._headless or IS_WEB:
+            # The browser lands here too: the canvas is already the window and
+            # the page scales it, so those flags buy nothing and only risk a
+            # driver refusal.
             self.window = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
         else:
             flags = pygame.RESIZABLE | pygame.SCALED
@@ -21598,7 +21613,16 @@ class Game:
         """Whether wall-clock time should be converted into simulation steps."""
         return self.state in (STATE_PLAYING, STATE_DEAD) and not self.show_map
 
-    def run(self):
+    async def run_async(self):
+        """The frame loop. Async so the same loop can drive a browser.
+
+        A desktop game owns its thread and can spin here forever. In
+        WebAssembly the browser owns the thread: the loop has to hand it back
+        once per frame or the page never paints, never delivers input, and is
+        eventually killed as unresponsive. `await asyncio.sleep(0)` is that
+        handoff, and it costs nothing on the desktop, so there is one loop
+        rather than two that can drift apart.
+        """
         print("=" * 60)
         print("  STL-GTA: St. Louis Open-World Sandbox")
         print("=" * 60)
@@ -21622,10 +21646,15 @@ class Game:
                 self.accumulator = 0.0      # do not bank time while paused / mapping
                 self.sim_steps = 0
             self.draw()
+            await asyncio.sleep(0)      # give the browser its thread back
 
         if self.music_started and pygame.mixer.get_init() is not None:
             pygame.mixer.music.stop()
         pygame.quit()
+
+    def run(self):
+        """Play the game on a desktop. Blocks until the player quits."""
+        asyncio.run(self.run_async())
 
     # ---------------- headless ----------------
     def run_headless(self, frames, shot_path=None, seed=None):
@@ -21804,5 +21833,19 @@ def main(argv=None):
     return 0
 
 
+async def web_main():
+    """Entry point for the browser build (see build_web.py).
+
+    pygbag runs main.py inside the page's own event loop, so the game has to
+    be awaited rather than called: there are no command-line arguments to
+    parse, and nothing to exit to afterwards.
+    """
+    game = Game(start_fullscreen=False)
+    await game.run_async()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    if IS_WEB:
+        asyncio.run(web_main())
+    else:
+        sys.exit(main())

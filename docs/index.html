@@ -307,6 +307,32 @@
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
+
+  /* ---- play call-to-action -------------------------------------------- */
+  .playcta {
+    margin: 1.6rem 0 0;
+    padding: 1rem 1.15rem;
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--stripe);
+    background: var(--paper-2);
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: .55rem 1rem;
+  }
+  .playcta a {
+    font-family: var(--f-hud);
+    font-size: .95rem;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 2px solid var(--stripe);
+    padding-bottom: 1px;
+  }
+  .playcta a:hover, .playcta a:focus { border-bottom-color: var(--ink); }
+  .playcta small {
+    font-family: var(--f-body);
+    color: var(--ink-faint);
+    font-size: .88rem;
+  }
 </style>
 
 <div class="hero">
@@ -325,6 +351,13 @@
       the Arch on the riverfront, Gravois cutting the grid at forty degrees, frozen
       custard on Chippewa. Every pixel in it is drawn by code at startup. There are
       no art files.
+    </p>
+
+    <p class="playcta">
+      <a href="play/">Play it in your browser</a>
+      <small>No install &mdash; about 3.5&nbsp;MB. Needs a keyboard, so open it on a
+      laptop or desktop. <a href="https://github.com/lrgerke-max/STL-GTA/releases">Windows
+      download</a> runs smoother.</small>
     </p>
 
     <dl class="spec">

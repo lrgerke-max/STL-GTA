@@ -74,9 +74,24 @@ pip install -r requirements.txt && python main.py
   reason a frozen build can locate them at all. Saves stay in `%LOCALAPPDATA%\STL-GTA`, never
   inside the bundle, so dropping in a newer exe keeps existing progress. It is unsigned, so
   the first run shows a SmartScreen warning to click past.
+- **A link you can send somebody**: `python build_web.py` produces a browser build in
+  `docs/play/` - no install, no SmartScreen, and it runs on a Mac or a Chromebook. Two things
+  made it possible. The frame loop became `async` (`Game.run_async`): a desktop game owns its
+  thread, but in the browser the page owns it, and a loop that never yields never paints, so
+  the loop hands the thread back once per frame with `await asyncio.sleep(0)` - free on the
+  desktop, which is why there is one loop and not two that can drift apart. And the
+  soundtrack shrank: the desktop WAV is 8.6MB of 195-second PCM, 39% of the exe, and a
+  browser downloads the whole bundle before the first frame, so the web build re-renders it
+  from the 7KB MIDI at four arranged cycles instead of nine - the renderer varies each cycle
+  on `cycle % 4` and fades the file's own ends to zero, so four is the shortest cut that
+  plays every variation and still loops seamlessly. **3.5MB total.** Measured inside
+  WebAssembly with a full city (32 cars, 72 pedestrians): **sim 38ms + draw 21ms = 59ms a
+  frame, about 17fps**, against 10.2ms native - pure-Python work runs about 5.8x slower
+  there. Playable, and choppier than the exe; `MAX_SIM_STEPS` already stops a slow frame
+  from spiralling, so it degrades by slowing down rather than by coming apart.
 - **There is a devlog page** in `docs/` - the title screen, the city map, twelve places each
   captioned with its true tile coordinate, and the measured before/after table. Rebuild its
-  screenshots with `python tools/render_devlog_shots.py`.
+  screenshots with `python tools/render_devlog_shots.py`. It links to the playable build.
 - **It still has to look like 1997**: the facade atlas already had a palette discipline;
   the hand-made landmark compositions did not, and they had drifted in two measurable ways.
   The **Climatron's dome was a thirty-nine-step radial interpolation** - a fresh colour every
